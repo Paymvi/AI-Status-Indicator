@@ -1,0 +1,9 @@
+{
+  "soundOnDone": true,
+  "toastOnDone": false,
+  "soundOnNeedsYou": true,
+  "toastOnNeedsYou": true,
+  "soundOnError": true,
+  "toastOnError": true,
+  "staleHours": 24
+}

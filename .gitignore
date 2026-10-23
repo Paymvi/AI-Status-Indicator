@@ -1,24 +1,37 @@
-# Logs
-logs
+# Claude Status runtime state (created at runtime in the install folder; never commit)
+state/
+position.txt
+debug.on
+
+# Generated binaries
+*.exe
+*.dll
+*.pdb
+bin/
+obj/
+
+# Temporary / log files
+*.tmp
 *.log
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-pnpm-debug.log*
-lerna-debug.log*
 
-node_modules
-dist
-dist-ssr
-*.local
+# Local Claude Code settings / backups (never commit your own settings)
+settings.json
+settings.local.json
+settings.json.bak*
+*.bak
+*.bak-*
+.claude/
 
-# Editor directories and files
-.vscode/*
-!.vscode/extensions.json
-.idea
-.DS_Store
-*.suo
-*.ntvs*
-*.njsproj
-*.sln
-*.sw?
+# Environment / secrets files (not used by this project; never commit them)
+.env
+.env.*
+
+# Windows
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Editors
+.vscode/
+.idea/
+*.swp
