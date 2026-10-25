@@ -1,37 +1,120 @@
 # Claude Status
 
-> A tiny always-on-top Windows status indicator for Claude Code that shows when Claude is working, finished, waiting for you, or encountered an error.
+> A tiny always-on-top Windows utility for Claude Code that shows, at a glance, which of your Claude sessions are working, finished, waiting for you, or stopped with an error.
 
 ```text
-┌──────────────────────────────┐
-│ Claude · my-project        × │
-│ ● WORKING                    │
-└──────────────────────────────┘
+WORKER BOARD (default)                          COMPACT
+┌──────────────────────────────────────┐       ┌──────────────────────────────┐
+│ CLAUDE WORKERS               ▭  ⚙  × │       │ Claude · Portal            × │
+├──────────────────────────────────────┤       │ ● NEEDS YOU                  │
+│ ● Portal              NEEDS YOU · 2m │       └──────────────────────────────┘
+│ ● Booking Software #1 WORKING · 04:32│
+│ ● Booking Software #2 WORKING · 01:08│
+│ ● Website             DONE · 6m ago ×│
+└──────────────────────────────────────┘
 ```
 
 ## Why?
 
-When Claude Code is working on something that takes several minutes, you probably switch to something else: a browser, another editor, email. Then you keep jumping back to the Claude window just to check whether it has finished, or whether it has been sitting there for ten minutes waiting for you to approve a command.
+When Claude Code is working on something that takes several minutes, you probably switch to something else: a browser, another editor, email. Then you keep jumping back to the Claude window just to check whether it has finished, or whether it has been sitting there for ten minutes waiting for you to approve a command. With several Claude sessions running at once, that gets worse.
 
-**Claude Status** fixes that. It keeps a very small indicator floating above your other windows, so you can see Claude's state at a glance from anywhere on your desktop. It plays a soft sound when Claude finishes and shows a Windows notification when Claude needs you.
+**Claude Status** fixes that. It keeps a very small window floating above your other windows, so you can see every Claude session's state from anywhere on your desktop, and click one to jump straight to it. It plays a soft sound when Claude finishes and shows a Windows notification when Claude needs you.
 
 ## States
 
 | Indicator | Meaning |
 |---|---|
 | 🟡 **WORKING** | Claude is processing your prompt. |
-| 🟢 **DONE** | Claude finished and is waiting for your next prompt. Plays a subtle sound. |
+| 🟢 **DONE** | Claude finished and is waiting for your next prompt. Plays a subtle sound. Stays on the Worker Board until you dismiss it. |
 | 🔴 **NEEDS YOU** | Claude is blocked waiting for input or a permission approval. Shows a notification. |
 | 🔴 **ERROR** | The Claude turn ended because of an API error (rate limit, auth, server error, …). Shows a notification with the error type. |
-| ⚪ **IDLE** | No active Claude Code sessions. |
+| ⚪ **IDLE** / *No Claude workers* | No sessions to show. |
 
 Every state is shown with **both color and text**, so it's readable regardless of color perception.
+
+## Worker Board
+
+**Worker Board** is the default view. Its heading is **Claude Workers**, and it shows one compact row per Claude Code session:
+
+```text
+CLAUDE WORKERS
+
+🔴 Portal                NEEDS YOU · 2m
+🔴 Analytics             ERROR · rate_limit · 3m
+🟡 Booking Software #1   WORKING · 04:32
+🟡 Booking Software #2   WORKING · 01:08
+🟢 Website               DONE · 6m ago      ×
+```
+
+- **What's listed:** every active session (WORKING, NEEDS YOU, ERROR) plus every **DONE** session you haven't dismissed yet.
+- **DONE rows stay until you dismiss them.** They don't time out after 10 minutes, 24 hours or when the session closes. Click the small **×** at the end of a DONE row to dismiss it. Dismissing only removes Claude Status's own row: it doesn't touch Claude Code, the session, VS Code or your files, and it sends nothing to Claude. If that same session later gets a new prompt, it simply reappears.
+- **Click a row** (anywhere except the ×) to bring that worker's own window to the front: its terminal window, or its VS Code window. See [Clicking a worker](#clicking-a-worker) for exactly how that works and when it declines.
+- **Timers** update live:
+
+  | Row | Timer shows |
+  |---|---|
+  | WORKING | how long it has been working on the current prompt: `04:32`, then `1h 05m` |
+  | NEEDS YOU | how long it has been waiting for you: `<1m`, `2m`, `1h 5m` |
+  | DONE | how long ago it finished: `just now`, `6m ago`, `2h ago`, `3d ago` |
+  | ERROR | the error type (only a short identifier such as `rate_limit` or `auth`) and how long ago: `ERROR · rate_limit · 3m` |
+
+  Timers are calculated from timestamps stored once per state change; nothing is rewritten every second. Tool calls during WORKING don't restart the WORKING timer; going WORKING → NEEDS YOU → WORKING does.
+- **Friendly names (aliases).** Rows show a friendly name for each project folder, such as `Toah_Nipi_Booking_Software` → **Booking Software**. Folders without an alias are shown with underscores turned into spaces (`My_Project` → `My Project`). See [Configuration](#configuration).
+- **Several workers in one project** are numbered: `Booking Software #1`, `#2`, `#3`. Numbers follow the order the sessions first appeared, and a worker keeps its number while it's on the board, so rows never swap identities when states change. If only one worker exists for a project, there's no `#1`.
+- **Ordering** (Settings → *Worker ordering*):
+  - **Urgency** (default): NEEDS YOU, then ERROR, then WORKING, then DONE; within each, the most recent state change first.
+  - **Most recent**: the most recently updated worker first.
+- **Optional summary line** (Settings → *Show worker summary*, off by default): `1 needs you · 2 working · 2 done` under the heading. When it's off, no space is reserved for it.
+- **Size.** About 276 px wide (scaled for your DPI). The window grows and shrinks with the number of rows. It grows downward until it reaches the bottom of the monitor's working area (never under the taskbar), and then only the list scrolls (mouse wheel or the thin scrollbar) while the header stays visible. If you park the window so low that fewer than four rows would fit, it moves up just enough to show them, without changing your saved position.
+- **Empty board:** a single line, *○ No Claude workers*.
+
+### Switching views
+
+| To… | Do this |
+|---|---|
+| Switch to **Compact** | Click the small pill icon (▭) in the Worker Board header |
+| Switch to **Worker Board** | Hover over Compact and click the small list icon (☰) that appears next to the × |
+| Either, from the tray | Right-click the tray icon (or the window) → **View** → *Worker Board* / *Compact* |
+| Choose the view at startup | Settings (⚙) → *Startup view* |
+
+Every icon has a tooltip. Switching views keeps the window anchored at its saved position and never loses any session state.
+
+### Compact
+
+**Compact** is the original Claude Status pill: 124 × 38 px, the same layout, colors, sounds and notifications as before. With several sessions it shows *Claude (N sessions)* and surfaces **one** session, chosen by the same *Worker ordering* setting: with **Urgency** it shows the session that most needs attention (e.g. `NEEDS YOU` even if another session updated more recently), with **Most recent** the latest one. The view toggle and the ⚙ only appear while the mouse is over it, so it stays as small and quiet as before.
+
+### Settings
+
+The ⚙ button (in the Worker Board header, or in Compact while hovering) opens a small settings window. Changes apply immediately and are saved to `config.json`:
+
+- **Worker ordering:** Urgency / Most recent
+- **Show worker summary:** on / off
+- **Startup view:** Worker Board / Compact (used the next time Claude Status starts)
+- **Edit project aliases (config.json)…** opens `config.json` in Notepad. Saved alias changes apply as soon as you save the file.
+
+### Clicking a worker
+
+Clicking a row tries to bring **that specific session's** window to the front. Precision matters more than always succeeding: if Claude Status can't be sure which window belongs to the worker, it **does not guess**. It shows a short note instead (for example *Couldn't identify that worker's window*) and leaves focus where it was. It never focuses a window just because its folder name matches.
+
+How a session is matched to a window:
+
+1. Each hook call records the Claude Code process that owns the session: its process ID (`CLAUDE_PID`, which Claude Code sets for hooks) **plus that process's start time**. Together these identify one specific process; if Windows later reuses the same process ID for another program, the start time no longer matches and the row is treated as ended.
+2. When you click, Claude Status checks that this exact process is still running. If it isn't (the session was closed), it says so and does nothing else.
+3. **Terminal sessions** (Windows Terminal, classic console, other console hosts): Claude Status asks Windows which console window that process is attached to. For Windows Terminal this gives the **exact Windows Terminal window** hosting the session, even when several Windows Terminal windows are open.
+4. **Otherwise** (e.g. the Claude Code **VS Code extension**, or `claude` in VS Code's integrated terminal): it walks up the process tree from the Claude process to the nearest program that owns windows on screen. Each step is verified (a parent must have started before its child) so a recycled process ID can't redirect it. If that program has **exactly one** window, that's the target.
+5. **VS Code with several windows open.** All VS Code windows belong to one `Code.exe` process, so the process tree alone can't say which window hosts the session. When you send a session a prompt, Claude Status (if running) notes which window was in the foreground at that moment, but **only if that window belongs to the same VS Code process** as the session. Clicking that row later focuses that window, after re-checking the window still belongs to the same (not reused) process. Until a session has had a prompt sent while Claude Status was running, clicking it shows *Couldn't identify that worker's window* instead of guessing.
+
+What this can't do:
+
+- **Two Claude sessions in the same VS Code window** (or two tabs in one Windows Terminal window): the correct window comes to the front, but Windows offers no supported way to select a specific Claude tab or terminal tab inside it. The Claude Code extension has a `vscode://anthropic.claude-code/open?session=…` link, but VS Code delivers such links to whichever VS Code window was focused last and the extension *opens* (resumes) the session there, which could open it in the wrong window, so Claude Status deliberately doesn't use it.
+- Sessions recorded by the previous version of Claude Status (before upgrading) have no process identity yet; they become clickable after their next prompt.
+- Clicking a worker is the **only** thing that ever moves keyboard focus. State changes, sounds, notifications, view switching and resizing never take focus.
 
 ## How it works
 
 Claude Status uses Claude Code's official **lifecycle hooks**. It does **not**:
 
-- scrape the screen or watch VS Code pixels;
+- scrape the screen, read window titles or watch VS Code pixels;
 - poll Anthropic or make any network requests;
 - store your prompts or Claude's responses. (Claude Code hands each hook its event data, which for a new prompt includes the prompt text. `hook.ps1` only extracts a few fields from it and never saves the prompt.)
 
@@ -41,13 +124,13 @@ Claude Code
     │ lifecycle hooks (UserPromptSubmit, Stop, StopFailure, Notification, ...)
     ▼
 hook.ps1
-    │ writes a tiny JSON file (state, folder name, timestamp)
+    │ writes a tiny JSON file (state, folder name, timestamps, Claude process ID)
     ▼
 state\sessions\<session-id>.json
     │
     │ file-system watcher (instant, no polling)
     ▼
-Claude Status indicator
+Claude Status (Worker Board / Compact)
     │
     ├── 🟡 WORKING
     ├── 🟢 DONE
@@ -68,31 +151,62 @@ Each hook call runs `hook.ps1`, which writes one small file per Claude Code sess
 | `PermissionRequest` | NEEDS YOU |
 | `PreToolUse` for `AskUserQuestion` | NEEDS YOU |
 | `PostToolUse` / `PostToolUseFailure` | back to WORKING, but only if the state was NEEDS YOU (i.e. you answered) |
-| `SessionEnd` | removes that session's state file |
+| `SessionEnd` | a **DONE** session is kept (until you dismiss it); a WORKING / NEEDS YOU / ERROR session's file is removed |
 
-Ordinary notifications (such as the "Claude is idle" reminder) are ignored. The hooks that don't need to block (`PermissionRequest`, `PreToolUse`, `PostToolUse*`) run asynchronously so they never slow Claude down.
+Ordinary notifications (such as the "Claude is idle" reminder) are ignored. The hooks that don't need to block (`PermissionRequest`, `PreToolUse`, `PostToolUse*`) run asynchronously so they never slow Claude down. The hook configuration itself is unchanged from earlier versions.
+
+### Session lifecycle in detail
+
+| Situation | What happens |
+|---|---|
+| WORKING → SessionEnd | row removed |
+| NEEDS YOU → SessionEnd | row removed |
+| ERROR → SessionEnd | row removed |
+| DONE → SessionEnd | row **kept** until you dismiss it |
+| DONE dismissed → SessionEnd | nothing (already gone) |
+| DONE dismissed → new prompt in the same session | the session reappears as WORKING |
+| Claude process crashed / terminal killed while WORKING, NEEDS YOU or ERROR | row removed within seconds (its recorded Claude process is gone) |
+| No update for `staleHours` while WORKING, NEEDS YOU or ERROR | row removed |
+| DONE for any length of time | kept; `staleHours` never removes DONE rows |
 
 ### Privacy: what is stored
 
 Each session file contains only:
 
 ```json
-{"v":1,"session_id":"…","state":"WORKING","event":"UserPromptSubmit","detail":"","project":"my-project","updated":"2026-10-23T21:00:00Z"}
+{"v":2,"session_id":"…","state":"WORKING","event":"UserPromptSubmit","detail":"","project":"my-project",
+ "updated":"2026-10-25T21:00:00Z","state_since":"2026-10-25T20:55:28Z","first_seen":"2026-10-25T20:40:02Z",
+ "claude_pid":12345,"claude_started":"2026-10-25T20:39:58.1234567Z"}
 ```
 
-`project` is just the name of the folder Claude is working in (not the full path), and `detail` is only the notification type, the name of the tool awaiting approval (e.g. `Bash`), or the API error type. **Prompts, Claude's messages, tool inputs, and file contents are never written anywhere.**
+| Field | Meaning |
+|---|---|
+| `project` | Just the name of the folder Claude is working in (not the full path). |
+| `detail` | Only the notification type, the name of the tool awaiting approval (e.g. `Bash`), or the API error type. Stored only as a short identifier (letters, digits, `_ . : -`). |
+| `updated` | When the last hook event arrived. |
+| `state_since` | When the current state began (drives the timers). New in v2. |
+| `first_seen` | When the session first appeared (keeps `#1/#2` numbering stable). New in v2. |
+| `claude_pid`, `claude_started` | The process ID and start time of the Claude Code process for this session, used only to find its window and to notice when it has exited. New in v2. |
 
-The only other files Claude Status writes are the indicator's window position (`position.txt`), the `settings.json` backups the installer/uninstaller make next to your settings, and, only if you turn on debugging, `debug.log`. All of them stay on your computer; nothing is sent anywhere.
+**Prompts, Claude's messages, tool inputs, Bash commands, tool output, file contents, transcript paths and window titles are never written anywhere.**
+
+The other files Claude Status writes, all on your computer only:
+
+- `state\windows.json`: for sessions in an app with several windows (e.g. two VS Code windows), the window that was in front when you last prompted that session: `{"<session-id>": {"hwnd": 67076, "pid": 21748, "started": "…"}}`. That's a window handle number plus the owning process ID and start time, with no window title or content. Entries are removed when their session disappears from the board.
+- `position.txt` (window position), `config.json` (your settings), the `settings.json` backups the installer/uninstaller make next to your settings, and, only if you turn on debugging, `debug.log`.
+
+Nothing is sent anywhere. Older v1 state files from previous versions are read as-is (their timers start from their last update) and turn into v2 files the next time their session fires a hook; you never need to delete them.
 
 ## Features
 
-- Tiny always-on-top window (about 124 × 38 px), DPI-aware and readable on dark desktops
+- **Worker Board** (default): one row per Claude session with friendly names, live timers, urgency or recency ordering, DONE rows that stay until dismissed, and click-to-focus
+- **Compact**: the original tiny pill (124 × 38 px), still available with one click
+- True always-on-top windows (native `WS_EX_TOPMOST`, no polling) that **never steal keyboard focus** when anything changes
+- Auto-sizing to the number of workers; scrolls only the list once it reaches the bottom of the screen; DPI-aware (tested at 100/125/150/200 %)
 - Draggable anywhere; remembers its position
-- **Never steals keyboard focus** when the state changes
 - Subtle sound when Claude is DONE; Windows notifications for NEEDS YOU and ERROR (all configurable)
-- System-tray icon whose color matches the state
+- System-tray icon whose color matches the most important state, with a **View** menu
 - Uses real Claude Code lifecycle hooks, works **globally across all your projects**
-- Session-aware: each Claude Code session has its own state file; shows "(2 sessions)" and lists them on right-click when you run several
 - User-level install, no administrator rights
 - No Node.js, Vite, Python, or other runtime needed; it uses only what ships with Windows
 - No network connection required; negligible CPU while idle
@@ -104,7 +218,7 @@ The only other files Claude Status writes are the indicator's window position (`
 | **Windows 10 or 11** | Uses WinForms, Windows notifications, and the Startup folder. |
 | **Windows PowerShell 5.1** | Built into Windows (`powershell.exe`). PowerShell 7 is *not* required; if you run the installer from PowerShell 7 it automatically hands off to 5.1. |
 | **.NET Framework 4.5+** | Built into Windows 10/11. The indicator's small C# source is compiled on the fly by PowerShell's `Add-Type`; no Visual Studio or SDK needed. |
-| **Claude Code** with hooks support | The CLI and/or the Claude Code VS Code extension. Developed and tested with Claude Code **2.1.308**. Needs a version that supports the `StopFailure` and `PermissionRequest` hook events. |
+| **Claude Code** with hooks support | The CLI and/or the Claude Code VS Code extension. Developed and tested with Claude Code **2.1.308–2.1.310**. Needs a version that supports the `StopFailure` and `PermissionRequest` hook events. Clicking a worker to focus its window uses the `CLAUDE_PID` variable Claude Code sets for hooks. |
 
 You do **not** need administrator rights, Node.js, Git (you can download the ZIP), or an internet connection for the indicator itself.
 
@@ -133,7 +247,7 @@ You do **not** need administrator rights, Node.js, Git (you can download the ZIP
 
 3. **Pick up the hooks in Claude Code.** New Claude Code sessions use them automatically. In a session that was already open, run `/hooks` (or restart the session).
 
-The indicator appears near the bottom-right of your screen. Send Claude a prompt and it turns 🟡.
+The Worker Board appears near the bottom-right of your screen. Send Claude a prompt and a 🟡 row appears.
 
 ### What the installer does
 
@@ -159,9 +273,10 @@ The paths are resolved for whoever runs it (e.g. `C:\Users\Alice\.claude\status-
 Run `install.ps1` again after pulling a newer version. It's safe to run repeatedly:
 
 - application files are replaced with the new version, and a running indicator is restarted;
-- your `config.json` choices are kept (new options are added with their defaults);
+- your `config.json` choices are kept (new options are added with their defaults: when updating from a version without Worker Board, you get `startupView`, `workerSort`, `showWorkerSummary` and `projectAliases`, so **Worker Board becomes your view**; set *Startup view* to Compact in Settings if you prefer the old look);
+- your saved window position, autostart shortcut and existing session files are kept;
 - Claude Status hooks are never duplicated, and old entries are replaced;
-- if nothing changed, `settings.json` isn't touched (and no backup is made);
+- if nothing changed, `settings.json` isn't touched (and no backup is made). Updating to the Worker Board version doesn't change the hooks;
 - the autostart shortcut is overwritten, never duplicated.
 
 | Installer option | Effect |
@@ -175,10 +290,14 @@ Run `install.ps1` again after pulling a newer version. It's safe to run repeated
 | To… | Do this |
 |---|---|
 | **Start** | Double-click `%USERPROFILE%\.claude\status-indicator\start-indicator.vbs` |
-| **Stop** | Click the **×** on the indicator, right-click it → **Exit**, or right-click the tray icon → **Exit** |
-| **Move** | Drag it anywhere |
+| **Stop** | Click the **×** in the header (top-right), right-click it → **Exit**, or right-click the tray icon → **Exit** |
+| **Move** | Drag the header (Worker Board) or anywhere (Compact) |
+| **Switch view** | The small icon next to ⚙, or tray / right-click → **View** |
+| **Bring a worker's window forward** | Click its row |
+| **Dismiss a finished worker** | Click the **×** at the end of its DONE row |
+| **Settings** | ⚙, or tray / right-click → **Settings…** |
 | **Reset position** | Right-click → **Reset position** |
-| **See all sessions** | Right-click the indicator or the tray icon |
+| **See all sessions** | The Worker Board, or right-click the indicator or the tray icon |
 | **Bring it back if hidden** | Left-click the tray icon |
 
 From PowerShell:
@@ -233,7 +352,7 @@ If the wizard says it can't find the file, use this instead: press **Win + R**, 
 
 ## Configuration
 
-Edit `%USERPROFILE%\.claude\status-indicator\config.json`, then restart the indicator:
+`%USERPROFILE%\.claude\status-indicator\config.json`. The view, ordering and summary options can be changed from the ⚙ Settings window; everything else is edited here. The indicator picks up saved changes automatically.
 
 ```json
 {
@@ -243,7 +362,16 @@ Edit `%USERPROFILE%\.claude\status-indicator\config.json`, then restart the indi
   "toastOnNeedsYou": true,
   "soundOnError": true,
   "toastOnError": true,
-  "staleHours": 24
+  "staleHours": 24,
+  "startupView": "workerBoard",
+  "workerSort": "urgency",
+  "showWorkerSummary": false,
+  "projectAliases": {
+    "Toah_Nipi_Booking_Software": "Booking Software",
+    "Toah_Nipi_Website": "Website",
+    "Toah_Nipi_Portal": "Portal",
+    "Guest_Booking_Form": "Guest Form"
+  }
 }
 ```
 
@@ -251,9 +379,13 @@ Edit `%USERPROFILE%\.claude\status-indicator\config.json`, then restart the indi
 |---|---|
 | `soundOn…` | Play a Windows system sound on that state. |
 | `toastOn…` | Show a Windows notification on that state. |
-| `staleHours` | Forget sessions that haven't changed for this long (e.g. a crashed session that never sent `SessionEnd`). |
+| `staleHours` | Forget WORKING / NEEDS YOU / ERROR sessions that haven't changed for this long (e.g. a crashed session that never sent `SessionEnd`). **DONE sessions are never removed automatically**; dismiss them with their ×. |
+| `startupView` | `"workerBoard"` (default) or `"compact"`: the view Claude Status opens in. |
+| `workerSort` | `"urgency"` (default: NEEDS YOU, ERROR, WORKING, DONE) or `"recent"` (most recently updated first). Used by both views. |
+| `showWorkerSummary` | `true` shows a one-line summary under the Worker Board heading. Default `false`. |
+| `projectAliases` | Friendly names: `"Folder_Name": "Friendly Name"`. The folder name is matched case-insensitively against the name of the folder Claude is working in. Folders without an alias get their underscores replaced with spaces. Several folders may share one alias; their workers are then numbered together. |
 
-Notifications follow Windows' Do Not Disturb / Focus settings and appear as coming from "Windows PowerShell".
+Sounds and notifications are the same as before: one per state change, never duplicated per row. Notifications follow Windows' Do Not Disturb / Focus settings and appear as coming from "Windows PowerShell".
 
 ## Uninstall
 
@@ -272,30 +404,34 @@ The uninstaller:
 1. stops the indicator;
 2. removes the autostart shortcut, if it points to this install;
 3. backs up `settings.json`, then removes **only** Claude Status's hook entries;
-4. deletes `%USERPROFILE%\.claude\status-indicator\`.
+4. deletes `%USERPROFILE%\.claude\status-indicator\` (including session files, `windows.json` and settings).
 
 It does **not** delete your cloned repository, Claude Code, the `.claude` folder, your other settings, or your other hooks. It's safe to run even if parts of Claude Status are already missing.
 
 ## Works with
 
-- ✅ **Claude Code CLI** (any terminal)
+- ✅ **Claude Code CLI** (any terminal: Windows Terminal, classic console, VS Code's integrated terminal)
 - ✅ **Claude Code VS Code extension**: hooks from `~/.claude/settings.json` apply there too.
 - Works for every project and repository, because the hooks are installed at user level.
 
 ## Limitations
 
-- **Interrupting Claude (Esc)** doesn't fire a hook, so the indicator stays 🟡 WORKING until your next prompt.
+- **Interrupting Claude (Esc)** doesn't fire a hook, so the worker stays 🟡 WORKING until your next prompt (or until the session is closed).
 - **Permission prompts inside the VS Code extension**: the extension handles approvals in its own UI, and the docs don't guarantee the `PermissionRequest` / `Notification` hooks fire there. If NEEDS YOU never appears for approvals in VS Code, that's why. WORKING / DONE / ERROR work normally.
 - In **auto / bypass permission modes**, NEEDS YOU only appears when Claude actually shows you a prompt.
 - Notifications and sounds only happen while the indicator is running.
-- If a session ends abruptly (crash, killed terminal), its last state lingers until `staleHours` passes.
-- With several sessions, the main display shows the **most recently updated** session; the others are listed on right-click.
-- Each hook call starts a short-lived `powershell.exe` (about 0.3 s). The blocking ones (`UserPromptSubmit`, `Stop`, `StopFailure`, `Notification`, `SessionEnd`) add that small delay; the rest run in the background.
+- **Clicking a worker** focuses its top-level window, not a specific VS Code editor tab or Windows Terminal tab. With several VS Code windows open, a session becomes clickable once you've sent it a prompt while Claude Status was running (see [Clicking a worker](#clicking-a-worker)). Sessions that have ended can't be focused.
+- A DONE worker stays on the Worker Board until you dismiss it, even after its session has closed; with Compact as your only view, dismiss old ones occasionally from the Worker Board (Compact counts them in *(N sessions)*).
+- If a session ends abruptly without its Claude process exiting, its last WORKING / NEEDS YOU / ERROR state lingers until `staleHours` passes.
+- Each hook call starts a short-lived `powershell.exe` (about 0.3–0.5 s). The blocking ones (`UserPromptSubmit`, `Stop`, `StopFailure`, `Notification`, `SessionEnd`) add that small delay; the rest run in the background.
 
 ## Troubleshooting
 
 **The indicator never changes state.**
 Run `/hooks` in Claude Code and check that the Claude Status hooks are listed under `UserPromptSubmit`, `Stop`, etc. Open sessions need `/hooks` or a restart after installing.
+
+**Clicking a worker says "Couldn't identify that worker's window".**
+Its app (usually VS Code) has several windows and Claude Status hasn't yet seen which one hosts that session. Send that session a prompt from its window (with Claude Status running) and try again. "That Claude session is no longer running" means the session was closed; dismiss its row if it's DONE.
 
 **I want to see whether hooks fire.**
 Create an empty file named `debug.on` in `%USERPROFILE%\.claude\status-indicator\`. Each hook call is then logged (time, event, state, session ID only) to `debug.log` in that folder. Delete `debug.on` when done.
@@ -312,22 +448,34 @@ Use the commands exactly as shown above; they include `-ExecutionPolicy Bypass`,
 install.ps1              installer / updater (run from the repo)
 src/
   hook.ps1               called by Claude Code hooks; writes state files
-  indicator.cs           the indicator window (C#, WinForms)
+  indicator.cs           the Worker Board / Compact window (C#, WinForms)
   indicator.ps1          compiles indicator.cs with Add-Type and runs it
   start-indicator.vbs    launches the indicator with no console window
   stop-indicator.ps1     stops the indicator
   autostart.ps1          enable/disable start with Windows
   uninstall.ps1          complete, safe uninstall
   config.json            default settings
+tests/
+  run-tests.ps1          automated tests (temporary folders only; never touches your real install)
+  live-tests.ps1         window/focus tests, started hidden by run-tests.ps1 -Live
+  common.ps1             shared test helpers
 ```
 
 Runtime files (`state/`, `position.txt`, `debug.log`) are created only in the install folder and are git-ignored.
 
-## Future: multiple simultaneous sessions
+## Tests
 
-The groundwork is already there: every Claude Code session writes its own `state\sessions\<session-id>.json`, and the indicator already reads all of them. Possible next steps:
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tests\run-tests.ps1          # ~1 minute
+powershell -ExecutionPolicy Bypass -File .\tests\run-tests.ps1 -Live    # + opens test windows and moves focus (~30 s; don't type meanwhile)
+powershell -ExecutionPolicy Bypass -File .\tests\run-tests.ps1 -E2E     # + one real `claude -p` prompt against a temporary install
+```
 
-- show one row per active session (the window grows a line per session);
-- always surface the **most urgent** state first (NEEDS YOU / ERROR → WORKING → DONE);
-- click a session's DONE to dismiss it;
-- show how long each session has been working.
+They cover the hook lifecycle and privacy (run as real child processes with secret-laden inputs), aliases, numbering, both orderings, timers, v1 compatibility, DONE retention and dismissal, layout at 100–200 % DPI with 1/6/90 workers, worker → window identification (terminals, multi-window apps, closed windows, reused process IDs), focus stealing, and install → update → re-install → uninstall against a temporary Claude config folder. `-RenderDir <folder>` saves PNG renders of the board for a visual check.
+
+## Ideas for later
+
+Worker Board already covers what this section used to list as future work (a row per session, most-urgent-first ordering, dismissing DONE rows, per-session timers). Possible next steps:
+
+- an in-app alias editor (aliases are edited in `config.json` for now);
+- focusing the exact Claude tab inside a VS Code window, if Claude Code ever offers a supported way to do that without resuming the session.

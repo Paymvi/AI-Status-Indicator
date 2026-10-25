@@ -267,5 +267,5 @@ if ($started) { Write-Host '  Indicator  : started (look near the bottom-right o
 else          { Write-Host "  Indicator  : start it by double-clicking $(Join-Path $installDir 'start-indicator.vbs')" }
 Write-Host ''
 Write-Host 'Claude Code sessions that are already open may need /hooks (or a restart) to pick up the hooks.'
-Write-Host 'Prompts and Claude messages are never stored; only state, event, project folder name and time.'
+Write-Host 'Prompts and Claude messages are never stored; only state, event, project folder name, times and the Claude process ID.'
 exit 0

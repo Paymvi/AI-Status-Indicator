@@ -5,5 +5,14 @@
   "toastOnNeedsYou": true,
   "soundOnError": true,
   "toastOnError": true,
-  "staleHours": 24
+  "staleHours": 24,
+  "startupView": "workerBoard",
+  "workerSort": "urgency",
+  "showWorkerSummary": false,
+  "projectAliases": {
+    "Toah_Nipi_Booking_Software": "Booking Software",
+    "Toah_Nipi_Website": "Website",
+    "Toah_Nipi_Portal": "Portal",
+    "Guest_Booking_Form": "Guest Form"
+  }
 }
