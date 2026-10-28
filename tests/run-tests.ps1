@@ -8,16 +8,18 @@
     -Live      also runs live-tests.ps1: opens real console and test windows and moves keyboard focus
                between them (about 30 seconds; don't type while it runs).
     -E2E       also runs one real headless `claude -p` prompt with the hooks pointed at a temporary install.
+    -Browser   also checks the phone dashboard page in headless Chrome/Edge emulating Android phones
+               (tests\phone-browser.mjs; needs Node.js 22+; screenshots go to -RenderDir).
     -RenderDir where to save PNG renders of the Worker Board at each DPI scale (for visual review).
 
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File .\tests\run-tests.ps1 -Live
 #>
-param([switch]$Live, [switch]$E2E, [string]$RenderDir)
+param([switch]$Live, [switch]$E2E, [switch]$Browser, [string]$RenderDir)
 
 if ($PSVersionTable.PSEdition -eq 'Core') {
     $a = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $PSCommandPath)
-    if ($Live) { $a += '-Live' }; if ($E2E) { $a += '-E2E' }; if ($RenderDir) { $a += @('-RenderDir', $RenderDir) }
+    if ($Live) { $a += '-Live' }; if ($E2E) { $a += '-E2E' }; if ($Browser) { $a += '-Browser' }; if ($RenderDir) { $a += @('-RenderDir', $RenderDir) }
     & (Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe') @a
     exit $LASTEXITCODE
 }
@@ -383,9 +385,9 @@ $null = $sf.Handle; $sf.PerformLayout()
 $ctrls = @(); $stack = New-Object System.Collections.Stack; $stack.Push($sf)
 while ($stack.Count) { $c = $stack.Pop(); $ctrls += $c; foreach ($k in $c.Controls) { $stack.Push($k) } }
 $radio = { param($t) $ctrls | Where-Object { $_ -is [System.Windows.Forms.RadioButton] -and $_.Text -like "$t*" } | Select-Object -First 1 }
-Check 'settings window starts with Urgency / summary off / Worker Board selected' ((& $radio 'Urgency').Checked -and -not (& $radio 'Most recent').Checked -and (& $radio 'Worker Board').Checked -and -not ($ctrls | Where-Object { $_ -is [System.Windows.Forms.CheckBox] }).Checked)
+Check 'settings window starts with Urgency / summary off / Worker Board selected' ((& $radio 'Urgency').Checked -and -not (& $radio 'Most recent').Checked -and (& $radio 'Worker Board').Checked -and -not ($ctrls | Where-Object { $_ -is [System.Windows.Forms.CheckBox] -and $_.Text -eq 'Show worker summary' }).Checked)
 (& $radio 'Most recent').Checked = $true
-($ctrls | Where-Object { $_ -is [System.Windows.Forms.CheckBox] }).Checked = $true
+($ctrls | Where-Object { $_ -is [System.Windows.Forms.CheckBox] -and $_.Text -eq 'Show worker summary' }).Checked = $true
 (& $radio 'Compact').Checked = $true
 Check 'settings window: ordering / summary / startup view apply immediately' ($changes['workerSort'] -eq 'recent' -and $changes['showWorkerSummary'] -eq $true -and $changes['startupView'] -eq 'compact')
 Check 'settings window stays small' ($sf.Width -lt 0.4 * [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea.Width -and $sf.Height -lt 0.6 * [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea.Height) "$($sf.Size)"
@@ -514,6 +516,419 @@ if ($env:CLAUDE_PID -match '^\d+$' -and (Get-Process -Id $env:CLAUDE_PID -ErrorA
 } else { Skip 'real Claude session window' 'not running inside Claude Code' }
 
 # ======================================================================================
+Section 'Phone dashboard: server, parity, dismissal, races, request protection, lifecycle'
+# ======================================================================================
+Add-Type @'
+using System; using System.IO; using System.Text; using System.Threading; using System.Threading.Tasks; using System.Net.Sockets;
+public static class THttp {
+    public static string Send(int port, string raw, int timeoutMs) {
+        using (var c = new TcpClient()) {
+            c.ReceiveTimeout = timeoutMs; c.Connect("127.0.0.1", port);
+            var s = c.GetStream(); var b = Encoding.UTF8.GetBytes(raw); s.Write(b, 0, b.Length);
+            using (var sr = new StreamReader(s, Encoding.UTF8)) return sr.ReadToEnd();
+        }
+    }
+    public static Task<string> SendAsync(int port, string raw, int timeoutMs) { return Task.Run(() => Send(port, raw, timeoutMs)); }
+    public static int Status(string r) { var p = r.Split(' '); int c; return p.Length > 1 && int.TryParse(p[1], out c) ? c : 0; }
+    public static string Body(string r) { int i = r.IndexOf("\r\n\r\n"); return i < 0 ? "" : r.Substring(i + 4); }
+    public static bool CanConnect(int port) { try { using (var c = new TcpClient()) { c.Connect("127.0.0.1", port); return true; } } catch { return false; } }
+    public static int FreePort() { var l = new TcpListener(System.Net.IPAddress.Loopback, 0); l.Start(); int p = ((System.Net.IPEndPoint)l.LocalEndpoint).Port; l.Stop(); return p; }
+}
+public static class TFake {
+    public static Func<string[]> Names(string[] n) { return () => n; }
+}
+// Races a hook-style rewrite (DONE -> WORKING: temp file + atomic replace, retrying on sharing errors, as
+// hook.ps1 does) against a dismissal of the DONE occurrence, with random sub-millisecond offsets.
+public static class TRace {
+    static void Spin(long ticks) { var sw = System.Diagnostics.Stopwatch.StartNew(); while (sw.ElapsedTicks < ticks) { } }
+    static void HookWrite(string path, string json) {
+        string tmp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        File.WriteAllText(tmp, json);
+        for (int i = 0; i < 10; i++) { try { if (File.Exists(path)) File.Replace(tmp, path, null); else File.Move(tmp, path); break; } catch { Thread.Sleep(15); } }
+        if (File.Exists(tmp)) File.Delete(tmp);
+    }
+    public static string Run(string path, string id, string doneJson, string workJson, string occ, Delegate dismiss, int iterations, int seed) {
+        var rnd = new Random(seed); int lost = 0; var counts = new System.Collections.Generic.SortedDictionary<string, int>();
+        for (int i = 0; i < iterations; i++) {
+            File.WriteAllText(path, doneJson);
+            long dw = rnd.Next(0, 6000), dd = rnd.Next(0, 6000);
+            var go = new ManualResetEventSlim();
+            var t = new Thread(() => { go.Wait(); Spin(dw); HookWrite(path, workJson); });
+            t.Start(); Thread.Sleep(1);
+            go.Set(); Spin(dd);
+            string res = dismiss.DynamicInvoke(id, occ).ToString();
+            t.Join();
+            int n; counts.TryGetValue(res, out n); counts[res] = n + 1;
+            string final = File.Exists(path) ? File.ReadAllText(path) : "";
+            if (!final.Contains("\"WORKING\"")) lost++;
+        }
+        var sb = new StringBuilder("lost=" + lost);
+        foreach (var kv in counts) sb.Append(";" + kv.Key + "=" + kv.Value);
+        return sb.ToString();
+    }
+}
+'@
+
+# The server calls these on its own threads, so they must be real .NET delegates (not script blocks).
+function Dismisser([string]$dir) { [Delegate]::CreateDelegate([Func[string, string, ClaudeStatus.DismissResult]], $dir, [ClaudeStatus.Dismissal].GetMethod('DismissDone')) }
+$epoch = New-Object DateTime(1970, 1, 1, 0, 0, 0, [DateTimeKind]::Utc)
+$phoneFiles = 'phone.html', 'phone.css', 'phone.js'
+function New-PhoneRoot([int]$port, [hashtable]$extra = @{}) {
+    $o = @{ phoneDashboard = $true; phonePort = $port }; foreach ($k in $extra.Keys) { $o[$k] = $extra[$k] }
+    $r = New-Root $o
+    foreach ($fn in $phoneFiles) { Copy-Item (Join-Path $src $fn) $r }
+    return $r
+}
+# Raw HTTP/1.1, so tests control every header (Host, Origin, ...). $h values of $null omit that header.
+function Req([int]$port, [string]$method, [string]$path, [hashtable]$h = @{}, [string]$body = $null) {
+    $lines = @("$method $path HTTP/1.1")
+    if (-not $h.ContainsKey('Host')) { $lines += "Host: 127.0.0.1:$port" }
+    foreach ($k in $h.Keys) { if ($null -ne $h[$k]) { $lines += "${k}: $($h[$k])" } }
+    if ($null -ne $body) { $lines += "Content-Length: $([Text.Encoding]::UTF8.GetByteCount($body))" }
+    $raw = [THttp]::Send($port, (($lines -join "`r`n") + "`r`n`r`n" + $body), 30000)
+    return @{ Code = [THttp]::Status($raw); Body = [THttp]::Body($raw); Raw = $raw }
+}
+function Api([int]$port) { (Req $port 'GET' '/api/board').Body | ConvertFrom-Json }
+function DismissHeaders([int]$port) { @{ Origin = "http://127.0.0.1:$port"; 'Content-Type' = 'application/json'; 'X-Claude-Status' = 'dismiss'; 'Sec-Fetch-Site' = 'same-origin' } }
+function Dis([int]$port, [string]$k, [string]$d, [hashtable]$override = @{}) {
+    $h = DismissHeaders $port; foreach ($x in $override.Keys) { $h[$x] = $override[$x] }
+    $r = Req $port 'POST' '/api/dismiss' $h ('{"k":"' + $k + '","d":"' + $d + '"}')
+    $r.Result = try { ($r.Body | ConvertFrom-Json).result } catch { '' }
+    return $r
+}
+function Row($board, [string]$name) { $board.rows | Where-Object { $_.n -eq $name } | Select-Object -First 1 }
+function SessFile([string]$root, [string]$id) { Join-Path $root "state\sessions\$id.json" }
+
+# --- off by default; turning it on/off from Settings starts/stops it ---
+$pp = [THttp]::FreePort()
+$root = New-Root @{ phonePort = $pp }
+$f = Form $root
+Check 'phone dashboard is off by default (nothing listening)' (-not $f.Phone -and -not [THttp]::CanConnect($pp) -and $f.PhoneStatus -eq 'Phone dashboard: off')
+$f.SetSetting('phoneDashboard', $true)
+Check 'Settings: turning it on starts it immediately' ($f.Phone -and $f.Phone.Running -and [THttp]::CanConnect($pp)) $f.PhoneStatus
+$listen = @(Get-NetTCPConnection -State Listen -LocalPort $pp -ErrorAction SilentlyContinue)
+Check 'listens on 127.0.0.1 only (not on the LAN or Tailscale interfaces)' ($listen.Count -ge 1 -and @($listen | Where-Object { $_.LocalAddress -ne '127.0.0.1' }).Count -eq 0) (($listen | ForEach-Object { $_.LocalAddress }) -join ',')
+$f.SetSetting('phoneDashboard', $false)
+Check 'Settings: turning it off stops it and frees the port' (-not $f.Phone -and -not [THttp]::CanConnect($pp))
+$f.Dispose()
+$changes = @{}
+$sf = New-Object ClaudeStatus.SettingsForm('urgency', $false, 'workerBoard', $true, [Action[string, object]] { param($k, $v) $changes[$k] = $v }, [Action] { })
+$null = $sf.Handle
+$cb = @($sf.Controls[0].Controls | Where-Object { $_ -is [System.Windows.Forms.CheckBox] -and $_.Text -like 'Phone dashboard*' })
+if ($cb.Count) { $cb[0].Checked = $false }
+Check 'Settings window has a "Phone dashboard" checkbox that saves phoneDashboard' ($cb.Count -eq 1 -and $changes['phoneDashboard'] -eq $false)
+$sf.Dispose()
+
+# --- parity with the desktop board ---
+$pp = [THttp]::FreePort()
+$root = New-PhoneRoot $pp
+Put $root 'ny' 'NEEDS_YOU' 'Toah_Nipi_Portal' 130 50 $PID $me
+Put $root 'er' 'ERROR' 'Analytics' 200 40 $PID $me
+Put $root 'b1' 'WORKING' 'Toah_Nipi_Booking_Software' 272 30 $PID $me
+Put $root 'b2' 'WORKING' 'Toah_Nipi_Booking_Software' 68 20 $PID $me
+Put $root 'web' 'DONE' 'Toah_Nipi_Website' 360 60 -updSec 360
+Put $root 'gone' 'WORKING' 'Portal' 10 5 $dead.Id $deadStart          # crashed: the desktop prunes it
+$j = Get-Content (SessFile $root 'er') -Raw | ConvertFrom-Json; $j.detail = 'authentication_failed'; [IO.File]::WriteAllText((SessFile $root 'er'), ($j | ConvertTo-Json -Compress))
+$f = Form $root
+$bd = Api $pp
+$desk = ($f.Workers | ForEach-Object { $_.DisplayName + '=' + $_.State }) -join '|'
+$ph = ($bd.rows | ForEach-Object { $_.n + '=' + $_.s }) -join '|'
+Check 'phone rows = desktop rows: same names, #numbers, states and order' ($ph -eq $desk -and $ph -eq 'Portal=NEEDS_YOU|Analytics=ERROR|Booking Software #2=WORKING|Booking Software #1=WORKING|Website=DONE') "$ph / $desk"
+Check 'desktop cleanup applies to the phone (crashed worker not shown)' (-not ($bd.rows | Where-Object { $_.n -eq 'Portal' -and $_.s -eq 'WORKING' }))
+$sinceOk = $true
+for ($i = 0; $i -lt $f.Workers.Count; $i++) { $w = $f.Workers[$i]; if ([long]$bd.rows[$i].t -ne [long][Math]::Floor(($w.StateSince - $epoch).TotalMilliseconds)) { $sinceOk = $false } }
+Check 'timers: phone gets the same state start times as the desktop' $sinceOk
+Check 'server clock included for skew-free timers' ([Math]::Abs([long]$bd.now - [long]([DateTime]::UtcNow - $epoch).TotalMilliseconds) -lt 5000)
+Check 'error type is the desktop short form (authentication_failed -> auth)' ((Row $bd 'Analytics').e -eq 'auth')
+Check 'only DONE rows carry a dismiss token' (((Row $bd 'Website').d -match '^[A-Za-z0-9_-]{22}$') -and @($bd.rows | Where-Object { $_.s -ne 'DONE' -and $_.d -ne '' }).Count -eq 0)
+$rawJson = (Req $pp 'GET' '/api/board').Body
+$fields = ($bd.rows | ForEach-Object { ($_.PSObject.Properties.Name) -join ',' } | Sort-Object -Unique) -join ';'
+Check 'privacy: rows contain only k,n,s,t,e,d; board only v,now,summary,text,rows' ($fields -eq 'k,n,s,t,e,d' -and (($bd.PSObject.Properties.Name) -join ',') -eq 'v,now,summary,text,rows') "$fields"
+Check 'privacy: no session IDs, folder names, process IDs or paths in the phone data' ($rawJson -notmatch '"(ny|er|b1|b2|web)"' -and $rawJson -notmatch 'Toah_Nipi|Users|claude_pid|\\\\' -and $rawJson -notmatch "\b$PID\b")
+$f.SetSetting('workerSort', 'recent')
+$bd = Api $pp
+Check 'ordering setting (Most recent) applies to the phone too' ((($bd.rows | ForEach-Object { $_.n }) -join '|') -eq (($f.Workers | ForEach-Object { $_.DisplayName }) -join '|'))
+$f.SetSetting('showWorkerSummary', $true)
+$bd = Api $pp
+Check 'summary setting applies to the phone too' ($bd.summary -eq $true -and $bd.text -eq $B::Summary($f.Workers))
+$f.SetSetting('showWorkerSummary', $false); $f.SetSetting('workerSort', 'urgency')
+
+# --- long-poll: changes arrive without a refresh ---
+$v0 = (Api $pp).v
+$t = [THttp]::SendAsync($pp, "GET /api/board?v=$v0&wait=1 HTTP/1.1`r`nHost: 127.0.0.1:$pp`r`n`r`n", 30000)
+Start-Sleep -Milliseconds 400
+$waiting = -not $t.IsCompleted
+Put $root 'new' 'WORKING' 'Guest_Booking_Form' 1 0 $PID $me
+$sw = [Diagnostics.Stopwatch]::StartNew(); $f.ReloadNow()
+$done = $t.Wait(3000)
+$nb = if ($done) { [THttp]::Body($t.Result) | ConvertFrom-Json } else { $null }
+Check 'long-poll waits while nothing changes, answers as soon as the board changes' ($waiting -and $done -and $sw.ElapsedMilliseconds -lt 1500 -and $nb.v -gt $v0 -and (Row $nb 'Guest Form').s -eq 'WORKING') "waiting=$waiting done=$done $($sw.ElapsedMilliseconds)ms"
+$f.ReloadNow(); $v1 = (Api $pp).v
+Check 'unchanged board: no version bump (periodic reloads do not wake phones)' ($v1 -eq $nb.v)
+$r = Req $pp 'GET' "/api/board?v=$v0&wait=1"
+Check 'an out-of-date version gets the current board immediately' ($r.Code -eq 200 -and ($r.Body | ConvertFrom-Json).v -eq $v1)
+
+# --- dismissal from the phone propagates to the desktop, and back ---
+$bd = Api $pp; $web = Row $bd 'Website'
+$r = Dis $pp $web.k $web.d
+Check 'phone dismiss of a DONE row: dismissed, state file removed' ($r.Code -eq 200 -and $r.Result -eq 'dismissed' -and -not (Test-Path (SessFile $root 'web'))) "$($r.Code) $($r.Body)"
+$f.ReloadNow()
+Check 'phone dismiss removes the row from the desktop board' (-not ($f.Workers | Where-Object Id -eq 'web'))
+Check '...and from the phone board' (-not (Row (Api $pp) 'Website'))
+$r2 = Dis $pp $web.k $web.d
+Check 'repeating the same dismiss is harmless ("gone", nothing else touched)' ($r2.Code -eq 200 -and $r2.Result -eq 'gone' -and @(Get-ChildItem (Join-Path $root 'state\sessions') -Filter *.json).Count -eq $f.Workers.Count)
+Put $root 'web' 'WORKING' 'Toah_Nipi_Website' 1 0 $PID $me; $f.ReloadNow()
+$bd = Api $pp
+Check 'a later prompt in the dismissed session brings it back on both screens' ((Row $bd 'Website').s -eq 'WORKING' -and (Row $bd 'Website').k -eq $web.k -and ($f.Workers | Where-Object Id -eq 'web').State -eq 'WORKING')
+Put $root 'web' 'DONE' 'Toah_Nipi_Website' 5 0; $f.ReloadNow()
+$bd = Api $pp; $web2 = Row $bd 'Website'
+Check 'each DONE occurrence gets a new dismiss token' ($web2.d -and $web2.d -ne $web.d)
+Check 'desktop dismiss (x) of a DONE row' ($f.Dismiss('web'))
+$f.ReloadNow()
+Check 'desktop dismiss removes the row from the phone board' (-not (Row (Api $pp) 'Website'))
+Check 'a phone dismiss after the desktop already dismissed it: harmless "gone"' ((Dis $pp $web2.k $web2.d).Result -eq 'gone')
+
+# --- refusals ---
+$bd = Api $pp
+$r = Dis $pp (Row $bd 'Portal').k ('A' * 22)
+Check 'NEEDS YOU cannot be dismissed (409, file kept)' ($r.Code -eq 409 -and $r.Result -eq 'not_done' -and (Test-Path (SessFile $root 'ny')))
+$r = Dis $pp (Row $bd 'Analytics').k ('A' * 22)
+Check 'ERROR cannot be dismissed' ($r.Code -eq 409 -and (Test-Path (SessFile $root 'er')))
+$r = Dis $pp (Row $bd 'Booking Software #1').k ('A' * 22)
+Check 'WORKING cannot be dismissed' ($r.Code -eq 409 -and (Test-Path (SessFile $root 'b1')))
+$r = Dis $pp ('Z' * 22) ('Z' * 22)
+Check 'unknown worker token: "gone", nothing touched' ($r.Code -eq 200 -and $r.Result -eq 'gone' -and @(Get-ChildItem (Join-Path $root 'state\sessions') -Filter *.json).Count -eq $f.Workers.Count)
+$bad = @(
+    @('not JSON', 'nope'), @('missing fields', '{}'), @('wrong types', '{"k":1,"d":2}'),
+    @('path as worker token', '{"k":"..\\..\\config.json","d":"AAAAAAAAAAAAAAAAAAAAAA"}'),
+    @('session id instead of token', '{"k":"b1","d":"x"}'), @('nested objects', '{"k":{"a":{"b":{"c":{"d":1}}}},"d":"x"}')
+)
+$allBad = $true; $info = @()
+foreach ($c in $bad) { $r = Req $pp 'POST' '/api/dismiss' (DismissHeaders $pp) $c[1]; if ($r.Code -ne 400) { $allBad = $false; $info += "$($c[0])=$($r.Code)" } }
+Check 'malformed / invalid dismiss requests: 400, no files touched' ($allBad -and (Test-Path (SessFile $root 'b1')) -and (Test-Path (Join-Path $root 'config.json'))) ($info -join ', ')
+$r = Req $pp 'POST' '/api/dismiss' (DismissHeaders $pp) ('{"k":"' + ('A' * 2000) + '","d":"x"}')
+Check 'oversized body refused (413)' ($r.Code -eq 413)
+
+# --- request protection (Host / Origin / cross-site) ---
+$k = (Row $bd 'Portal').k
+$cases = @(
+    @('Host evil.example (DNS rebinding)', 'GET', '/api/board', @{ Host = 'evil.example' }, 421),
+    @('Host 127.0.0.1 on another port', 'GET', '/api/board', @{ Host = '127.0.0.1:1' }, 421),
+    @('no Host header', 'GET', '/api/board', @{ Host = $null }, 421),
+    @('page on localhost', 'GET', '/', @{ Host = "localhost:$pp" }, 200),
+    @('dismiss without Origin', 'POST', '/api/dismiss', @{ Origin = $null }, 403),
+    @('dismiss from another site (Origin)', 'POST', '/api/dismiss', @{ Origin = 'https://evil.example' }, 403),
+    @('dismiss with Origin "null"', 'POST', '/api/dismiss', @{ Origin = 'null' }, 403),
+    @('dismiss marked cross-site by the browser', 'POST', '/api/dismiss', @{ 'Sec-Fetch-Site' = 'cross-site' }, 403),
+    @('dismiss as a plain form post (text/plain)', 'POST', '/api/dismiss', @{ 'Content-Type' = 'text/plain' }, 415),
+    @('dismiss without the X-Claude-Status header', 'POST', '/api/dismiss', @{ 'X-Claude-Status' = $null }, 403),
+    @('CORS preflight (OPTIONS)', 'OPTIONS', '/api/dismiss', @{}, 405),
+    @('GET on the dismiss endpoint', 'GET', '/api/dismiss', @{}, 404),
+    @('path traversal', 'GET', '/../config.json', @{}, 404),
+    @('encoded traversal', 'GET', '/%2e%2e/config.json', @{}, 404),
+    @('state file by name', 'GET', '/state/sessions/b1.json', @{}, 404),
+    @('absolute-form request target', 'GET', 'http://evil.example/api/board', @{}, 400)
+)
+$protOk = $true; $info = @()
+foreach ($c in $cases) {
+    $h = if ($c[1] -eq 'POST') { DismissHeaders $pp } else { @{} }
+    foreach ($x in $c[3].Keys) { $h[$x] = $c[3][$x] }
+    $body = if ($c[1] -eq 'POST') { '{"k":"' + $k + '","d":"AAAAAAAAAAAAAAAAAAAAAA"}' } else { $null }
+    $r = Req $pp $c[1] $c[2] $h $body
+    if ($r.Code -ne $c[4]) { $protOk = $false; $info += "$($c[0]): $($r.Code) (want $($c[4]))" }
+    if ($r.Raw -match '(?im)^Access-Control-Allow') { $protOk = $false; $info += "$($c[0]): CORS header" }
+}
+Check 'Host / Origin / cross-site / method / path checks' $protOk ($info -join '; ')
+$r = Req $pp 'GET' '/'
+Check 'page served with a strict CSP, no-store, nosniff, no framing, no CORS' ($r.Code -eq 200 -and $r.Raw -match "Content-Security-Policy: default-src 'none'" -and $r.Raw -match 'Cache-Control: no-store' -and $r.Raw -match 'X-Content-Type-Options: nosniff' -and $r.Raw -match 'X-Frame-Options: DENY' -and $r.Raw -notmatch 'Access-Control-Allow')
+Check 'page, stylesheet and script served' ($r.Body -match 'CLAUDE WORKERS' -and (Req $pp 'GET' '/phone.css').Code -eq 200 -and (Req $pp 'GET' '/phone.js').Code -eq 200)
+$f.Dispose()
+
+# Tailnet names (as forwarded by tailscale serve), with a standalone server and fixed names
+$pp2 = [THttp]::FreePort()
+$srvRoot = New-PhoneRoot $pp2
+$srv = New-Object ClaudeStatus.PhoneServer($srvRoot, $pp2, (Dismisser (Join-Path $srvRoot 'state\sessions')), [TFake]::Names(@('laptop.tail1234.ts.net', 'laptop', '100.64.0.7')))
+$null = $srv.Start()
+$srv.Publish((New-Object 'System.Collections.Generic.List[ClaudeStatus.SessionInfo]'), $false, '')
+$ok = $true; $info = @()
+foreach ($hh in 'laptop.tail1234.ts.net', 'LAPTOP.tail1234.ts.net.', 'laptop', 'laptop:80', '100.64.0.7', 'laptop.tail1234.ts.net:443') { $c = (Req $pp2 'GET' '/api/board' @{ Host = $hh }).Code; if ($c -ne 200) { $ok = $false; $info += "$hh=$c" } }
+foreach ($hh in 'other.tail1234.ts.net', 'laptop.evil.example', 'laptop.tail1234.ts.net.evil.example', '100.64.0.8') { $c = (Req $pp2 'GET' '/api/board' @{ Host = $hh }).Code; if ($c -ne 421) { $ok = $false; $info += "$hh=$c" } }
+Check "this machine's Tailscale names/IPs accepted; look-alikes refused" $ok ($info -join ', ')
+$o1 = (Req $pp2 'POST' '/api/dismiss' @{ Host = 'laptop.tail1234.ts.net'; Origin = 'http://laptop.tail1234.ts.net'; 'Content-Type' = 'application/json'; 'X-Claude-Status' = 'dismiss' } ('{"k":"' + ('A' * 22) + '","d":"' + ('A' * 22) + '"}')).Code
+$o2 = (Req $pp2 'POST' '/api/dismiss' @{ Host = 'laptop.tail1234.ts.net'; Origin = 'http://laptop.tail1234.ts.net.evil.example'; 'Content-Type' = 'application/json'; 'X-Claude-Status' = 'dismiss' } ('{"k":"' + ('A' * 22) + '","d":"' + ('A' * 22) + '"}')).Code
+Check 'dismiss via the Tailscale name allowed; a look-alike Origin refused' ($o1 -eq 200 -and $o2 -eq 403) "$o1 / $o2"
+$srv2 = New-Object ClaudeStatus.PhoneServer($srvRoot, $pp2, (Dismisser (Join-Path $srvRoot 'state\sessions')), [TFake]::Names(@()))
+Check 'a second server on the same port fails cleanly (no duplicate instances)' (-not $srv2.Start() -and $srv2.Error -match 'already in use') $srv2.Error
+$t = [THttp]::SendAsync($pp2, "GET /api/board?v=1&wait=1 HTTP/1.1`r`nHost: 127.0.0.1:$pp2`r`n`r`n", 30000)
+Start-Sleep -Milliseconds 300
+$srv.Stop()
+Check 'stopping releases waiting phones at once and frees the port' ($t.Wait(2000) -and -not [THttp]::CanConnect($pp2))
+
+# --- the delayed-dismissal race and concurrent hook writes ---
+$pp = [THttp]::FreePort()
+$root = New-PhoneRoot $pp
+Put $root 'race' 'DONE' 'Toah_Nipi_Website' 30 3
+$f = Form $root
+$seen = Row (Api $pp) 'Website'                  # 1. the phone shows it as DONE
+Put $root 'race' 'WORKING' 'Toah_Nipi_Website' 0 3 $PID $me   # 2. a new prompt arrives (the board hasn't reloaded yet)
+$r = Dis $pp $seen.k $seen.d                       # 3. the delayed dismiss arrives
+Check 'delayed dismiss after a new prompt: refused, the WORKING worker stays' ($r.Code -eq 409 -and (Get-Content (SessFile $root 'race') -Raw | ConvertFrom-Json).state -eq 'WORKING') "$($r.Code) $($r.Body)"
+$f.ReloadNow()
+Check '...and it is still on both boards' ((Row (Api $pp) 'Website').s -eq 'WORKING' -and ($f.Workers | Where-Object Id -eq 'race').State -eq 'WORKING')
+Put $root 'race' 'DONE' 'Toah_Nipi_Website' 0 3; $f.ReloadNow()
+$r = Dis $pp $seen.k $seen.d
+Check 'a dismiss for an earlier DONE does not remove a newer DONE of the same session' ($r.Code -eq 409 -and (Test-Path (SessFile $root 'race')))
+$f.Dispose()
+
+$raceDir = Join-Path $tmp 'race'; $null = New-Item -ItemType Directory -Force $raceDir
+$rf = Join-Path $raceDir 'r.json'
+$workJson = '{"v":2,"session_id":"r","state":"WORKING","event":"UserPromptSubmit","detail":"","project":"P","updated":"2026-10-28T10:00:05.0000000Z","state_since":"2026-10-28T10:00:05.0000000Z","first_seen":"2026-10-28T09:00:00.0000000Z","claude_pid":0,"claude_started":""}'
+$doneJson = '{"v":2,"session_id":"r","state":"DONE","event":"Stop","detail":"","project":"P","updated":"2026-10-28T10:00:00.0000000Z","state_since":"2026-10-28T10:00:00.0000000Z","first_seen":"2026-10-28T09:00:00.0000000Z","claude_pid":0,"claude_started":""}'
+$si = $B::Parse('r', $ser.Deserialize($doneJson, [System.Collections.Generic.Dictionary[string, object]]), [DateTime]::MinValue, [DateTime]::MinValue)
+$occ = [ClaudeStatus.Dismissal]::Occurrence($si)
+$res = [TRace]::Run($rf, 'r', $doneJson, $workJson, $occ, (Dismisser $raceDir), 400, 7)
+$outcomes = @{}; foreach ($kv in $res.Split(';')) { $p2 = $kv.Split('='); $outcomes[$p2[0]] = [int]$p2[1] }
+Check 'concurrent hook write vs dismiss (400 random interleavings): the new WORKING state is never deleted' ($outcomes['lost'] -eq 0) $res
+Info "race outcomes: $res"
+Check 'both orders actually occurred in the race test' ($outcomes['Dismissed'] -gt 0 -and ($outcomes['NotDone'] -gt 0 -or $outcomes['Changed'] -gt 0)) $res
+Check 'dismissal refuses ids that could be paths' ([ClaudeStatus.Dismissal]::DismissDone($raceDir, '..\race\r', $occ) -eq 'Gone' -and [ClaudeStatus.Dismissal]::DismissDone($raceDir, 'r.json', $occ) -eq 'Gone' -and (Test-Path $rf))
+
+# --- lifecycle: the desktop never depends on the phone side ---
+$busy = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Loopback, 0); $busy.Start()
+$bp = $busy.LocalEndpoint.Port
+$root = New-PhoneRoot $bp
+Put $root 'w' 'WORKING' 'Toah_Nipi_Portal' 5 1 $PID $me
+Put $root 'd' 'DONE' 'Toah_Nipi_Website' 5 2
+$f = Form $root
+Check 'port already in use: phone side reports it, desktop board works normally' (-not $f.Phone -and $f.PhoneStatus -match 'already in use' -and $f.Workers.Count -eq 2 -and $f.Dismiss('d')) $f.PhoneStatus
+$f.GetType().GetMethod('BuildMenu', [Reflection.BindingFlags]'NonPublic,Instance').Invoke($f, @())
+$menu = $f.GetType().GetField('menu', [Reflection.BindingFlags]'NonPublic,Instance').GetValue($f)
+Check 'tray menu shows the phone dashboard problem' (@($menu.Items | Where-Object { $_.Text -match '^Phone dashboard: not running: port \d+ is already in use$' }).Count -eq 1)
+$np = [THttp]::FreePort(); $f.SetSetting('phonePort', $np)
+Check 'changing phonePort starts it on the new port right away' ($f.Phone -and [THttp]::CanConnect($np))
+# A child process started with inherited handles (as the tailscale.exe lookup is) must not keep the port alive.
+$child = Start-Process $winPs -ArgumentList '-NoProfile', '-Command', 'Start-Sleep -Seconds 6' -RedirectStandardOutput (Join-Path $tmp 'child.txt') -WindowStyle Hidden -PassThru
+Start-Sleep -Milliseconds 300
+$f.SetSetting('phoneDashboard', $false)
+Check 'switching off frees the port even while a child process that inherited handles is running' (-not $child.HasExited -and -not [THttp]::CanConnect($np))
+$f.SetSetting('phoneDashboard', $true)
+$child.Kill()
+$busy.Stop()
+$f.Dispose()
+Check 'closing the indicator stops the phone server (no orphan listener)' (-not [THttp]::CanConnect($np))
+$root = New-Root @{ phoneDashboard = $true; phonePort = ([THttp]::FreePort()) }   # page files missing
+$f = Form $root
+$r = Req $f.Phone.Port 'GET' '/'
+Check 'missing page files: clear error, the board API still works' ($r.Code -eq 500 -and $r.Body -match 'install' -and (Req $f.Phone.Port 'GET' '/api/board').Code -eq 200)
+$f.Dispose()
+
+# --- phone.js timers = indicator.cs timers ---
+$node = Get-Command node -ErrorAction SilentlyContinue
+if (-not $node) { Skip 'phone timer text matches the desktop' 'node not found (only needed for this check)' }
+else {
+    $secs = @(0, 0.5, 1, 59, 59.9, 60, 61, 119, 125, 272, 599, 3599, 3599.9, 3600, 3601, 3660, 3661, 3900, 7300, 43200, 86399, 86400, 90061, 183600, 259205, 950400)
+    $errs = @('', 'rate_limit', 'authentication_failed', 'billing_error', 'server_error', 'max_output_tokens', 'a_really_long_error_identifier')
+    $cases = @(); $want = @()
+    foreach ($sec in $secs) {
+        $ms = [long]($sec * 1000); $ts = [TimeSpan]::FromMilliseconds($ms)
+        foreach ($st in 'WORKING', 'NEEDS_YOU', 'DONE', 'ERROR') {
+            foreach ($e in $(if ($st -eq 'ERROR') { $errs } else { @('') })) {
+                foreach ($brief in $false, $true) {
+                    $s0 = New-Object ClaudeStatus.SessionInfo; $s0.State = $st; $s0.Detail = $e; $s0.StateSince = $now.AddMilliseconds(-$ms)
+                    $cases += , @($st, $B::ShortError($e), $ms, $brief)
+                    $want += $B::StatusText($s0, $now, $brief)
+                }
+            }
+        }
+        $cases += , @('clock', '', $ms, $false); $want += $B::Clock($ts)
+        $cases += , @('span', '', $ms, $false); $want += $B::Span($ts)
+        $cases += , @('ago', '', $ms, $false); $want += $B::Ago($ts)
+    }
+    $inFile = Join-Path $tmp 'timer-cases.json'
+    [IO.File]::WriteAllText($inFile, ($cases | ConvertTo-Json -Compress -Depth 3), (New-Object Text.UTF8Encoding $false))
+    # output is \u-escaped ASCII so the console code page can't mangle "·" / "…"
+    $js = @'
+const f=require(process.argv[1]);const c=JSON.parse(require('fs').readFileSync(process.argv[2],'utf8'));
+const out=c.map(x=>x[0]==='clock'?f.clock(x[2]):x[0]==='span'?f.span(x[2]):x[0]==='ago'?f.ago(x[2]):f.statusText(x[0],x[1],x[2],x[3]));
+process.stdout.write(JSON.stringify(out).replace(/[\u007f-￿]/g,ch=>'\\u'+ch.charCodeAt(0).toString(16).padStart(4,'0')));
+'@ -replace "`r?`n", ''
+    $got = & $node.Source -e $js (Join-Path $src 'phone.js') $inFile | Out-String | ConvertFrom-Json
+    $diff = @(); for ($i = 0; $i -lt $want.Count; $i++) { if ($got[$i] -cne $want[$i]) { $diff += "$(($cases[$i]) -join '/'): js='$($got[$i])' cs='$($want[$i])'" } }
+    Check "phone timer/status text matches the desktop exactly ($($want.Count) cases)" ($got.Count -eq $want.Count -and $diff.Count -eq 0) (($diff | Select-Object -First 5) -join '; ')
+}
+
+# ======================================================================================
+Section 'Phone page in a real browser (headless Chrome emulating Android phones)'
+# ======================================================================================
+$chrome = @("$env:ProgramFiles\Google\Chrome\Application\chrome.exe", "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe",
+    "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe", "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
+$nodeCmd = Get-Command node -ErrorAction SilentlyContinue
+if (-not $Browser) { Skip 'phone page in a browser' 'run with -Browser' }
+elseif (-not $chrome -or -not $nodeCmd) { Skip 'phone page in a browser' 'needs Chrome or Edge, and Node.js 22+' }
+else {
+    $pp = [THttp]::FreePort()
+    $root = New-PhoneRoot $pp
+    Put $root 'ny' 'NEEDS_YOU' 'Toah_Nipi_Portal' 130 50 $PID $me
+    Put $root 'er' 'ERROR' 'A_Very_Long_Project_Folder_Name_That_Keeps_Going_And_Going' 200 45 $PID $me
+    $j = Get-Content (SessFile $root 'er') -Raw | ConvertFrom-Json; $j.detail = 'rate_limit'; [IO.File]::WriteAllText((SessFile $root 'er'), ($j | ConvertTo-Json -Compress))
+    Put $root 'er2' 'ERROR' 'Analytics' 400 44 $PID $me
+    $j = Get-Content (SessFile $root 'er2') -Raw | ConvertFrom-Json; $j.detail = 'authentication_failed'; [IO.File]::WriteAllText((SessFile $root 'er2'), ($j | ConvertTo-Json -Compress))
+    Put $root 'b1' 'WORKING' 'Toah_Nipi_Booking_Software' 272 30 $PID $me
+    Put $root 'b2' 'WORKING' 'Toah_Nipi_Booking_Software' 68 20 $PID $me
+    Put $root 'b3' 'WORKING' 'Toah_Nipi_Booking_Software' 4000 10 $PID $me
+    foreach ($i in 1..6) { Put $root "x$i" 'WORKING' "Side_Project_$i" (30 * $i) (60 + $i) $PID $me }
+    Put $root 'web' 'DONE' 'Toah_Nipi_Website' 30 60
+    Put $root 'guest' 'DONE' 'Guest_Booking_Form' 360 59
+    Put $root 'race' 'DONE' 'Race' 7300 58
+    $f = Form $root
+    $cdir = Join-Path $tmp 'browser'; $null = New-Item -ItemType Directory -Force $cdir
+    $profileDir = Join-Path $tmp 'chrome-profile'
+    $cp = Start-Process $chrome -ArgumentList '--headless=new', '--remote-debugging-port=0', "--user-data-dir=`"$profileDir`"", '--no-first-run', '--no-default-browser-check', '--disable-extensions', 'about:blank' -PassThru
+    $portFile = Join-Path $profileDir 'DevToolsActivePort'
+    for ($i = 0; $i -lt 100 -and -not (Test-Path $portFile); $i++) { Start-Sleep -Milliseconds 100 }
+    $dbg = if (Test-Path $portFile) { (Get-Content $portFile)[0] } else { '' }
+    if (-not $dbg) { Check 'headless browser started' $false }
+    else {
+        $np = Start-Process $nodeCmd.Source -ArgumentList "`"$(Join-Path $PSScriptRoot 'phone-browser.mjs')`"", $dbg, $pp, "`"$cdir`"", "`"$RenderDir`"" -PassThru -NoNewWindow -RedirectStandardError (Join-Path $cdir 'stderr.txt')
+        $handled = @{}
+        $deadline = (Get-Date).AddMinutes(4)
+        while (-not $np.HasExited -and (Get-Date) -lt $deadline) {
+            foreach ($req in @(Get-ChildItem $cdir -Filter 'req-*' -ErrorAction SilentlyContinue)) {
+                $name = $req.Name.Substring(4)
+                if ($handled[$name]) { continue }
+                $handled[$name] = $true
+                switch ($name) {
+                    'desktop-dismiss'     { $null = $f.Dismiss('web') }
+                    'check-phone-dismiss' { Start-Sleep -Milliseconds 200; $script:phoneDismissedFile = -not (Test-Path (SessFile $root 'guest')); $f.ReloadNow() }
+                    'hidden-change'       { Put $root 'b2' 'NEEDS_YOU' 'Toah_Nipi_Booking_Software' 1 20 $PID $me; $f.ReloadNow() }
+                    'race-prompt'         { Put $root 'race' 'WORKING' 'Race' 0 58 $PID $me }   # no reload yet: the phone still shows DONE
+                    'reload'              { $f.ReloadNow() }
+                    'stop'                { $f.SetSetting('phoneDashboard', $false) }
+                    'start'               { $f.SetSetting('phoneDashboard', $true) }
+                    'clear'               { Get-ChildItem (Join-Path $root 'state\sessions') -Filter *.json | Remove-Item; $f.ReloadNow() }
+                }
+                [IO.File]::WriteAllText((Join-Path $cdir "ack-$name"), '')
+            }
+            Start-Sleep -Milliseconds 50
+        }
+        if (-not $np.HasExited) { Stop-Process -Id $np.Id -Force; Check 'browser test finished in time' $false }
+        $resFile = Join-Path $cdir 'results.txt'
+        if (-not (Test-Path $resFile)) { Check 'browser test produced results' $false (Get-Content (Join-Path $cdir 'stderr.txt') -Raw -ErrorAction SilentlyContinue) }
+        else {
+            foreach ($line in Get-Content $resFile -Encoding UTF8) {
+                $k = $line.Split("`t")
+                switch ($k[0]) { 'PASS' { Check "browser: $($k[1])" $true } 'FAIL' { Check "browser: $($k[1])" $false $k[2] } 'INFO' { Info "browser: $($k[1])" } }
+            }
+        }
+        Check 'browser: the tapped dismissal removed exactly that DONE state file' ($script:phoneDismissedFile -eq $true)
+        Check 'browser: the stale race tap left the WORKING session file in place' ($handled['clear'] -or (Test-Path (SessFile $root 'race')))
+        Info "phone screenshots saved to $RenderDir (phone-*.png)"
+    }
+    & taskkill.exe /PID $cp.Id /T /F 2>&1 | Out-Null
+    $f.Dispose()
+}
+
+# ======================================================================================
 Section 'Live windows (live-tests.ps1, run hidden like the real indicator)'
 # ======================================================================================
 if (-not $Live) { Skip 'live window tests' 'run with -Live' }
@@ -572,10 +987,22 @@ Check 'exactly 9 Claude Status hooks, unrelated hook and settings kept' ($ours -
 $cfgText = Get-Content (Join-Path $inst 'config.json') -Raw
 $out = & $winPs -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repo 'install.ps1') -ClaudeDir $cd -NoStart 2>&1
 Check 're-running the installer is a no-op for settings.json and config.json' ((Get-Content (Join-Path $inst 'config.json') -Raw) -eq $cfgText -and (($out | Out-String) -match 'already up to date'))
-$out = & $winPs -NoProfile -Command "Add-Type -Path '$inst\indicator.cs' -ReferencedAssemblies System.Windows.Forms, System.Drawing, System.Web.Extensions; 'ok'" 2>&1
+Check 'phone dashboard files installed; config gets phoneDashboard=false, phonePort=48521' ((@('phone.cs', 'phone.html', 'phone.css', 'phone.js', 'phone-setup.ps1') | Where-Object { -not (Test-Path (Join-Path $inst $_)) }).Count -eq 0 -and $c.phoneDashboard -eq $false -and $c.phonePort -eq 48521)
+$out = & $winPs -NoProfile -Command "Add-Type -Path '$inst\indicator.cs', '$inst\phone.cs' -ReferencedAssemblies System.Windows.Forms, System.Drawing, System.Web.Extensions; 'ok'" 2>&1
 Check 'installed indicator compiles with Windows PowerShell 5.1' (($out | Out-String).Trim() -eq 'ok') ($out | Out-String)
 $auto = & $winPs -NoProfile -ExecutionPolicy Bypass -File (Join-Path $inst 'autostart.ps1') 2>&1
 Check 'autostart script runs (status query only; your Startup folder is not modified)' (($auto | Out-String) -match 'Autostart is currently')
+
+$setupPs = Join-Path $inst 'phone-setup.ps1'
+$out = & $winPs -NoProfile -ExecutionPolicy Bypass -File $setupPs -Status 2>&1 | Out-String
+Check 'phone-setup.ps1 -Status reports without changing anything' ($LASTEXITCODE -eq 0 -and $out -match 'phoneDashboard = False' -and (Get-Content (Join-Path $inst 'config.json') -Raw) -eq $cfgText) $out
+# -NoServe: config only; Tailscale is never touched by the tests. (The indicator isn't started here: -NoStart above,
+# and phone-setup would start it, so point it at a port and accept the "not answering" warning.)
+$out = & $winPs -NoProfile -ExecutionPolicy Bypass -Command "function Start-Process { }; & '$setupPs' -NoServe" 2>&1 | Out-String
+$c2 = Get-Content (Join-Path $inst 'config.json') -Raw | ConvertFrom-Json
+Check 'phone-setup.ps1 -NoServe turns phoneDashboard on, keeps every other setting' ($c2.phoneDashboard -eq $true -and $c2.staleHours -eq $c.staleHours -and $c2.projectAliases.Toah_Nipi_Portal -eq 'Portal') $out
+$out = & $winPs -NoProfile -ExecutionPolicy Bypass -File $setupPs -Disable 2>&1 | Out-String
+Check 'phone-setup.ps1 -Disable turns it off; leaves tailscale serve alone when this install never set it up' ((Get-Content (Join-Path $inst 'config.json') -Raw | ConvertFrom-Json).phoneDashboard -eq $false -and $out -notmatch 'removed tailscale serve') $out
 
 $out = & $winPs -NoProfile -ExecutionPolicy Bypass -File (Join-Path $inst 'uninstall.ps1') -ClaudeDir $cd 2>&1
 $s = Get-Content $settingsPath -Raw
@@ -585,10 +1012,18 @@ Check 'uninstall removes only Claude Status hooks' ($s -notmatch 'status-indicat
 # ======================================================================================
 Section 'Privacy / no-network audit (static)'
 # ======================================================================================
-$code = (Get-ChildItem $src -File | ForEach-Object { Get-Content $_.FullName -Raw }) -join "`n"
-Check 'no network APIs in the app' ($code -notmatch 'WebClient|HttpClient|WebRequest|Invoke-WebRequest|Invoke-RestMethod|Net\.Sockets|TcpClient|UdpClient|https?://')
-Check 'indicator never reads window titles' ($code -notmatch 'GetWindowText')
-Check 'hook never reads the prompt / message / tool input fields' ($code -notmatch '\$in\.(prompt|last_assistant_message|tool_input|tool_response|message|transcript_path|error_details)')
+$phoneSrc = 'phone.cs', 'phone.js', 'phone.html', 'phone.css', 'phone-setup.ps1'
+$code = (Get-ChildItem $src -File | Where-Object { $phoneSrc -notcontains $_.Name } | ForEach-Object { Get-Content $_.FullName -Raw }) -join "`n"
+Check 'no network APIs in the desktop app or hook' ($code -notmatch 'WebClient|HttpClient|WebRequest|Invoke-WebRequest|Invoke-RestMethod|Net\.Sockets|TcpClient|TcpListener|UdpClient|https?://')
+$pcs = Get-Content (Join-Path $src 'phone.cs') -Raw
+Check 'phone server only listens on loopback and never connects out' ($pcs -match 'new TcpListener\(IPAddress\.Loopback' -and $pcs -notmatch 'IPAddress\.(Any|IPv6Any)|0\.0\.0\.0|new TcpClient|\.Connect\(|WebClient|HttpClient|WebRequest|Access-Control-Allow')
+$pjs = (Get-Content (Join-Path $src 'phone.js') -Raw) + (Get-Content (Join-Path $src 'phone.html') -Raw)
+Check 'phone page: no notifications, sounds, vibration, speech, service worker or storage' ($pjs -cnotmatch 'Notification|vibrate|Audio|speechSynthesis|serviceWorker|localStorage|sessionStorage|indexedDB|innerHTML|https?://')
+Check 'phone page only calls its own relative API' ((([regex]::Matches($pjs, "'(api/[a-z]*)") | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique) -join ',') -eq 'api/board,api/dismiss' -and $pjs -cnotmatch 'XMLHttpRequest|WebSocket|EventSource|sendBeacon|fetch\(\s*[''"](?!api/)')
+$setup = Get-Content (Join-Path $src 'phone-setup.ps1') -Raw
+Check 'phone-setup.ps1 never runs Funnel and only proxies to 127.0.0.1' ($setup -notmatch '(?i)[''"]funnel[''"]|\bfunnel\s+(on|--)' -and @([regex]::Matches($setup, 'https?://[^\s''"`]+') | Where-Object { $_.Value -notmatch '^http://(127\.0\.0\.1|localhost):' }).Count -eq 0)
+Check 'indicator never reads window titles' ($code -notmatch 'GetWindowText' -and $pcs -notmatch 'GetWindowText')
+Check 'hook never reads the prompt / message / tool input fields; unchanged by the phone feature' ((Get-Content (Join-Path $src 'hook.ps1') -Raw) -notmatch 'phone' -and $code -notmatch '\$in\.(prompt|last_assistant_message|tool_input|tool_response|message|transcript_path|error_details)')
 
 # ======================================================================================
 if ($E2E) {

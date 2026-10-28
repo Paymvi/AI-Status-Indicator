@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#141414">
+<meta name="referrer" content="no-referrer">
+<meta name="robots" content="noindex, nofollow">
+<title>Claude Workers</title>
+<link rel="stylesheet" href="phone.css">
+<script src="phone.js" defer></script>
+</head>
+<body>
+<main id="board" class="board stale" data-top="">
+  <header class="head">
+    <div class="titlebar">
+      <h1>CLAUDE WORKERS</h1>
+      <span id="conn" class="conn" data-conn="connecting" role="status">CONNECTING…</span>
+    </div>
+    <div id="summary" class="summary" hidden></div>
+  </header>
+  <div id="banner" class="banner" hidden>
+    <strong id="banner-title"></strong>
+    <span id="banner-when"></span>
+    <span id="banner-why" class="why"></span>
+  </div>
+  <ul id="rows" class="rows">
+    <li class="row placeholder"><span class="ring"></span><span class="name muted">Connecting to the laptop…</span></li>
+  </ul>
+</main>
+<div id="note" class="note" role="status" aria-live="polite" hidden></div>
+<noscript><p class="noscript">This page needs JavaScript to show your Claude workers.</p></noscript>
+</body>
+</html>

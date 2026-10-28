@@ -575,6 +575,9 @@ namespace ClaudeStatus
     public class SettingsForm : Form
     {
         public SettingsForm(string sort, bool summary, string startup, Action<string, object> set, Action editAliases)
+            : this(sort, summary, startup, false, set, editAliases) { }
+
+        public SettingsForm(string sort, bool summary, string startup, bool phoneOn, Action<string, object> set, Action editAliases)
         {
             Text = "Claude Status Settings";
             FormBorderStyle = FormBorderStyle.FixedToolWindow;
@@ -605,6 +608,10 @@ namespace ClaudeStatus
             wb.CheckedChanged += (s, e) => { if (wb.Checked) set("startupView", "workerBoard"); };
             cp.CheckedChanged += (s, e) => { if (cp.Checked) set("startupView", "compact"); };
             flow.Controls.Add(Group(wb, cp));
+
+            var ph = new CheckBox { Text = "Phone dashboard (private, via Tailscale)", Checked = phoneOn, AutoSize = true, Margin = new Padding(3, 10, 3, 3) };
+            ph.CheckedChanged += (s, e) => set("phoneDashboard", ph.Checked);
+            flow.Controls.Add(ph);
 
             var link = new LinkLabel { Text = "Edit project aliases (config.json)…", AutoSize = true, Margin = new Padding(3, 10, 3, 3) };
             link.LinkClicked += (s, e) => editAliases();
@@ -680,6 +687,10 @@ namespace ClaudeStatus
         int scroll, thumbStartY, thumbStartScroll;
         SettingsForm settingsForm;
         EventHandler displayChanged;
+        PhoneServer phone;
+        string phoneError = "";
+        DateTime phoneRetryUtc = DateTime.MinValue;
+        int phoneFailedPort;
 
         protected override bool ShowWithoutActivation { get { return true; } }
         protected override CreateParams CreateParams
@@ -803,6 +814,9 @@ namespace ClaudeStatus
         public string HitAt(Point p) { return HitTest(p); }
         public Dictionary<string, Anchor> Anchors { get { return anchors; } }
         public void SetSetting(string key, object value) { SetCfg(key, value); }
+        public PhoneServer Phone { get { return phone; } }
+        public string PhoneStatus { get { return PhoneStatusText; } }
+        public void StopPhone() { if (phone != null) { phone.Stop(); phone = null; } }
 
         // ---------- state ----------
         void Reload()
@@ -860,6 +874,8 @@ namespace ClaudeStatus
             ordered = list;
             initialized = true;
             PruneAnchors();
+            ApplyPhone();
+            if (phone != null) phone.Publish(ordered, CfgBool("showWorkerSummary", false), Board.Summary(ordered));
             current = ordered.Count > 0 ? ordered[0] : null;
 
             string st = current == null ? "IDLE" : current.State;
@@ -905,20 +921,53 @@ namespace ClaudeStatus
         }
 
         // Dismissing only deletes Claude Status's own state file for a DONE worker; Claude Code is not touched.
-        // If the session has meanwhile moved on (a new prompt), the file is left alone.
+        // If the session has meanwhile moved on (a new prompt), the file is left alone (see Dismissal).
         bool DismissDone(SessionInfo si)
         {
             if (si.State != Board.Done) return false;
-            string f = Path.Combine(sessionsDir, si.Id + ".json");
-            bool removed = false;
-            try
-            {
-                var cur = Board.Parse(si.Id, new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(ReadShared(f)), DateTime.MinValue, DateTime.MinValue);
-                if (cur.State == Board.Done && cur.Updated == si.Updated) { File.Delete(f); removed = true; }
-            }
-            catch { }
+            bool removed = Dismissal.DismissDone(sessionsDir, si.Id, Dismissal.Occurrence(si)) == DismissResult.Dismissed;
             Reload();
             return removed;
+        }
+
+        // ---------- phone dashboard (phone.cs; off unless "phoneDashboard": true) ----------
+        // Runs inside this process so the phone sees exactly this board; it never affects the desktop:
+        // if it can't start (e.g. port in use) the reason is shown in the menu and it retries later.
+        void ApplyPhone()
+        {
+            bool want = CfgBool("phoneDashboard", false);
+            int port = (int)CfgNum("phonePort", PhoneServer.DefaultPort);
+            if (port < 1024 || port > 65535) port = PhoneServer.DefaultPort;
+            if (phone != null && (!want || phone.Port != port)) { phone.Stop(); phone = null; }
+            if (!want) { phoneError = ""; return; }
+            if (phone != null || (port == phoneFailedPort && DateTime.UtcNow < phoneRetryUtc)) return;
+            try
+            {
+                var p = new PhoneServer(root, port, PhoneDismiss, null);
+                if (p.Start()) { phone = p; phoneError = ""; phoneFailedPort = 0; return; }
+                phoneError = p.Error;
+            }
+            catch (Exception e) { phoneError = e.Message; }
+            phoneFailedPort = port;
+            phoneRetryUtc = DateTime.UtcNow.AddSeconds(30);
+        }
+
+        // Called on a server thread; the file-level check makes it safe without the UI thread.
+        DismissResult PhoneDismiss(string id, string occurrence)
+        {
+            var r = Dismissal.DismissDone(sessionsDir, id, occurrence);
+            if (r == DismissResult.Dismissed && IsHandleCreated) try { BeginInvoke((MethodInvoker)Reload); } catch { }
+            return r;
+        }
+
+        string PhoneStatusText
+        {
+            get
+            {
+                if (!CfgBool("phoneDashboard", false)) return "Phone dashboard: off";
+                if (phone != null) return "Phone dashboard: on (127.0.0.1:" + phone.Port + ")";
+                return "Phone dashboard: not running: " + (phoneError != "" ? phoneError : "starting");
+            }
         }
 
         void FocusWorker(SessionInfo si)
@@ -1337,6 +1386,7 @@ namespace ClaudeStatus
             view.DropDownItems.Add(new ToolStripMenuItem("Compact", null, (s, e) => { SetView(false); Show(); }) { Checked = !board });
             menu.Items.Add(view);
             menu.Items.Add("Settings…", null, (s, e) => OpenSettings());
+            menu.Items.Add(new ToolStripMenuItem(PhoneStatusText) { Enabled = false });
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add("Show window", null, (s, e) => { Show(); BringToFrontNoActivate(); });
             menu.Items.Add("Reset position", null, (s, e) => { home = DefaultPosition(); SavePosition(); UpdateLayout(); Show(); });
@@ -1347,7 +1397,7 @@ namespace ClaudeStatus
         {
             if (settingsForm != null && !settingsForm.IsDisposed) { settingsForm.Activate(); return; }
             settingsForm = new SettingsForm(CfgStr("workerSort", "urgency"), CfgBool("showWorkerSummary", false), CfgStr("startupView", "workerBoard"),
-                SetCfg, () => { try { Process.Start("notepad.exe", "\"" + cfgPath + "\""); } catch { } });
+                CfgBool("phoneDashboard", false), SetCfg, () => { try { Process.Start("notepad.exe", "\"" + cfgPath + "\""); } catch { } });
             settingsForm.Load += (s, e) =>
             {
                 Rectangle wa = Screen.FromControl(this).WorkingArea;
@@ -1363,12 +1413,19 @@ namespace ClaudeStatus
         protected override void OnFormClosed(FormClosedEventArgs e)
         {
             SavePosition();
+            StopPhone();
             watcher.EnableRaisingEvents = false;
             cfgWatcher.EnableRaisingEvents = false;
             if (displayChanged != null) SystemEvents.DisplaySettingsChanged -= displayChanged;
             tray.Visible = false;
             tray.Dispose();
             base.OnFormClosed(e);
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing) StopPhone();
+            base.Dispose(disposing);
         }
 
         // ---------- persistence (window position, config, window anchors; nothing sensitive) ----------

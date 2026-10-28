@@ -1,0 +1,120 @@
+/* Claude Status phone dashboard. Same colours, type and row layout as the desktop Worker Board
+   (indicator.cs RenderBoard), scaled up about 1.35x for a phone; only the DONE dismiss button is bigger,
+   so it's comfortable to tap. Dark only, like the desktop window. */
+:root {
+  --page: #141414;
+  --bg: #1e1e1e;        /* Bg */
+  --muted: #a0a0a0;     /* Muted */
+  --name: #e4e4e4;      /* NameColor */
+  --line: #343434;      /* Line */
+  --hover: #2c2c2c;     /* HoverBg */
+  --yellow: #ffc83d;
+  --green: #3fb950;
+  --red: #f85149;
+  --grey: #808080;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+
+html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--page);
+  color: var(--name);
+  font-family: "Segoe UI", system-ui, -apple-system, Roboto, "Helvetica Neue", Arial, sans-serif;
+  padding: max(8px, env(safe-area-inset-top)) max(8px, env(safe-area-inset-right)) max(8px, env(safe-area-inset-bottom)) max(8px, env(safe-area-inset-left));
+}
+
+/* the "window": 1px border in the colour of the most urgent worker, like the desktop board */
+.board {
+  max-width: 560px;
+  margin: 0 auto;
+  background: var(--bg);
+  border: 1px solid rgba(128, 128, 128, .47);
+}
+.board[data-top="WORKING"] { border-color: rgba(255, 200, 61, .47); }
+.board[data-top="DONE"] { border-color: rgba(63, 185, 80, .47); }
+.board[data-top="NEEDS_YOU"], .board[data-top="ERROR"] { border-color: rgba(248, 81, 73, .47); }
+.board.stale { border-color: rgba(128, 128, 128, .47); }
+
+.head { border-bottom: 1px solid var(--line); }
+.titlebar { display: flex; align-items: center; min-height: 36px; padding: 0 12px 0 14px; gap: 10px; }
+h1 { flex: 1 1 auto; margin: 0; font-size: 13.5px; font-weight: 700; color: var(--muted); letter-spacing: .01em; }
+.summary { margin-top: -5px; padding: 0 14px 7px; font-size: 13.5px; color: var(--muted); }
+
+/* connection state (where the desktop has its window buttons); always text + colour */
+.conn { flex: none; display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 700; color: var(--muted); white-space: nowrap; }
+.conn::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--grey); }
+.conn[data-conn="live"]::before { background: var(--green); }
+.conn[data-conn="reconnecting"] { color: var(--yellow); }
+.conn[data-conn="reconnecting"]::before { background: var(--yellow); }
+.conn[data-conn="offline"] { color: var(--red); }
+.conn[data-conn="offline"]::before { background: var(--red); }
+
+.banner {
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 8px 14px 9px;
+  border-bottom: 1px solid var(--line);
+  border-left: 3px solid var(--yellow);
+  background: #262626;
+  font-size: 13.5px; line-height: 1.35;
+}
+.banner[data-conn="offline"] { border-left-color: var(--red); }
+.banner[hidden], .summary[hidden], .note[hidden] { display: none; }
+.banner .why { color: var(--muted); }
+
+.rows { list-style: none; margin: 0; padding: 4px 0 7px; }
+
+.row { display: flex; align-items: center; min-height: 40px; padding-left: 14px; }
+.dot, .ring { flex: none; width: 11px; height: 11px; margin-right: 10px; border-radius: 50%; }
+.ring { border: 1.5px solid var(--grey); }
+.s-WORKING .dot { background: var(--yellow); }
+.s-DONE .dot { background: var(--green); }
+.s-NEEDS_YOU .dot, .s-ERROR .dot { background: var(--red); }
+
+.name {
+  flex: 1 1 auto; min-width: 0;
+  margin-right: 10px; padding: 3px 0;
+  font-size: 16px; line-height: 1.25; color: var(--name);
+  overflow: hidden; overflow-wrap: anywhere;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2;
+}
+.name.muted, .placeholder .name { color: var(--muted); }
+.placeholder { padding-right: 14px; }
+
+.status { flex: none; font-size: 14.5px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.status .rest { color: var(--muted); }
+.s-WORKING .word { color: var(--yellow); }
+.s-DONE .word { color: var(--green); }
+.s-NEEDS_YOU .word, .s-ERROR .word { color: var(--red); }
+
+/* the dismiss "x" (DONE rows only); other rows keep the same space so statuses line up, as on the desktop */
+.x, .xspace { flex: none; width: 46px; height: 40px; }
+.x {
+  display: inline-flex; align-items: center; justify-content: center;
+  margin: 0; padding: 0; border: 0; border-radius: 4px;
+  background: transparent; color: var(--grey);
+  font: inherit; font-size: 22px; line-height: 1;
+  -webkit-tap-highlight-color: transparent; touch-action: manipulation;
+}
+.x:active:not(:disabled) { background: var(--hover); color: #fff; }
+.x:focus-visible { outline: 2px solid var(--muted); outline-offset: -4px; }
+.x:disabled { opacity: .35; }
+.row.busy { opacity: .5; }
+
+/* retained data while not connected: still readable, clearly not live */
+.board.stale .rows { opacity: .55; }
+
+.note {
+  position: fixed; left: 50%; bottom: max(16px, env(safe-area-inset-bottom));
+  transform: translateX(-50%);
+  width: max-content; max-width: calc(100vw - 32px);
+  padding: 9px 14px;
+  background: #2a2a2a; border: 1px solid var(--line); border-radius: 6px;
+  color: var(--name); font-size: 14px;
+}
+
+.noscript { color: var(--muted); padding: 16px; }

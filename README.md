@@ -90,6 +90,7 @@ The ⚙ button (in the Worker Board header, or in Compact while hovering) opens 
 - **Worker ordering:** Urgency / Most recent
 - **Show worker summary:** on / off
 - **Startup view:** Worker Board / Compact (used the next time Claude Status starts)
+- **Phone dashboard (private, via Tailscale):** on / off (see [Phone dashboard](#phone-dashboard-optional))
 - **Edit project aliases (config.json)…** opens `config.json` in Notepad. Saved alias changes apply as soon as you save the file.
 
 ### Clicking a worker
@@ -110,12 +111,110 @@ What this can't do:
 - Sessions recorded by the previous version of Claude Status (before upgrading) have no process identity yet; they become clickable after their next prompt.
 - Clicking a worker is the **only** thing that ever moves keyboard focus. State changes, sounds, notifications, view switching and resizing never take focus.
 
+## Phone dashboard (optional)
+
+See the same Worker Board on your phone, for example on Android while you're away from the desk, and dismiss finished workers from there. It is **off by default** and stays **private to your own Tailscale network**: nothing is published to the internet.
+
+```text
+Android phone (browser, Tailscale on)
+    │  http://<laptop>.<tailnet>.ts.net/        (WireGuard-encrypted, your tailnet only)
+    ▼
+tailscale serve on the laptop  ── forwards to ──►  127.0.0.1:48521
+                                                     │
+                                  Claude Status itself (the desktop app's process)
+                                  serves the board it is showing, nothing else
+```
+
+- **Same board, not a copy.** The phone shows exactly what the desktop Worker Board shows: friendly names, `#1/#2` numbering, ordering setting, summary line, status text and colors, short error types, timers and *No Claude workers*. It comes straight from the running desktop app, so the desktop's own cleanup (closed or crashed sessions) and dismissals apply automatically.
+- **Live.** Changes appear within about a second without refreshing; timers tick on the phone. Opening or reopening the page always fetches the current board first.
+- **Dismiss DONE rows from either screen.** Tap the **×** on a DONE row on the phone and it disappears from both screens; dismiss it on the desktop and it disappears from the phone. As on the desktop, this only removes Claude Status's row: Claude isn't stopped or messaged and no session or file is touched, and a later prompt in that session brings the worker back. WORKING, NEEDS YOU and ERROR rows can't be dismissed.
+- **Honest connection state** (top right): **LIVE**, **CONNECTING…**, **RECONNECTING…** or **OFFLINE**. When the connection is lost, the page keeps the last board but dims it, freezes its timers, shows *Last update 11:55:07 (3s ago). The board below may be out of date.* and says why (laptop unreachable, or Claude Status not answering). Dismissing is disabled until it's LIVE again, and a dismiss is never queued for later. It reconnects by itself and refreshes as soon as the laptop answers again, including when you come back to the page after Android put it in the background.
+- **No phone notifications**: no sounds, vibration, notification prompts or background activity. (Desktop sounds and notifications are unchanged.)
+- Phone rows aren't clickable: bringing a window forward only makes sense on the laptop.
+
+### Requirements
+
+- The Claude Status desktop app, running on the laptop (the phone dashboard runs inside it).
+- [Tailscale](https://tailscale.com/) on the laptop **and** the phone, signed in to the same tailnet, with MagicDNS on (the default). The phone and laptop can be on different networks (e.g. mobile data). HTTPS certificates are **not** needed.
+- Any mobile browser (tested with Chrome's Android emulation). Nothing else to install.
+
+### Turn it on
+
+```powershell
+powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\.claude\status-indicator\phone-setup.ps1"
+```
+
+This:
+
+1. sets `"phoneDashboard": true` in `config.json` (or tick **Settings → Phone dashboard**). Claude Status then starts its dashboard on `127.0.0.1:48521` within a few seconds; the script starts Claude Status if it isn't running;
+2. runs `tailscale serve --bg --http=80 http://127.0.0.1:48521`, which makes it reachable **only from devices in your tailnet** (never Tailscale Funnel, never router port forwarding). If tailnet port 80 is already used by another `tailscale serve` entry, the script stops and changes nothing there; use `-HttpPort 8080` instead;
+3. prints the address to open on the phone, e.g. `http://thund3rhead.tail33ffb4.ts.net/`.
+
+If the `tailscale serve` step fails (for example because Tailscale wants an administrator prompt), run it yourself:
+
+```powershell
+tailscale serve --bg --http=80 http://127.0.0.1:48521
+```
+
+Expected result: `tailscale serve status` lists `http://<laptop>.<tailnet>.ts.net/` → `proxy http://127.0.0.1:48521`.
+
+### Open it on the phone
+
+1. Make sure the Tailscale app on the phone is connected.
+2. Open the address printed by `phone-setup.ps1` (find it again any time with `phone-setup.ps1 -Status`). It's `http://` + the laptop's MagicDNS name; on the phone it's also listed in the Tailscale app under the laptop's name.
+3. Optional: browser menu → **Add to Home screen** for a one-tap shortcut. (It's a normal web page: no offline mode or caching, so it never shows old data as current.)
+
+### Lifecycle
+
+- The dashboard is part of the desktop app: it starts when Claude Status starts (if enabled) and stops when you exit it. There's no separate service or background process, and only one can run (one Claude Status per user; the port is opened exclusively).
+- If the dashboard can't start (e.g. another program uses port 48521), the desktop app works normally and its tray menu shows *Phone dashboard: not running: port 48521 is already in use*; set another `"phonePort"` in `config.json` and run `phone-setup.ps1` again. Its tray menu always shows the dashboard's state.
+- The hooks and the desktop board never depend on the phone side.
+- `tailscale serve --bg` persists across restarts. While Claude Status isn't running, the phone shows **OFFLINE** with *Claude Status isn't answering*.
+
+### Locking, sleep and disconnection
+
+- **Locked laptop: works.** Claude Status, Claude Code and Tailscale keep running while Windows is locked.
+- **Sleeping / hibernating laptop: doesn't.** Nothing runs while it sleeps; the phone shows **OFFLINE** with the time of the last update, and reconnects on its own once the laptop wakes. To use it away from the desk, keep the laptop plugged in and set *Sleep* to *Never* (when plugged in) in Windows power settings.
+- **Laptop or phone off Tailscale / no network:** OFFLINE with the last update time; reconnects automatically when the connection returns.
+
+### How synced dismissal stays safe
+
+Each DONE row on the phone carries an opaque token for that particular DONE occurrence (that session, that DONE, that last update). When you tap **×**, Claude Status re-reads the session's state file **while holding it locked against the hook's writes**, checks that it is still that exact DONE, and only then deletes it through the same lock. So if the session got a new prompt in the meantime (even a moment before your tap arrived), the dismiss is refused (*Not dismissed: that worker has changed*) and the worker stays. Repeating a dismiss is harmless. The desktop **×** uses the same check.
+
+### Security and privacy
+
+- The dashboard listens on `127.0.0.1` only; it's reachable from the phone solely through `tailscale serve`, i.e. by devices signed in to your tailnet. It is not exposed on your Wi-Fi/LAN.
+- Requests must be addressed to `127.0.0.1`/`localhost` or this laptop's own Tailscale name/IP (protects against DNS-rebinding pages). Dismissing additionally requires a same-origin `Origin`, a JSON body and a custom header, so other websites can't trigger it; there's no CORS. The page has a strict Content-Security-Policy and isn't cached.
+- The only possible change is dismissing a current DONE row; the browser can't name files or paths.
+- The phone receives only what it displays: friendly name, state, when the state began, the short error type, and random-looking tokens. No session IDs, process IDs, folder paths, window data, prompts or Claude output. Nothing is logged.
+- No accounts, cloud hosting, database or paid services.
+
+### Turn it off / remove it
+
+```powershell
+# turn off (removes the tailscale serve entry phone-setup.ps1 created, sets phoneDashboard=false)
+powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\.claude\status-indicator\phone-setup.ps1" -Disable
+```
+
+Or untick **Settings → Phone dashboard** (stops it immediately; the `tailscale serve` entry then just answers "not available" until you remove it with `tailscale serve --http=80 off`). `uninstall.ps1` also removes the serve entry created by `phone-setup.ps1`.
+
+### Troubleshooting
+
+| What you see | What to do |
+|---|---|
+| Page doesn't load at all | Tailscale connected on the phone? Laptop awake? Check `phone-setup.ps1 -Status` on the laptop: it shows whether the dashboard answers locally and the `tailscale serve` entry. |
+| **OFFLINE** *Claude Status isn't answering* | The laptop is reachable but Claude Status isn't running, or the dashboard is off. Start Claude Status; check its tray menu (*Phone dashboard: …*). |
+| **OFFLINE** *Can't reach the laptop* | Laptop asleep, offline, or Tailscale disconnected on either device. The board shown is the last known one; it refreshes by itself once reachable. |
+| **RECONNECTING…** with a *Last update* time | Brief interruption; rows are dimmed and not current until it says LIVE again. |
+| *This address isn't one Claude Status accepts* | Use the MagicDNS address from `phone-setup.ps1 -Status`; other names pointing at the laptop are refused on purpose. |
+| Tray says *port 48521 is already in use* | Set `"phonePort": 48522` (any free port above 1024) in `config.json`, then `phone-setup.ps1 -Disable` and `phone-setup.ps1` again so `tailscale serve` points at the new port. |
+
 ## How it works
 
 Claude Status uses Claude Code's official **lifecycle hooks**. It does **not**:
 
 - scrape the screen, read window titles or watch VS Code pixels;
-- poll Anthropic or make any network requests;
+- poll Anthropic or make any outgoing network requests (the optional [phone dashboard](#phone-dashboard-optional) only *listens*, on 127.0.0.1);
 - store your prompts or Claude's responses. (Claude Code hands each hook its event data, which for a new prompt includes the prompt text. `hook.ps1` only extracts a few fields from it and never saves the prompt.)
 
 ```text
@@ -210,6 +309,7 @@ Nothing is sent anywhere. Older v1 state files from previous versions are read a
 - User-level install, no administrator rights
 - No Node.js, Vite, Python, or other runtime needed; it uses only what ships with Windows
 - No network connection required; negligible CPU while idle
+- Optional private [phone dashboard](#phone-dashboard-optional) over Tailscale: the same board on your phone, with synced DONE dismissal
 
 ## Requirements
 
@@ -366,6 +466,8 @@ If the wizard says it can't find the file, use this instead: press **Win + R**, 
   "startupView": "workerBoard",
   "workerSort": "urgency",
   "showWorkerSummary": false,
+  "phoneDashboard": false,
+  "phonePort": 48521,
   "projectAliases": {
     "Toah_Nipi_Booking_Software": "Booking Software",
     "Toah_Nipi_Website": "Website",
@@ -383,6 +485,8 @@ If the wizard says it can't find the file, use this instead: press **Win + R**, 
 | `startupView` | `"workerBoard"` (default) or `"compact"`: the view Claude Status opens in. |
 | `workerSort` | `"urgency"` (default: NEEDS YOU, ERROR, WORKING, DONE) or `"recent"` (most recently updated first). Used by both views. |
 | `showWorkerSummary` | `true` shows a one-line summary under the Worker Board heading. Default `false`. |
+| `phoneDashboard` | `true` runs the [phone dashboard](#phone-dashboard-optional) on 127.0.0.1. Default `false`. Also in Settings. |
+| `phonePort` | Its local port (default `48521`). |
 | `projectAliases` | Friendly names: `"Folder_Name": "Friendly Name"`. The folder name is matched case-insensitively against the name of the folder Claude is working in. Folders without an alias get their underscores replaced with spaces. Several folders may share one alias; their workers are then numbered together. |
 
 Sounds and notifications are the same as before: one per state change, never duplicated per row. Notifications follow Windows' Do Not Disturb / Focus settings and appear as coming from "Windows PowerShell".
@@ -401,7 +505,7 @@ powershell -ExecutionPolicy Bypass -File .\src\uninstall.ps1
 
 The uninstaller:
 
-1. stops the indicator;
+1. stops the indicator (and with it the phone dashboard), and removes the `tailscale serve` entry `phone-setup.ps1` created, if any;
 2. removes the autostart shortcut, if it points to this install;
 3. backs up `settings.json`, then removes **only** Claude Status's hook entries;
 4. deletes `%USERPROFILE%\.claude\status-indicator\` (including session files, `windows.json` and settings).
@@ -449,6 +553,9 @@ install.ps1              installer / updater (run from the repo)
 src/
   hook.ps1               called by Claude Code hooks; writes state files
   indicator.cs           the Worker Board / Compact window (C#, WinForms)
+  phone.cs               optional phone dashboard server (127.0.0.1 only) + race-safe DONE dismissal
+  phone.html/.css/.js    the phone page
+  phone-setup.ps1        turn the phone dashboard on/off and set up `tailscale serve`
   indicator.ps1          compiles indicator.cs with Add-Type and runs it
   start-indicator.vbs    launches the indicator with no console window
   stop-indicator.ps1     stops the indicator
@@ -459,6 +566,7 @@ tests/
   run-tests.ps1          automated tests (temporary folders only; never touches your real install)
   live-tests.ps1         window/focus tests, started hidden by run-tests.ps1 -Live
   common.ps1             shared test helpers
+  phone-browser.mjs      phone page checks in headless Chrome/Edge (run-tests.ps1 -Browser)
 ```
 
 Runtime files (`state/`, `position.txt`, `debug.log`) are created only in the install folder and are git-ignored.
@@ -469,9 +577,10 @@ Runtime files (`state/`, `position.txt`, `debug.log`) are created only in the in
 powershell -ExecutionPolicy Bypass -File .\tests\run-tests.ps1          # ~1 minute
 powershell -ExecutionPolicy Bypass -File .\tests\run-tests.ps1 -Live    # + opens test windows and moves focus (~30 s; don't type meanwhile)
 powershell -ExecutionPolicy Bypass -File .\tests\run-tests.ps1 -E2E     # + one real `claude -p` prompt against a temporary install
+powershell -ExecutionPolicy Bypass -File .\tests\run-tests.ps1 -Browser # + phone page in headless Chrome at Android sizes (needs Node.js 22+)
 ```
 
-They cover the hook lifecycle and privacy (run as real child processes with secret-laden inputs), aliases, numbering, both orderings, timers, v1 compatibility, DONE retention and dismissal, layout at 100–200 % DPI with 1/6/90 workers, worker → window identification (terminals, multi-window apps, closed windows, reused process IDs), focus stealing, and install → update → re-install → uninstall against a temporary Claude config folder. `-RenderDir <folder>` saves PNG renders of the board for a visual check.
+They cover the hook lifecycle and privacy (run as real child processes with secret-laden inputs), aliases, numbering, both orderings, timers, v1 compatibility, DONE retention and dismissal, layout at 100–200 % DPI with 1/6/90 workers, worker → window identification (terminals, multi-window apps, closed windows, reused process IDs), focus stealing, and install → update → re-install → uninstall against a temporary Claude config folder. The phone dashboard tests cover desktop/phone parity, dismissal in both directions, the delayed-dismiss race and 400 randomized hook-write/dismiss interleavings, malformed and cross-site requests, Host/Origin checks, start/stop/port conflicts, and that phone.js formats timers exactly like the desktop. `-Browser` additionally drives the real page at 320/360/412 px widths through disconnects, a 502 from `tailscale serve`, resume and recovery, saving `phone-*.png` screenshots. These are emulated phones; Tailscale itself and a physical Android device are not part of the automated tests. `-RenderDir <folder>` saves PNG renders of the board for a visual check.
 
 ## Ideas for later
 

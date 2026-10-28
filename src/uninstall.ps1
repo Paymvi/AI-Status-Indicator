@@ -128,6 +128,12 @@ $procs = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe' OR Name=
 foreach ($p in $procs) { Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue }
 Write-Host "  stopped $($procs.Count) indicator process(es)"
 
+# ---------- 1b. Phone dashboard: remove its `tailscale serve` entry (only one pointing at this dashboard) ----------
+$phoneSetup = Join-Path $installDir 'phone-setup.ps1'
+if (Test-Path -LiteralPath $phoneSetup) {
+    try { & $phoneSetup -Disable | ForEach-Object { "  $_" } } catch { Write-Warning "Couldn't check tailscale serve for the phone dashboard: $_" }
+}
+
 # ---------- 2. Autostart shortcut (only if it points at this install) ----------
 $lnk = Join-Path ([Environment]::GetFolderPath('Startup')) 'Claude Status Indicator.lnk'
 if (Test-Path -LiteralPath $lnk) {
