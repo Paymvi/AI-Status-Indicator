@@ -19,6 +19,10 @@
       <span id="conn" class="conn" data-conn="connecting" role="status">CONNECTING…</span>
     </div>
     <div id="summary" class="summary" hidden></div>
+    <div class="viewbar" role="group" aria-label="View">
+      <button type="button" id="view-list" class="seg" data-view="list" aria-pressed="true">List</button>
+      <button type="button" id="view-creatures" class="seg" data-view="creatures" aria-pressed="false">Creatures</button>
+    </div>
   </header>
   <div id="banner" class="banner" hidden>
     <strong id="banner-title"></strong>
@@ -28,6 +32,10 @@
   <ul id="rows" class="rows">
     <li class="row placeholder"><span class="ring"></span><span class="name muted">Connecting to the laptop…</span></li>
   </ul>
+  <div id="creatures" class="creatures" hidden>
+    <ul id="pets" class="pets"></ul>
+    <p id="pet-hint" class="hint">Tap a creature to bring up its window on the laptop.</p>
+  </div>
 </main>
 <div id="note" class="note" role="status" aria-live="polite" hidden></div>
 <noscript><p class="noscript">This page needs JavaScript to show your Claude workers.</p></noscript>

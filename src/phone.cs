@@ -8,8 +8,10 @@
 //   GET  /  /phone.css  /phone.js        the page (fixed list; request paths never reach the file system)
 //   GET  /api/board[?v=N&wait=1]          the Worker Board; with wait=1 it answers when it changes (<= 20 s)
 //   POST /api/dismiss  {"k":..,"d":..}    dismiss one specific DONE occurrence
+//   POST /api/focus    {"k":..}           bring that worker's window forward on the laptop (the desktop's
+//                                         own click-on-a-worker action; the laptop picks the window)
 // Only display data leaves the process: friendly name, state, when that state began, a short error type,
-// and opaque tokens. No session IDs, process IDs, folder paths or window data.
+// a creature look number, and opaque tokens. No session IDs, process IDs, folder paths or window data.
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -28,6 +30,10 @@ using Microsoft.Win32.SafeHandles;
 namespace ClaudeStatus
 {
     public enum DismissResult { Dismissed, Gone, Changed, NotDone }
+
+    // Outcome of bringing a worker's window forward. Focused only when Windows confirms that window is now
+    // in front. NotYet / Ended / Unknown / Ambiguous are the desktop's own "couldn't identify" reasons.
+    public enum FocusResult { Focused, Refused, Locked, NotYet, Ended, Unknown, Ambiguous, Gone, Busy, Unavailable }
 
     // Dismissing a DONE worker = deleting Claude Status's own state file for it, and only while that file
     // still describes the very DONE occurrence the user saw. The check and the delete happen on one open
@@ -80,13 +86,16 @@ namespace ClaudeStatus
     {
         public string Key = "", Occ = "", Name = "", State = "", Err = "";
         public long Since;
+        public int Look;
         internal string SessionId = "", Occurrence = "";
     }
 
     public sealed class PhoneServer
     {
         public const int DefaultPort = 48521;
-        const int MaxHeader = 8192, MaxBody = 1024, MaxConnections = 32, WaitMs = 20000;
+        const int MaxHeader = 8192, MaxBody = 1024, MaxConnections = 32, WaitMs = 20000, RepeatMs = 1500;
+        // Creature looks: phone.js draws look L as hat (L % Hats) on body colour (L / Hats); see HATS there.
+        public const int Hats = 13, Looks = 65;
         static readonly Regex TokenRx = new Regex("^[A-Za-z0-9_-]{22}$");
         static readonly DateTime Epoch = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
         static readonly Dictionary<string, string[]> Pages = new Dictionary<string, string[]>
@@ -100,9 +109,11 @@ namespace ClaudeStatus
         readonly int port;
         readonly string root;
         readonly Func<string, string, DismissResult> dismiss;
+        readonly Func<string, FocusResult> focus;
         readonly Func<string[]> tailnetLookup;
         readonly byte[] secret = new byte[32];
-        readonly object gate = new object(), hostGate = new object();
+        readonly object gate = new object(), hostGate = new object(), focusGate = new object();
+        readonly Dictionary<string, int> looks = new Dictionary<string, int>();   // session -> look (Publish only)
         readonly Dictionary<string, byte[]> files = new Dictionary<string, byte[]>();
 
         List<PhoneRow> rows = new List<PhoneRow>();
@@ -114,17 +125,25 @@ namespace ClaudeStatus
         int active;
         string[] tailnetNames = new string[0];
         DateTime tailnetCheckedUtc = DateTime.MinValue;
+        bool focusBusy;
+        string lastFocusKey = "";
+        DateTime lastFocusUtc = DateTime.MinValue;
+        FocusResult lastFocus;
 
         public int Port { get { return port; } }
         public bool Running { get { return running; } }
         public string Error { get; private set; }
         public long Version { get { lock (gate) return version; } }
 
-        // dismiss(sessionId, occurrence) performs the dismissal (see Dismissal). tailnetLookup returns this
-        // machine's Tailscale names/IPs; null = ask tailscale.exe (only when a non-loopback Host shows up).
         public PhoneServer(string root, int port, Func<string, string, DismissResult> dismiss, Func<string[]> tailnetLookup)
+            : this(root, port, dismiss, null, tailnetLookup) { }
+
+        // dismiss(sessionId, occurrence) performs the dismissal (see Dismissal); focus(sessionId) brings that
+        // worker's window forward (null = not available). tailnetLookup returns this machine's Tailscale
+        // names/IPs; null = ask tailscale.exe (only when a non-loopback Host shows up).
+        public PhoneServer(string root, int port, Func<string, string, DismissResult> dismiss, Func<string, FocusResult> focus, Func<string[]> tailnetLookup)
         {
-            this.root = root; this.port = port; this.dismiss = dismiss;
+            this.root = root; this.port = port; this.dismiss = dismiss; this.focus = focus;
             this.tailnetLookup = tailnetLookup ?? LookupTailnetNames;
             using (var rng = RandomNumberGenerator.Create()) rng.GetBytes(secret);
             Error = "";
@@ -171,6 +190,7 @@ namespace ClaudeStatus
         {
             var next = new List<PhoneRow>();
             var sig = new StringBuilder(summary ? "S" + summaryLine : "-");
+            AssignLooks(ordered);
             foreach (var s in ordered)
             {
                 bool done = s.State == Board.Done;
@@ -179,10 +199,10 @@ namespace ClaudeStatus
                 {
                     Key = Token("k|" + s.Id), Occ = done ? Token("o|" + s.Id + "|" + occ) : "",
                     Name = s.DisplayName, State = s.State, Err = s.State == Board.Error ? Board.ShortError(s.Detail) : "",
-                    Since = Ms(s.StateSince), SessionId = s.Id, Occurrence = occ,
+                    Since = Ms(s.StateSince), Look = looks[s.Id], SessionId = s.Id, Occurrence = occ,
                 };
                 next.Add(r);
-                sig.Append('\n').Append(r.Key).Append('|').Append(r.Occ).Append('|').Append(r.Name).Append('|').Append(r.State).Append('|').Append(r.Err).Append('|').Append(r.Since);
+                sig.Append('\n').Append(r.Key).Append('|').Append(r.Occ).Append('|').Append(r.Name).Append('|').Append(r.State).Append('|').Append(r.Err).Append('|').Append(r.Since).Append('|').Append(r.Look);
             }
             lock (gate)
             {
@@ -191,6 +211,37 @@ namespace ClaudeStatus
                 rows = next; summaryOn = summary; summaryText = summaryLine; signature = s2;
                 published = true; version++;
                 Monitor.PulseAll(gate);
+            }
+        }
+
+        // Each worker keeps its creature for as long as this process runs (also after a dismissal, so a worker
+        // that comes back looks the same). A new worker starts from a look picked by its token and takes the
+        // first one whose hat no worker on the board is wearing, so up to 13 workers all wear different hats.
+        void AssignLooks(List<SessionInfo> ordered)
+        {
+            var hats = new bool[Hats];
+            var taken = new HashSet<int>();
+            foreach (var s in ordered)
+            {
+                int l;
+                if (looks.TryGetValue(s.Id, out l)) { hats[l % Hats] = true; taken.Add(l); }
+            }
+            foreach (var s in ordered)
+            {
+                if (looks.ContainsKey(s.Id)) continue;
+                if (looks.Count > 500)
+                {
+                    var present = new HashSet<string>();
+                    foreach (var o in ordered) present.Add(o.Id);
+                    foreach (var id in new List<string>(looks.Keys)) if (!present.Contains(id)) looks.Remove(id);
+                }
+                byte[] h;
+                using (var mac = new HMACSHA256(secret)) h = mac.ComputeHash(Encoding.UTF8.GetBytes("c|" + s.Id));
+                int start = (int)(BitConverter.ToUInt32(h, 0) % Looks), pick = -1;
+                for (int i = 0; i < Looks && pick < 0; i++) { int l = (start + i) % Looks; if (!hats[l % Hats] && !taken.Contains(l)) pick = l; }
+                for (int i = 0; i < Looks && pick < 0; i++) { int l = (start + i) % Looks; if (!taken.Contains(l)) pick = l; }
+                if (pick < 0) pick = start;
+                looks[s.Id] = pick; hats[pick % Hats] = true; taken.Add(pick);
             }
         }
 
@@ -254,7 +305,8 @@ namespace ClaudeStatus
                 return;
             }
             if (req.Method == "POST" && req.Path == "/api/dismiss") { DismissRequest(ns, req); return; }
-            if (req.Path == "/api/dismiss" || Pages.ContainsKey(req.Path) || req.Path == "/api/board") { Text(ns, 405, "Method not allowed"); return; }
+            if (req.Method == "POST" && req.Path == "/api/focus") { FocusRequest(ns, req); return; }
+            if (req.Path == "/api/dismiss" || req.Path == "/api/focus" || Pages.ContainsKey(req.Path) || req.Path == "/api/board") { Text(ns, 405, "Method not allowed"); return; }
             Text(ns, 404, "Not found");
         }
 
@@ -338,33 +390,57 @@ namespace ClaudeStatus
         {
             var list = new List<object>();
             foreach (var r in rows)
-                list.Add(new Dictionary<string, object> { { "k", r.Key }, { "n", r.Name }, { "s", r.State }, { "t", r.Since }, { "e", r.Err }, { "d", r.Occ } });
+                list.Add(new Dictionary<string, object> { { "k", r.Key }, { "n", r.Name }, { "s", r.State }, { "t", r.Since }, { "e", r.Err }, { "d", r.Occ }, { "c", r.Look } });
             var o = new Dictionary<string, object> { { "v", version }, { "now", Ms(DateTime.UtcNow) }, { "summary", summaryOn }, { "text", summaryOn ? summaryText : "" }, { "rows", list } };
             return new JavaScriptSerializer().Serialize(o);
         }
 
-        void DismissRequest(NetworkStream ns, Request req)
+        // Cross-site protection for the action endpoints: a page on another site can't send these (JSON + a
+        // custom header force a CORS preflight, which this server never approves), and Origin / Fetch metadata
+        // must name this dashboard. The header names the one action, so neither endpoint accepts the other's.
+        bool ActionAllowed(NetworkStream ns, Request req, string action)
         {
-            // Cross-site protection: a page on another site can't send this (JSON + custom header force a CORS
-            // preflight, which this server never approves), and Origin / Fetch metadata must name this dashboard.
             string origin, site, ctype, marker;
-            if (!req.Headers.TryGetValue("Origin", out origin) || !OriginAllowed(origin)) { Json(ns, 403, "{\"error\":\"forbidden\"}"); return; }
-            if (req.Headers.TryGetValue("Sec-Fetch-Site", out site) && site != "same-origin") { Json(ns, 403, "{\"error\":\"forbidden\"}"); return; }
-            if (!req.Headers.TryGetValue("X-Claude-Status", out marker) || marker != "dismiss") { Json(ns, 403, "{\"error\":\"forbidden\"}"); return; }
-            if (!req.Headers.TryGetValue("Content-Type", out ctype) || !ctype.StartsWith("application/json", StringComparison.OrdinalIgnoreCase)) { Json(ns, 415, "{\"error\":\"json required\"}"); return; }
+            if (!req.Headers.TryGetValue("Origin", out origin) || !OriginAllowed(origin)) { Json(ns, 403, "{\"error\":\"forbidden\"}"); return false; }
+            if (req.Headers.TryGetValue("Sec-Fetch-Site", out site) && site != "same-origin") { Json(ns, 403, "{\"error\":\"forbidden\"}"); return false; }
+            if (!req.Headers.TryGetValue("X-Claude-Status", out marker) || marker != action) { Json(ns, 403, "{\"error\":\"forbidden\"}"); return false; }
+            if (!req.Headers.TryGetValue("Content-Type", out ctype) || !ctype.StartsWith("application/json", StringComparison.OrdinalIgnoreCase)) { Json(ns, 415, "{\"error\":\"json required\"}"); return false; }
+            return true;
+        }
 
-            string key = null, occ = null;
+        // The named fields of a small JSON body, or null if any is missing, not a string, or not token-shaped.
+        static string[] Tokens(Request req, params string[] names)
+        {
             try
             {
                 var d = new JavaScriptSerializer { MaxJsonLength = MaxBody, RecursionLimit = 4 }.Deserialize<Dictionary<string, object>>(Encoding.UTF8.GetString(req.Body));
-                object k, o;
-                if (d != null && d.TryGetValue("k", out k) && d.TryGetValue("d", out o)) { key = k as string; occ = o as string; }
+                if (d == null) return null;
+                var vals = new string[names.Length];
+                for (int i = 0; i < names.Length; i++)
+                {
+                    object v;
+                    vals[i] = d.TryGetValue(names[i], out v) ? v as string : null;
+                    if (vals[i] == null || !TokenRx.IsMatch(vals[i])) return null;
+                }
+                return vals;
             }
-            catch { }
-            if (key == null || occ == null || !TokenRx.IsMatch(key) || !TokenRx.IsMatch(occ)) { Json(ns, 400, "{\"error\":\"bad request\"}"); return; }
+            catch { return null; }
+        }
 
-            PhoneRow row = null;
-            lock (gate) foreach (var r in rows) if (r.Key == key) { row = r; break; }
+        PhoneRow FindRow(string key)
+        {
+            lock (gate) foreach (var r in rows) if (r.Key == key) return r;
+            return null;
+        }
+
+        void DismissRequest(NetworkStream ns, Request req)
+        {
+            if (!ActionAllowed(ns, req, "dismiss")) return;
+            var t = Tokens(req, "k", "d");
+            if (t == null) { Json(ns, 400, "{\"error\":\"bad request\"}"); return; }
+            string key = t[0], occ = t[1];
+
+            PhoneRow row = FindRow(key);
             DismissResult result;
             if (row == null) result = DismissResult.Gone;                  // already dismissed (or ended): nothing to do
             else if (row.Occ == "") result = DismissResult.NotDone;        // WORKING / NEEDS YOU / ERROR can't be dismissed
@@ -376,6 +452,48 @@ namespace ClaudeStatus
             }
             int code = result == DismissResult.Dismissed || result == DismissResult.Gone ? 200 : 409;
             Json(ns, code, "{\"result\":\"" + (result == DismissResult.Dismissed ? "dismissed" : result == DismissResult.Gone ? "gone" : result == DismissResult.NotDone ? "not_done" : "changed") + "\"}");
+        }
+
+        // Brings up the worker the phone tapped, named by its board token only: the laptop looks the worker up
+        // and picks its window exactly as for a click on the desktop board. One at a time; a repeat of the
+        // same tap within RepeatMs gets the previous answer instead of a second activation.
+        void FocusRequest(NetworkStream ns, Request req)
+        {
+            if (!ActionAllowed(ns, req, "focus")) return;
+            var t = Tokens(req, "k");
+            if (t == null) { Json(ns, 400, "{\"error\":\"bad request\"}"); return; }
+            string key = t[0];
+            FocusResult result = FocusResult.Unavailable;
+            bool run = false;
+            lock (focusGate)
+            {
+                if (focusBusy) result = FocusResult.Busy;
+                else if (key == lastFocusKey && (DateTime.UtcNow - lastFocusUtc).TotalMilliseconds < RepeatMs) result = lastFocus;
+                else { focusBusy = true; run = true; }
+            }
+            if (run)
+            {
+                try
+                {
+                    PhoneRow row = FindRow(key);
+                    result = row == null ? FocusResult.Gone : focus == null ? FocusResult.Unavailable : focus(row.SessionId);
+                }
+                catch { result = FocusResult.Unavailable; }
+                finally { lock (focusGate) { focusBusy = false; lastFocusKey = key; lastFocusUtc = DateTime.UtcNow; lastFocus = result; } }
+            }
+            int code = result == FocusResult.Focused ? 200 : result == FocusResult.Busy ? 429 : result == FocusResult.Unavailable ? 503 : 409;
+            Json(ns, code, "{\"result\":\"" + FocusName(result) + "\"}");
+        }
+
+        static string FocusName(FocusResult r)
+        {
+            switch (r)
+            {
+                case FocusResult.Focused: return "focused"; case FocusResult.Refused: return "refused"; case FocusResult.Locked: return "locked";
+                case FocusResult.NotYet: return "not_yet"; case FocusResult.Ended: return "ended"; case FocusResult.Unknown: return "unknown";
+                case FocusResult.Ambiguous: return "ambiguous"; case FocusResult.Gone: return "gone"; case FocusResult.Busy: return "busy";
+                default: return "unavailable";
+            }
         }
 
         // ---------- allowed hosts / origins ----------
@@ -486,6 +604,7 @@ namespace ClaudeStatus
             {
                 case 200: return "OK"; case 400: return "Bad Request"; case 403: return "Forbidden"; case 404: return "Not Found";
                 case 405: return "Method Not Allowed"; case 409: return "Conflict"; case 411: return "Length Required"; case 413: return "Payload Too Large";
+                case 429: return "Too Many Requests";
                 case 415: return "Unsupported Media Type"; case 421: return "Misdirected Request"; case 431: return "Request Header Fields Too Large";
                 case 500: return "Internal Server Error"; case 503: return "Service Unavailable"; default: return "Status";
             }

@@ -118,3 +118,122 @@ h1 { flex: 1 1 auto; margin: 0; font-size: 13.5px; font-weight: 700; color: var(
 }
 
 .noscript { color: var(--muted); padding: 16px; }
+
+/* ---------- List / Creatures switch ---------- */
+.viewbar { display: flex; padding: 0 12px 8px 14px; }
+.seg {
+  min-height: 36px; padding: 0 16px; margin: 0;
+  border: 1px solid #3a3a3a; background: transparent; color: var(--muted);
+  font: inherit; font-size: 14px; font-weight: 600;
+  -webkit-tap-highlight-color: transparent; touch-action: manipulation;
+}
+.seg:first-child { border-radius: 5px 0 0 5px; }
+.seg:last-child { border-radius: 0 5px 5px 0; border-left: 0; }
+.seg[aria-pressed="true"] { background: #353535; color: #fff; }
+.seg:focus-visible { outline: 2px solid var(--name); outline-offset: 1px; position: relative; }
+.rows[hidden], .creatures[hidden], .hint[hidden] { display: none; }
+
+/* ---------- Creatures view: a grid of little workers ---------- */
+.pets {
+  list-style: none; margin: 0; padding: 8px 8px 4px;
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px;
+}
+@media (min-width: 540px) { .pets { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+
+/* the card border carries the status colour, like the desktop board's window border */
+.card { position: relative; min-width: 0; background: #242424; border: 1px solid rgba(128, 128, 128, .4); border-radius: 6px; }
+.card.s-WORKING { border-color: rgba(255, 200, 61, .55); }
+.card.s-DONE { border-color: rgba(63, 185, 80, .6); }
+.card.s-NEEDS_YOU { border-color: rgba(248, 81, 73, .8); }
+.card.s-ERROR { border-color: rgba(248, 81, 73, .8); background: repeating-linear-gradient(135deg, #2e2020 0 6px, #242424 6px 12px); }
+.card.busy { opacity: .5; }
+
+.pet {
+  display: flex; flex-direction: column; align-items: center;
+  width: 100%; min-height: 100%; margin: 0; padding: 10px 8px 11px;
+  border: 0; border-radius: 5px; background: transparent; color: inherit;
+  font: inherit; text-align: center; cursor: pointer;
+  -webkit-tap-highlight-color: transparent; touch-action: manipulation;
+}
+.pet:focus-visible { outline: 2px solid var(--name); outline-offset: -3px; }
+.pet.flash { background: var(--hover); }
+.card.focusing .pet { background: rgba(255, 255, 255, .04); }
+
+.sprite { display: block; flex: none; width: 64px; height: 64px; transform-origin: 50% 100%; }
+@media (min-width: 380px) { .sprite { width: 80px; height: 80px; } }
+.px { display: block; width: 100%; height: 100%; overflow: visible; }
+
+.cname {
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 4; line-clamp: 4; overflow: hidden;
+  max-width: 100%; margin-top: 6px;
+  font-size: 15px; line-height: 1.25; color: var(--name); overflow-wrap: anywhere;
+}
+.cstatus { display: block; max-width: 100%; margin-top: 3px; font-size: 14px; line-height: 1.3; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.cstatus .rest { color: var(--muted); }
+.card .x { position: absolute; top: 0; right: 0; width: 44px; height: 44px; }
+
+.card.placeholder { grid-column: 1 / -1; display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 18px 12px; }
+.card.placeholder .cname { color: var(--muted); margin-top: 0; }
+.card.placeholder .ring { margin: 0; }
+.board.stale .pets { opacity: .55; }
+.hint { margin: 0; padding: 4px 14px 12px; font-size: 13.5px; line-height: 1.35; color: var(--muted); text-align: center; }
+
+/* ---------- creature poses (layers drawn by phone.js), by status ---------- */
+.px .legs-b, .px .arm-up, .px .e-blink, .px .e-happy, .px .e-worry, .px .m-smile, .px .m-frown, .px .blush,
+.px .fx-bang, .px .fx-sweat, .px .fx-spark, .px .fx-z { display: none; }
+/* WORKING: busy little bounce, legs stepping, an occasional blink */
+.s-WORKING .px .legs-b, .s-WORKING .px .e-blink, .s-NEEDS_YOU .px .e-blink { display: inline; }
+.s-WORKING .px .fig { animation: bob 1s steps(1, end) infinite; }
+.s-WORKING .px .legs-a { animation: show-first 1s steps(1, end) infinite; }
+.s-WORKING .px .legs-b { animation: show-second 1s steps(1, end) infinite; }
+.s-WORKING .px .e-open, .s-NEEDS_YOU .px .e-open { animation: eyes-open 4.8s steps(1, end) infinite; }
+.s-WORKING .px .e-blink, .s-NEEDS_YOU .px .e-blink { animation: eyes-shut 4.8s steps(1, end) infinite; }
+/* NEEDS YOU: attentive, waving a hand, with a "!" */
+.s-NEEDS_YOU .px .arm-up, .s-NEEDS_YOU .px .fx-bang { display: inline; }
+.s-NEEDS_YOU .px .arm-up { animation: show-first 1.6s steps(1, end) infinite; }
+.s-NEEDS_YOU .px .arm-r { animation: show-second 1.6s steps(1, end) infinite; }
+/* DONE: happy face (a short hop + sparkles when it finishes while you watch) */
+.s-DONE .px .e-open { display: none; }
+.s-DONE .px .e-happy, .s-DONE .px .m-smile, .s-DONE .px .blush { display: inline; }
+.card.celebrate .px .fig { animation: hop .6s steps(3, end) 2; }
+.card.celebrate .px .fx-spark { display: inline; animation: show-first .3s steps(1, end) 4; }
+/* ERROR: worried face and a sweat drop (a small shake when it happens while you watch) */
+.s-ERROR .px .e-open { display: none; }
+.s-ERROR .px .e-worry, .s-ERROR .px .m-frown, .s-ERROR .px .fx-sweat { display: inline; }
+.card.shake .px .fig { animation: shake .4s steps(1, end) 1; }
+/* empty board: one sleeping creature */
+.sleep .px .e-open { display: none; }
+.sleep .px .e-blink, .sleep .px .fx-z { display: inline; }
+.sleep .sprite { opacity: .7; }
+/* small offsets so a row of creatures doesn't blink in unison */
+.card.dl1 .px * { animation-delay: -.7s; }
+.card.dl2 .px * { animation-delay: -1.9s; }
+.card.dl3 .px * { animation-delay: -2.6s; }
+.card.dl4 .px * { animation-delay: -3.7s; }
+
+/* the tap reaction: a quick squash-and-hop of the whole creature */
+.sprite.boing { animation: boing .42s cubic-bezier(.3, .7, .4, 1) 1; }
+
+@keyframes bob { 0% { transform: translateY(0); } 50% { transform: translateY(-1px); } }
+@keyframes show-first { 0% { opacity: 1; } 50% { opacity: 0; } }
+@keyframes show-second { 0% { opacity: 0; } 50% { opacity: 1; } }
+@keyframes eyes-open { 0% { opacity: 1; } 95% { opacity: 0; } }
+@keyframes eyes-shut { 0% { opacity: 0; } 95% { opacity: 1; } }
+@keyframes hop { 0% { transform: translateY(0); } 33% { transform: translateY(-3px); } 66% { transform: translateY(-1px); } }
+@keyframes shake { 0% { transform: translateX(-1px); } 25% { transform: translateX(1px); } 50% { transform: translateX(-1px); } 75% { transform: translateX(0); } }
+@keyframes boing {
+  0% { transform: none; }
+  25% { transform: translateY(2px) scale(1.12, .86); }
+  60% { transform: translateY(-10px) scale(.94, 1.06); }
+  85% { transform: translateY(0) scale(1.04, .96); }
+  100% { transform: none; }
+}
+
+/* battery: nothing animates while the page is in the background or the board isn't live */
+html.bg .px *, html.bg .sprite, .board.stale .px * { animation-play-state: paused !important; }
+
+@media (prefers-reduced-motion: reduce) {
+  .px *, .sprite { animation: none !important; }
+  .s-WORKING .px .legs-b, .s-WORKING .px .e-blink, .s-NEEDS_YOU .px .e-blink, .s-NEEDS_YOU .px .arm-r, .card.celebrate .px .fx-spark { display: none !important; }
+  .sleep .px .e-blink { display: inline !important; }
+}

@@ -580,12 +580,19 @@ function New-PhoneRoot([int]$port, [hashtable]$extra = @{}) {
     return $r
 }
 # Raw HTTP/1.1, so tests control every header (Host, Origin, ...). $h values of $null omit that header.
-function Req([int]$port, [string]$method, [string]$path, [hashtable]$h = @{}, [string]$body = $null) {
+function RawReq([int]$port, [string]$method, [string]$path, [hashtable]$h = @{}, [string]$body = $null) {
     $lines = @("$method $path HTTP/1.1")
     if (-not $h.ContainsKey('Host')) { $lines += "Host: 127.0.0.1:$port" }
     foreach ($k in $h.Keys) { if ($null -ne $h[$k]) { $lines += "${k}: $($h[$k])" } }
     if ($null -ne $body) { $lines += "Content-Length: $([Text.Encoding]::UTF8.GetByteCount($body))" }
-    $raw = [THttp]::Send($port, (($lines -join "`r`n") + "`r`n`r`n" + $body), 30000)
+    return (($lines -join "`r`n") + "`r`n`r`n" + $body)
+}
+# Waits for responses while pumping this (UI) thread: /api/focus runs the desktop's focus code on it.
+function Pump($tasks) { while (@($tasks | Where-Object { -not $_.IsCompleted }).Count) { [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 5 } }
+function Req([int]$port, [string]$method, [string]$path, [hashtable]$h = @{}, [string]$body = $null, [switch]$Pump) {
+    $text = RawReq $port $method $path $h $body
+    if ($Pump) { $t = [THttp]::SendAsync($port, $text, 30000); Pump $t; $raw = $t.Result }
+    else { $raw = [THttp]::Send($port, $text, 30000) }
     return @{ Code = [THttp]::Status($raw); Body = [THttp]::Body($raw); Raw = $raw }
 }
 function Api([int]$port) { (Req $port 'GET' '/api/board').Body | ConvertFrom-Json }
@@ -643,7 +650,7 @@ Check 'error type is the desktop short form (authentication_failed -> auth)' ((R
 Check 'only DONE rows carry a dismiss token' (((Row $bd 'Website').d -match '^[A-Za-z0-9_-]{22}$') -and @($bd.rows | Where-Object { $_.s -ne 'DONE' -and $_.d -ne '' }).Count -eq 0)
 $rawJson = (Req $pp 'GET' '/api/board').Body
 $fields = ($bd.rows | ForEach-Object { ($_.PSObject.Properties.Name) -join ',' } | Sort-Object -Unique) -join ';'
-Check 'privacy: rows contain only k,n,s,t,e,d; board only v,now,summary,text,rows' ($fields -eq 'k,n,s,t,e,d' -and (($bd.PSObject.Properties.Name) -join ',') -eq 'v,now,summary,text,rows') "$fields"
+Check 'privacy: rows contain only k,n,s,t,e,d,c; board only v,now,summary,text,rows' ($fields -eq 'k,n,s,t,e,d,c' -and (($bd.PSObject.Properties.Name) -join ',') -eq 'v,now,summary,text,rows') "$fields"
 Check 'privacy: no session IDs, folder names, process IDs or paths in the phone data' ($rawJson -notmatch '"(ny|er|b1|b2|web)"' -and $rawJson -notmatch 'Toah_Nipi|Users|claude_pid|\\\\' -and $rawJson -notmatch "\b$PID\b")
 $f.SetSetting('workerSort', 'recent')
 $bd = Api $pp
@@ -742,6 +749,111 @@ Check 'Host / Origin / cross-site / method / path checks' $protOk ($info -join '
 $r = Req $pp 'GET' '/'
 Check 'page served with a strict CSP, no-store, nosniff, no framing, no CORS' ($r.Code -eq 200 -and $r.Raw -match "Content-Security-Policy: default-src 'none'" -and $r.Raw -match 'Cache-Control: no-store' -and $r.Raw -match 'X-Content-Type-Options: nosniff' -and $r.Raw -match 'X-Frame-Options: DENY' -and $r.Raw -notmatch 'Access-Control-Allow')
 Check 'page, stylesheet and script served' ($r.Body -match 'CLAUDE WORKERS' -and (Req $pp 'GET' '/phone.css').Code -eq 200 -and (Req $pp 'GET' '/phone.js').Code -eq 200)
+
+# --- creature looks: one per worker, stable while it's on the board ---
+$bd = Api $pp
+$looksOk = @($bd.rows | Where-Object { $_.c -isnot [int] -or $_.c -lt 0 -or $_.c -ge [ClaudeStatus.PhoneServer]::Looks }).Count -eq 0
+$hats = @($bd.rows | ForEach-Object { $_.c % [ClaudeStatus.PhoneServer]::Hats })
+Check 'each worker gets a creature look; no two workers on the board wear the same hat' ($looksOk -and ($hats | Sort-Object -Unique).Count -eq $hats.Count) (($bd.rows | ForEach-Object { "$($_.n)=$($_.c)" }) -join ', ')
+$before = @{}; foreach ($w in $bd.rows) { $before[$w.k] = $w.c }
+Put $root 'b1' 'NEEDS_YOU' 'Toah_Nipi_Booking_Software' 1 30 $PID $me; Put $root 'zz' 'WORKING' 'Another_One' 1 1 $PID $me; $f.ReloadNow()
+$bd = Api $pp
+Check 'looks stay the same when states change and workers come and go' (@($bd.rows | Where-Object { $before.ContainsKey($_.k) -and $before[$_.k] -ne $_.c }).Count -eq 0 -and @($bd.rows | Where-Object { $before.ContainsKey($_.k) }).Count -eq $before.Count)
+
+# --- tap a creature: the desktop's own click action, with window lookup/activation mocked ---
+$null = $f.Handle
+$script:focusLog = New-Object System.Collections.ArrayList
+$script:focusAnswer = @{}
+$script:focusDelay = 0
+$f.FocusHook = [Func[ClaudeStatus.SessionInfo, ClaudeStatus.FocusResult]] {
+    param($si)
+    [void]$script:focusLog.Add($si.Id)
+    if ($script:focusDelay) { Start-Sleep -Milliseconds $script:focusDelay }
+    if ($script:focusAnswer.ContainsKey($si.Id)) { $script:focusAnswer[$si.Id] } else { [ClaudeStatus.FocusResult]::Focused }
+}
+function FocusHeaders([int]$port) { $h = DismissHeaders $port; $h['X-Claude-Status'] = 'focus'; return $h }
+function Foc([int]$port, [string]$k, [hashtable]$override = @{}, [string]$body = '') {
+    $h = FocusHeaders $port; foreach ($x in $override.Keys) { $h[$x] = $override[$x] }
+    if (-not $body) { $body = '{"k":"' + $k + '"}' }
+    $r = Req $port 'POST' '/api/focus' $h $body -Pump
+    $r.Result = try { ($r.Body | ConvertFrom-Json).result } catch { '' }
+    return $r
+}
+$bd = Api $pp
+$r = Foc $pp (Row $bd 'Booking Software #2').k
+Check 'creature tap reaches the desktop focus routine for exactly that worker (#2, not #1 of the same project)' ($r.Code -eq 200 -and $r.Result -eq 'focused' -and ($script:focusLog -join ',') -eq 'b2') "$($r.Code) $($r.Body) log=$($script:focusLog -join ',')"
+# the desktop click on a worker's text goes through the same routine
+$bf = [Reflection.BindingFlags]'NonPublic,Instance'
+$i = [array]::IndexOf(@($f.Workers | ForEach-Object { $_.Id }), 'b1')
+$rb = $f.RowBounds($i); $pt = New-Object Drawing.Point(($rb.X + 30), ($rb.Y + [int]($rb.Height / 2)))
+$hit = $f.HitAt($pt)
+$mea = New-Object Windows.Forms.MouseEventArgs([Windows.Forms.MouseButtons]::Left, 1, $pt.X, $pt.Y, 0)
+$margs = [object[]]@($mea.psobject.BaseObject)
+$null = $f.GetType().GetMethod('OnMouseDown', $bf).Invoke($f, $margs); $null = $f.GetType().GetMethod('OnMouseUp', $bf).Invoke($f, $margs)
+Check 'a desktop click on a worker uses that same routine' ($hit -and $hit -notlike 'x:*' -and $script:focusLog[-1] -eq 'b1') "hit=$hit log=$($script:focusLog -join ',')"
+
+# rapid repeated taps: one activation
+$script:focusLog.Clear(); $script:focusDelay = 300
+$k = (Row $bd 'Portal').k
+$text = RawReq $pp 'POST' '/api/focus' (FocusHeaders $pp) ('{"k":"' + $k + '"}')
+$tasks = @(1..3 | ForEach-Object { [THttp]::SendAsync($pp, $text, 30000) }); Pump $tasks
+$res = @($tasks | ForEach-Object { ([THttp]::Body($_.Result) | ConvertFrom-Json).result })
+$r = Foc $pp $k
+$script:focusDelay = 0
+Check 'rapid repeated taps (3 at once, then 1 more): one activation; the others get "busy" or the same answer' ($script:focusLog.Count -eq 1 -and @($res | Where-Object { $_ -eq 'focused' }).Count -ge 1 -and @($res | Where-Object { $_ -notin 'focused', 'busy' }).Count -eq 0 -and $r.Result -eq 'focused') "calls=$($script:focusLog.Count) results=$($res -join ',') then $($r.Result)"
+
+# activation and dismissal never trigger each other
+Put $root 'dn' 'DONE' 'Done_Project' 30 2; $f.ReloadNow()
+$dn = Row (Api $pp) 'Done Project'
+$script:focusLog.Clear()
+$r = Foc $pp $dn.k
+Check 'tapping a DONE creature brings it up and does not dismiss it' ($r.Result -eq 'focused' -and ($script:focusLog -join ',') -eq 'dn' -and (Test-Path (SessFile $root 'dn')) -and (Row (Api $pp) 'Done Project'))
+$r = Dis $pp $dn.k $dn.d
+Check 'its x dismisses it and does not bring anything up' ($r.Result -eq 'dismissed' -and $script:focusLog.Count -eq 1)
+$f.ReloadNow()
+Put $root 'dn' 'WORKING' 'Done_Project' 1 2 $PID $me; $f.ReloadNow()
+Check 'a dismissed worker that comes back keeps its creature' ((Row (Api $pp) 'Done Project').c -eq $dn.c)
+
+# answers come from the desktop routine; stale or unknown references are refused without acting
+$script:focusAnswer['er'] = [ClaudeStatus.FocusResult]::Locked
+$script:focusAnswer['ny'] = [ClaudeStatus.FocusResult]::Ended
+$script:focusAnswer['b1'] = [ClaudeStatus.FocusResult]::Refused
+$bd = Api $pp; $script:focusLog.Clear()
+$a1 = Foc $pp (Row $bd 'Analytics').k; $a2 = Foc $pp (Row $bd 'Portal').k; $a3 = Foc $pp (Row $bd 'Booking Software #1').k
+Check 'outcomes reported as the laptop saw them: locked / ended / refused (409), never "focused"' ($a1.Code -eq 409 -and $a1.Result -eq 'locked' -and $a2.Result -eq 'ended' -and $a3.Result -eq 'refused') "$($a1.Result) $($a2.Result) $($a3.Result)"
+$script:focusLog.Clear()
+Remove-Item (SessFile $root 'zz'); $old = Row $bd 'Another One'; $f.ReloadNow()
+$r1 = Foc $pp $old.k; $r2 = Foc $pp ('Z' * 22)
+Check 'a worker that has left the board, or an unknown token: "gone", nothing activated' ($r1.Code -eq 409 -and $r1.Result -eq 'gone' -and $r2.Result -eq 'gone' -and $script:focusLog.Count -eq 0) "$($r1.Result) $($r2.Result) calls=$($script:focusLog.Count)"
+$allBad = $true; $info = @()
+foreach ($c in @('nope', '{}', '{"k":1}', '{"k":"..\\..\\config.json"}', '{"k":"b1"}', '{"path":"C:\\Windows\\notepad.exe"}', '{"k":{"a":{"b":{"c":1}}}}')) {
+    $r = Foc $pp '' @{} $c; if ($r.Code -ne 400) { $allBad = $false; $info += "$c=$($r.Code)" }
+}
+Check 'malformed focus requests (paths, session ids, wrong types, no token): 400, nothing activated' ($allBad -and $script:focusLog.Count -eq 0) ($info -join ', ')
+$k = (Row $bd 'Booking Software #2').k
+$r = Foc $pp $k @{} ('{"k":"' + $k + '","path":"C:\\Windows\\notepad.exe","exe":"calc.exe","pid":4,"args":"/c dir","url":"http://evil.example"}')
+Check 'extra fields (path, exe, pid, args, url) are ignored: only the token picks the worker, the laptop picks the window' ($r.Result -eq 'focused' -and ($script:focusLog -join ',') -eq 'b2')
+$script:focusLog.Clear()
+$cases = @(
+    @('focus without Origin', @{ Origin = $null }, 403), @('focus from another site', @{ Origin = 'https://evil.example' }, 403),
+    @('focus marked cross-site', @{ 'Sec-Fetch-Site' = 'cross-site' }, 403), @('focus without X-Claude-Status', @{ 'X-Claude-Status' = $null }, 403),
+    @('focus with the dismiss marker', @{ 'X-Claude-Status' = 'dismiss' }, 403), @('focus as a form post', @{ 'Content-Type' = 'application/x-www-form-urlencoded' }, 415),
+    @('focus with a rebinding Host', @{ Host = 'evil.example' }, 421)
+)
+$protOk = $true; $info = @()
+foreach ($c in $cases) { $r = Foc $pp $k $c[1]; if ($r.Code -ne $c[2] -or $r.Raw -match '(?im)^Access-Control-Allow') { $protOk = $false; $info += "$($c[0]): $($r.Code)" } }
+foreach ($m in 'GET', 'OPTIONS', 'PUT') { $r = Req $pp $m '/api/focus' -Pump; if ($r.Code -ne $(if ($m -eq 'GET') { 404 } else { 405 })) { $protOk = $false; $info += "$m=$($r.Code)" } }
+$h2 = DismissHeaders $pp; $h2['X-Claude-Status'] = 'focus'
+if ((Req $pp 'POST' '/api/dismiss' $h2 ('{"k":"' + $k + '","d":"' + ('A' * 22) + '"}')).Code -ne 403) { $protOk = $false; $info += 'dismiss with the focus marker accepted' }
+Check 'focus endpoint: Origin / cross-site / header / JSON / Host / method protections, no CORS; nothing activated' ($protOk -and $script:focusLog.Count -eq 0) ($info -join '; ')
+$f.FocusHook = $null
+# The real path (no mock), for workers whose window can't be resolved, so nothing is ever activated.
+Put $root 'np' 'WORKING' 'No_Identity' 1 1
+Put $root 'dp' 'DONE' 'Ended_Session' 5 1 $dead.Id $deadStart
+$f.ReloadNow(); $bd = Api $pp
+$r1 = Foc $pp (Row $bd 'No Identity').k; $r2 = Foc $pp (Row $bd 'Ended Session').k
+Check 'unmocked phone tap runs the real window lookup: no process identity -> "not_yet", ended session -> "ended" (nothing focused)' ($r1.Result -eq 'not_yet' -and $r2.Result -eq 'ended') "$($r1.Result) $($r2.Result)"
+Info "lock-screen check in this session: InputDesktopLocked = $([ClaudeStatus.WorkerWindows]::InputDesktopLocked())"
 $f.Dispose()
 
 # Tailnet names (as forwarded by tailscale serve), with a standalone server and fixed names
@@ -855,6 +967,14 @@ process.stdout.write(JSON.stringify(out).replace(/[\u007f-￿]/g,ch=>'\\u'+ch.ch
     $got = & $node.Source -e $js (Join-Path $src 'phone.js') $inFile | Out-String | ConvertFrom-Json
     $diff = @(); for ($i = 0; $i -lt $want.Count; $i++) { if ($got[$i] -cne $want[$i]) { $diff += "$(($cases[$i]) -join '/'): js='$($got[$i])' cs='$($want[$i])'" } }
     Check "phone timer/status text matches the desktop exactly ($($want.Count) cases)" ($got.Count -eq $want.Count -and $diff.Count -eq 0) (($diff | Select-Object -First 5) -join '; ')
+    $art = @'
+const f=require(process.argv[1]);const bad=[];
+f.HATS.forEach(h=>{h.r.forEach(r=>{if(r.length!==16)bad.push(h.n+' row width '+r.length);for(const ch of r)if(ch!=='.'&&!h.c[ch])bad.push(h.n+' colour '+ch);});});
+for(let l=0;l<f.HATS.length*f.BODIES.length;l++){const walk=a=>a.forEach(x=>Array.isArray(x[1][0])&&typeof x[1][0][0]==='string'?walk(x[1]):x[1].forEach(p=>{if(p[0]<0||p[0]>15||p[1]<0||p[1]>15||!/^#[0-9a-f]{6}$/.test(p[2]))bad.push('look '+l+' '+x[0]+' '+p);}));walk(f.creatureLayers(l));}
+process.stdout.write(JSON.stringify({hats:f.HATS.length,bodies:f.BODIES.length,bad:bad.slice(0,5)}));
+'@ -replace "`r?`n", ''
+    $a = & $node.Source -e $art (Join-Path $src 'phone.js') | ConvertFrom-Json
+    Check 'creature art: 13 hats x 5 bodies (= the laptop''s look numbers), every square inside the 16x16 grid with a colour' ($a.hats -eq [ClaudeStatus.PhoneServer]::Hats -and $a.hats * $a.bodies -eq [ClaudeStatus.PhoneServer]::Looks -and @($a.bad).Count -eq 0) (@($a.bad) -join '; ')
 }
 
 # ======================================================================================
@@ -891,13 +1011,24 @@ else {
     else {
         $np = Start-Process $nodeCmd.Source -ArgumentList "`"$(Join-Path $PSScriptRoot 'phone-browser.mjs')`"", $dbg, $pp, "`"$cdir`"", "`"$RenderDir`"" -PassThru -NoNewWindow -RedirectStandardError (Join-Path $cdir 'stderr.txt')
         $handled = @{}
-        $deadline = (Get-Date).AddMinutes(4)
+        # Creature taps reach the desktop's focus routine with window lookup/activation mocked: it records
+        # which worker would be brought up (and answers "locked" for one, to check the message).
+        $null = $f.Handle
+        $script:browserFocus = New-Object System.Collections.ArrayList
+        $f.FocusHook = [Func[ClaudeStatus.SessionInfo, ClaudeStatus.FocusResult]] {
+            param($si)
+            [void]$script:browserFocus.Add($si.Id)
+            Start-Sleep -Milliseconds 400
+            if ($si.Id -eq 'pe2') { [ClaudeStatus.FocusResult]::Locked } else { [ClaudeStatus.FocusResult]::Focused }
+        }
+        $deadline = (Get-Date).AddMinutes(6)
         while (-not $np.HasExited -and (Get-Date) -lt $deadline) {
+            [System.Windows.Forms.Application]::DoEvents()
             foreach ($req in @(Get-ChildItem $cdir -Filter 'req-*' -ErrorAction SilentlyContinue)) {
                 $name = $req.Name.Substring(4)
                 if ($handled[$name]) { continue }
                 $handled[$name] = $true
-                switch ($name) {
+                switch -Wildcard ($name) {
                     'desktop-dismiss'     { $null = $f.Dismiss('web') }
                     'check-phone-dismiss' { Start-Sleep -Milliseconds 200; $script:phoneDismissedFile = -not (Test-Path (SessFile $root 'guest')); $f.ReloadNow() }
                     'hidden-change'       { Put $root 'b2' 'NEEDS_YOU' 'Toah_Nipi_Booking_Software' 1 20 $PID $me; $f.ReloadNow() }
@@ -905,7 +1036,23 @@ else {
                     'reload'              { $f.ReloadNow() }
                     'stop'                { $f.SetSetting('phoneDashboard', $false) }
                     'start'               { $f.SetSetting('phoneDashboard', $true) }
-                    'clear'               { Get-ChildItem (Join-Path $root 'state\sessions') -Filter *.json | Remove-Item; $f.ReloadNow() }
+                    'clear*'              { Get-ChildItem (Join-Path $root 'state\sessions') -Filter *.json | Remove-Item; $f.ReloadNow() }
+                    'repopulate'          {
+                        Put $root 'pny' 'NEEDS_YOU' 'Toah_Nipi_Portal' 130 50 $PID $me
+                        Put $root 'pe1' 'ERROR' 'A_Very_Long_Project_Folder_Name_That_Keeps_Going_And_Going' 200 45 $PID $me
+                        $j = Get-Content (SessFile $root 'pe1') -Raw | ConvertFrom-Json; $j.detail = 'rate_limit'; [IO.File]::WriteAllText((SessFile $root 'pe1'), ($j | ConvertTo-Json -Compress))
+                        Put $root 'pe2' 'ERROR' 'Analytics' 400 44 $PID $me
+                        Put $root 'pb1' 'WORKING' 'Toah_Nipi_Booking_Software' 272 30 $PID $me
+                        Put $root 'pb2' 'WORKING' 'Toah_Nipi_Booking_Software' 68 20 $PID $me
+                        foreach ($i in 1..3) { Put $root "px$i" 'WORKING' "Side_Project_$i" (30 * $i) (60 + $i) $PID $me }
+                        Put $root 'pd1' 'DONE' 'Toah_Nipi_Website' 30 60
+                        Put $root 'pd2' 'DONE' 'Guest_Booking_Form' 360 59
+                        $f.ReloadNow()
+                    }
+                    'pets-change'         { Put $root 'pb1' 'NEEDS_YOU' 'Toah_Nipi_Booking_Software' 1 30 $PID $me; Put $root 'px1' 'DONE' 'Side_Project_1' 0 61; $f.ReloadNow() }
+                    'focus-log*'          { [IO.File]::WriteAllText((Join-Path $cdir 'focus-log.txt'), ($script:browserFocus -join ',')) }
+                    'focus-clear*'        { $script:browserFocus.Clear() }
+                    'check-pet-dismiss'   { Start-Sleep -Milliseconds 200; $script:petDismissedFile = -not (Test-Path (SessFile $root 'pd1')) -and (Test-Path (SessFile $root 'pd2')); $f.ReloadNow() }
                 }
                 [IO.File]::WriteAllText((Join-Path $cdir "ack-$name"), '')
             }
@@ -922,6 +1069,7 @@ else {
         }
         Check 'browser: the tapped dismissal removed exactly that DONE state file' ($script:phoneDismissedFile -eq $true)
         Check 'browser: the stale race tap left the WORKING session file in place' ($handled['clear'] -or (Test-Path (SessFile $root 'race')))
+        Check 'browser: the x on a creature card removed exactly that DONE state file' ($script:petDismissedFile -eq $true)
         Info "phone screenshots saved to $RenderDir (phone-*.png)"
     }
     & taskkill.exe /PID $cp.Id /T /F 2>&1 | Out-Null
@@ -956,7 +1104,7 @@ $inst = Join-Path $cd 'status-indicator'
 $oldRepo = Join-Path $tmp 'old-repo'; $null = New-Item -ItemType Directory -Force (Join-Path $oldRepo 'src')
 $haveGit = [bool](Get-Command git -ErrorAction SilentlyContinue)
 if ($haveGit) {
-    foreach ($fn in 'install.ps1', 'src/hook.ps1', 'src/indicator.cs', 'src/indicator.ps1', 'src/start-indicator.vbs', 'src/stop-indicator.ps1', 'src/autostart.ps1', 'src/uninstall.ps1', 'src/config.json') {
+    foreach ($fn in @('install.ps1') + @(git -C $repo ls-tree --name-only HEAD src/)) {
         $content = git -C $repo show "HEAD:$fn" | Out-String
         [IO.File]::WriteAllText((Join-Path $oldRepo $fn), $content)
     }
@@ -1018,8 +1166,11 @@ Check 'no network APIs in the desktop app or hook' ($code -notmatch 'WebClient|H
 $pcs = Get-Content (Join-Path $src 'phone.cs') -Raw
 Check 'phone server only listens on loopback and never connects out' ($pcs -match 'new TcpListener\(IPAddress\.Loopback' -and $pcs -notmatch 'IPAddress\.(Any|IPv6Any)|0\.0\.0\.0|new TcpClient|\.Connect\(|WebClient|HttpClient|WebRequest|Access-Control-Allow')
 $pjs = (Get-Content (Join-Path $src 'phone.js') -Raw) + (Get-Content (Join-Path $src 'phone.html') -Raw)
-Check 'phone page: no notifications, sounds, vibration, speech, service worker or storage' ($pjs -cnotmatch 'Notification|vibrate|Audio|speechSynthesis|serviceWorker|localStorage|sessionStorage|indexedDB|innerHTML|https?://')
-Check 'phone page only calls its own relative API' ((([regex]::Matches($pjs, "'(api/[a-z]*)") | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique) -join ',') -eq 'api/board,api/dismiss' -and $pjs -cnotmatch 'XMLHttpRequest|WebSocket|EventSource|sendBeacon|fetch\(\s*[''"](?!api/)')
+$pjsNoSvgNs = $pjs.Replace("'http://www.w3.org/2000/svg'", "''")   # the SVG namespace name is an identifier, not a request
+Check 'phone page: no notifications, sounds, vibration, speech, service worker, other storage or outside URLs' ($pjsNoSvgNs -cnotmatch 'Notification|vibrate|Audio|speechSynthesis|serviceWorker|sessionStorage|indexedDB|document\.cookie|innerHTML|https?://')
+$storage = @([regex]::Matches($pjs, 'localStorage\.\w+\([^)]*\)') | ForEach-Object { $_.Value })
+Check 'phone page stores only the List / Creatures choice' ($storage.Count -eq 2 -and @($storage | Where-Object { $_ -notmatch '^localStorage\.(getItem|setItem)\(VIEW_KEY(, view)?\)$' }).Count -eq 0 -and $pjs -match "VIEW_KEY = 'claudeStatus\.view'") ($storage -join '; ')
+Check 'phone page only calls its own relative API' ((([regex]::Matches($pjs, "'(api/[a-z]*)") | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique) -join ',') -eq 'api/board,api/dismiss,api/focus' -and $pjs -cnotmatch 'XMLHttpRequest|WebSocket|EventSource|sendBeacon|fetch\(\s*[''"](?!api/)')
 $setup = Get-Content (Join-Path $src 'phone-setup.ps1') -Raw
 Check 'phone-setup.ps1 never runs Funnel and only proxies to 127.0.0.1' ($setup -notmatch '(?i)[''"]funnel[''"]|\bfunnel\s+(on|--)' -and @([regex]::Matches($setup, 'https?://[^\s''"`]+') | Where-Object { $_.Value -notmatch '^http://(127\.0\.0\.1|localhost):' }).Count -eq 0)
 Check 'indicator never reads window titles' ($code -notmatch 'GetWindowText' -and $pcs -notmatch 'GetWindowText')

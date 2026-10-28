@@ -130,7 +130,40 @@ tailscale serve on the laptop  ── forwards to ──►  127.0.0.1:48521
 - **Dismiss DONE rows from either screen.** Tap the **×** on a DONE row on the phone and it disappears from both screens; dismiss it on the desktop and it disappears from the phone. As on the desktop, this only removes Claude Status's row: Claude isn't stopped or messaged and no session or file is touched, and a later prompt in that session brings the worker back. WORKING, NEEDS YOU and ERROR rows can't be dismissed.
 - **Honest connection state** (top right): **LIVE**, **CONNECTING…**, **RECONNECTING…** or **OFFLINE**. When the connection is lost, the page keeps the last board but dims it, freezes its timers, shows *Last update 11:55:07 (3s ago). The board below may be out of date.* and says why (laptop unreachable, or Claude Status not answering). Dismissing is disabled until it's LIVE again, and a dismiss is never queued for later. It reconnects by itself and refreshes as soon as the laptop answers again, including when you come back to the page after Android put it in the background.
 - **No phone notifications**: no sounds, vibration, notification prompts or background activity. (Desktop sounds and notifications are unchanged.)
-- Phone rows aren't clickable: bringing a window forward only makes sense on the laptop.
+- **Two views: List or Creatures** (switch at the top). See below.
+
+### Creatures view
+
+Tap **Creatures** at the top of the page for a grid of little pixel creatures, one per worker, instead of rows. **List** is the default; the phone's browser remembers your choice (only that choice is stored, and only on the phone). Switching views keeps the same live connection and board.
+
+- **Same board.** Same workers, names, `#n` numbers, order, status text, timers, cleanup and **×** dismissal as the list. Each card shows the name (long names wrap) and the real status line, e.g. *WORKING · 04:32*. No made-up numbers: there are no context or progress percentages.
+- **Each worker has its own creature.** A worker keeps the same body colour and hat (party hat, beanie, top hat, propeller cap, crown, cowboy hat, headphones, chef hat, bow, antennae, wizard hat, cap or flower) for as long as it's on the board, on every phone and in both views. Up to 13 workers all wear different hats. Restarting Claude Status deals out new creatures.
+- **Creatures act out their status** (the status text and card border colour always say it too):
+
+  | Status | Creature |
+  |---|---|
+  | WORKING | small busy bounce, stepping feet, the occasional blink |
+  | NEEDS YOU | waves a hand, with a red **!** |
+  | DONE | happy face; hops with sparkles when it finishes while you're watching |
+  | ERROR | worried face, sweat drop, striped red card; a small shake when it fails while you're watching |
+  | (no workers) | one sleeping creature, *No Claude workers* |
+
+  Motion is small and stops while the page is in the background or the board isn't live. With **Reduce motion** / **Remove animations** turned on in Android's accessibility settings there's no animation at all.
+
+**Tap a creature to bring up its window on the laptop.** It hops right away, and the laptop then does exactly what clicking that worker on the desktop board does (see [Clicking a worker](#clicking-a-worker)): it finds **that session's** window, telling apart two workers in the same project, and brings it to the front, or refuses rather than guess. Nothing is opened or launched on the phone or the laptop; it's the existing window or nothing. The phone then says what the laptop reported:
+
+- *Brought up "Portal" on the laptop.*: Windows confirmed that window is now in front.
+- *The laptop is locked. Unlock it to switch windows.*: nothing was attempted (see below).
+- *Windows didn't allow bringing "Portal" forward.*: Windows refused the switch.
+- *Couldn't identify that worker's window…*, *That Claude session is no longer running.*, *That worker is no longer on the board.*: as on the desktop, nothing was focused.
+
+Repeated taps send one request. A tap while the page isn't LIVE says so and sends nothing. Tapping a creature never dismisses it; only the **×** on a DONE card dismisses, and that never brings up a window.
+
+**What to expect from the laptop**
+
+- **Locked:** Windows doesn't let any app switch windows on the lock screen, and Claude Status doesn't try to get around that or unlock anything. Tapping while it's locked just tells you it's locked.
+- **Unlocked but not in use:** the window comes forward on the laptop's screen. Nobody needs to be at the laptop, but you'll only see the result when you're back at it.
+- **Windows may refuse.** Windows limits which programs may bring a window to the front. Claude Status is allowed when you click it on the desktop; a request from the phone isn't a click, so Windows can occasionally refuse (for example while a full-screen app or a system prompt is in front). The phone then says so instead of claiming success.
 
 ### Requirements
 
@@ -173,7 +206,7 @@ Expected result: `tailscale serve status` lists `http://<laptop>.<tailnet>.ts.ne
 
 ### Locking, sleep and disconnection
 
-- **Locked laptop: works.** Claude Status, Claude Code and Tailscale keep running while Windows is locked.
+- **Locked laptop: works.** Claude Status, Claude Code and Tailscale keep running while Windows is locked. Only *bringing up a window* (tapping a creature) waits until it's unlocked.
 - **Sleeping / hibernating laptop: doesn't.** Nothing runs while it sleeps; the phone shows **OFFLINE** with the time of the last update, and reconnects on its own once the laptop wakes. To use it away from the desk, keep the laptop plugged in and set *Sleep* to *Never* (when plugged in) in Windows power settings.
 - **Laptop or phone off Tailscale / no network:** OFFLINE with the last update time; reconnects automatically when the connection returns.
 
@@ -184,9 +217,9 @@ Each DONE row on the phone carries an opaque token for that particular DONE occu
 ### Security and privacy
 
 - The dashboard listens on `127.0.0.1` only; it's reachable from the phone solely through `tailscale serve`, i.e. by devices signed in to your tailnet. It is not exposed on your Wi-Fi/LAN.
-- Requests must be addressed to `127.0.0.1`/`localhost` or this laptop's own Tailscale name/IP (protects against DNS-rebinding pages). Dismissing additionally requires a same-origin `Origin`, a JSON body and a custom header, so other websites can't trigger it; there's no CORS. The page has a strict Content-Security-Policy and isn't cached.
-- The only possible change is dismissing a current DONE row; the browser can't name files or paths.
-- The phone receives only what it displays: friendly name, state, when the state began, the short error type, and random-looking tokens. No session IDs, process IDs, folder paths, window data, prompts or Claude output. Nothing is logged.
+- Requests must be addressed to `127.0.0.1`/`localhost` or this laptop's own Tailscale name/IP (protects against DNS-rebinding pages). The two actions (dismiss, and bring up a worker's window) are POST-only and each requires a same-origin `Origin`, a JSON body and its own custom header, so other websites can't trigger them; there's no CORS. The page has a strict Content-Security-Policy and isn't cached.
+- The only things the phone can make happen are dismissing a current DONE row and bringing up a current worker's existing window. Both name the worker by a random token from the current board; the laptop looks up the worker and picks the window itself. The browser can't name files, paths, programs, commands, process IDs or URLs; extra fields are ignored.
+- The phone receives only what it displays: friendly name, state, when the state began, the short error type, a creature number (0–64), and random-looking tokens. No session IDs, process IDs, folder paths, window data, prompts or Claude output. Nothing is logged.
 - No accounts, cloud hosting, database or paid services.
 
 ### Turn it off / remove it
@@ -207,6 +240,9 @@ Or untick **Settings → Phone dashboard** (stops it immediately; the `tailscale
 | **OFFLINE** *Can't reach the laptop* | Laptop asleep, offline, or Tailscale disconnected on either device. The board shown is the last known one; it refreshes by itself once reachable. |
 | **RECONNECTING…** with a *Last update* time | Brief interruption; rows are dimmed and not current until it says LIVE again. |
 | *This address isn't one Claude Status accepts* | Use the MagicDNS address from `phone-setup.ps1 -Status`; other names pointing at the laptop are refused on purpose. |
+| Tapping a creature says *The laptop is locked* | Expected: Windows won't switch windows on the lock screen. Unlock the laptop, or wait until you're back. |
+| Tapping a creature says *Couldn't identify that worker's window* | Same as on the desktop: send that worker a prompt from its window once (VS Code with several windows open), then it works. |
+| Tapping a creature says *Windows didn't allow…* | Windows refused to switch windows from a background request. Try again, or click the worker on the desktop board. |
 | Tray says *port 48521 is already in use* | Set `"phonePort": 48522` (any free port above 1024) in `config.json`, then `phone-setup.ps1 -Disable` and `phone-setup.ps1` again so `tailscale serve` points at the new port. |
 
 ## How it works
@@ -554,7 +590,7 @@ src/
   hook.ps1               called by Claude Code hooks; writes state files
   indicator.cs           the Worker Board / Compact window (C#, WinForms)
   phone.cs               optional phone dashboard server (127.0.0.1 only) + race-safe DONE dismissal
-  phone.html/.css/.js    the phone page
+  phone.html/.css/.js    the phone page (List and Creatures views; the creature pixel art is drawn by phone.js)
   phone-setup.ps1        turn the phone dashboard on/off and set up `tailscale serve`
   indicator.ps1          compiles indicator.cs with Add-Type and runs it
   start-indicator.vbs    launches the indicator with no console window
@@ -580,7 +616,7 @@ powershell -ExecutionPolicy Bypass -File .\tests\run-tests.ps1 -E2E     # + one 
 powershell -ExecutionPolicy Bypass -File .\tests\run-tests.ps1 -Browser # + phone page in headless Chrome at Android sizes (needs Node.js 22+)
 ```
 
-They cover the hook lifecycle and privacy (run as real child processes with secret-laden inputs), aliases, numbering, both orderings, timers, v1 compatibility, DONE retention and dismissal, layout at 100–200 % DPI with 1/6/90 workers, worker → window identification (terminals, multi-window apps, closed windows, reused process IDs), focus stealing, and install → update → re-install → uninstall against a temporary Claude config folder. The phone dashboard tests cover desktop/phone parity, dismissal in both directions, the delayed-dismiss race and 400 randomized hook-write/dismiss interleavings, malformed and cross-site requests, Host/Origin checks, start/stop/port conflicts, and that phone.js formats timers exactly like the desktop. `-Browser` additionally drives the real page at 320/360/412 px widths through disconnects, a 502 from `tailscale serve`, resume and recovery, saving `phone-*.png` screenshots. These are emulated phones; Tailscale itself and a physical Android device are not part of the automated tests. `-RenderDir <folder>` saves PNG renders of the board for a visual check.
+They cover the hook lifecycle and privacy (run as real child processes with secret-laden inputs), aliases, numbering, both orderings, timers, v1 compatibility, DONE retention and dismissal, layout at 100–200 % DPI with 1/6/90 workers, worker → window identification (terminals, multi-window apps, closed windows, reused process IDs), focus stealing, and install → update → re-install → uninstall against a temporary Claude config folder. The phone dashboard tests cover desktop/phone parity, dismissal in both directions, the delayed-dismiss race and 400 randomized hook-write/dismiss interleavings, malformed and cross-site requests, Host/Origin checks, start/stop/port conflicts, and that phone.js formats timers exactly like the desktop. For the Creatures view they check that a tap reaches the desktop's own click-on-a-worker routine for exactly that worker (and that a desktop click uses the same routine), with window lookup and activation **mocked** so the tests never move your focus. They also check that rapid taps make one request, that taps and **×** never trigger each other, stale and malformed references, the action's request protections, and stable, distinct creature looks. `-Browser` additionally drives the real page at 320/360/412 px widths in both views through disconnects, a 502 from `tailscale serve`, resume and recovery, reduced motion, keyboard use and background pausing, saving `phone-*.png` screenshots. These are emulated phones; Tailscale itself and a physical Android device are not part of the automated tests. `-RenderDir <folder>` saves PNG renders of the board for a visual check.
 
 ## Ideas for later
 

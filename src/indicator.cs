@@ -322,6 +322,9 @@ namespace ClaudeStatus
         [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
         [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint a, uint b, bool attach);
         [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
+        [DllImport("user32.dll")] public static extern IntPtr OpenInputDesktop(uint flags, bool inherit, uint access);
+        [DllImport("user32.dll")] public static extern bool CloseDesktop(IntPtr h);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern bool GetUserObjectInformation(IntPtr h, int index, StringBuilder info, int length, out int needed);
         [DllImport("kernel32.dll", SetLastError = true)] public static extern IntPtr OpenProcess(uint access, bool inherit, int pid);
         [DllImport("kernel32.dll")] public static extern bool GetProcessTimes(IntPtr h, out long creation, out long exit, out long kernel, out long user);
         [DllImport("kernel32.dll")] public static extern bool GetExitCodeProcess(IntPtr h, out uint code);
@@ -522,23 +525,48 @@ namespace ClaudeStatus
         // window only when it is the host's only window, or the verified anchor among several.
         public static IntPtr Resolve(int claudePid, DateTime claudeStarted, Anchor anchor, out string reason)
         {
-            reason = "";
+            FocusResult kind;
+            return Resolve(claudePid, claudeStarted, anchor, out reason, out kind);
+        }
+
+        // Same, also saying which kind of "couldn't identify" it was (for the phone, which shows its own text).
+        public static IntPtr Resolve(int claudePid, DateTime claudeStarted, Anchor anchor, out string reason, out FocusResult kind)
+        {
+            reason = ""; kind = FocusResult.Unknown;
             if (claudePid <= 0 || claudeStarted == DateTime.MinValue)
             {
                 reason = "Couldn't identify that worker's window yet.\nIt will work after the worker's next prompt.";
+                kind = FocusResult.NotYet;
                 return IntPtr.Zero;
             }
             int alive = ProcessAlive(claudePid, claudeStarted);
-            if (alive == 0) { reason = "That Claude session is no longer running."; return IntPtr.Zero; }
+            if (alive == 0) { reason = "That Claude session is no longer running."; kind = FocusResult.Ended; return IntPtr.Zero; }
             if (alive < 0) { reason = "Couldn't identify that worker's window."; return IntPtr.Zero; }
             var c = WorkerWindowsFor(claudePid);
-            if (c.Count == 1) return c[0];
+            if (c.Count == 1) { kind = FocusResult.Focused; return c[0]; }
             if (c.Count == 0) { reason = "Couldn't identify that worker's window."; return IntPtr.Zero; }
             if (anchor != null)
                 foreach (var h in c)
-                    if (h.ToInt64() == anchor.Hwnd && AnchorStillValid(anchor, h)) return h;
+                    if (h.ToInt64() == anchor.Hwnd && AnchorStillValid(anchor, h)) { kind = FocusResult.Focused; return h; }
             reason = "Couldn't identify that worker's window: its app has " + c.Count + " windows open.\nSend it a prompt from its window once, then try again.";
+            kind = FocusResult.Ambiguous;
             return IntPtr.Zero;
+        }
+
+        // True while the lock screen (or another secure desktop, e.g. a UAC prompt) has the input. Windows
+        // doesn't let any app switch windows then; the phone says so instead of trying.
+        public static bool InputDesktopLocked()
+        {
+            IntPtr d = Native.OpenInputDesktop(0, false, 0x0001 /* DESKTOP_READOBJECTS */);
+            if (d == IntPtr.Zero) return true;
+            try
+            {
+                var name = new StringBuilder(64);
+                int needed;
+                return Native.GetUserObjectInformation(d, 2 /* UOI_NAME */, name, name.Capacity * 2, out needed)
+                    && !string.Equals(name.ToString(), "Default", StringComparison.OrdinalIgnoreCase);
+            }
+            finally { Native.CloseDesktop(d); }
         }
 
         // Called right after a session submits a prompt: if the foreground window is one of that session's
@@ -817,6 +845,9 @@ namespace ClaudeStatus
         public PhoneServer Phone { get { return phone; } }
         public string PhoneStatus { get { return PhoneStatusText; } }
         public void StopPhone() { if (phone != null) { phone.Stop(); phone = null; } }
+        // Replaces the window lookup + activation inside FocusCore, so tests see which worker a click or a
+        // phone tap would bring up without moving the real focus.
+        public Func<SessionInfo, FocusResult> FocusHook;
 
         // ---------- state ----------
         void Reload()
@@ -943,7 +974,7 @@ namespace ClaudeStatus
             if (phone != null || (port == phoneFailedPort && DateTime.UtcNow < phoneRetryUtc)) return;
             try
             {
-                var p = new PhoneServer(root, port, PhoneDismiss, null);
+                var p = new PhoneServer(root, port, PhoneDismiss, PhoneFocus, null);
                 if (p.Start()) { phone = p; phoneError = ""; phoneFailedPort = 0; return; }
                 phoneError = p.Error;
             }
@@ -970,14 +1001,48 @@ namespace ClaudeStatus
             }
         }
 
+        // A click on a worker's text: bring its window forward, or say why not.
         void FocusWorker(SessionInfo si)
         {
+            string why;
+            if (FocusCore(si, false, out why) != FocusResult.Focused && why != "") ShowNote(why);
+        }
+
+        // The one implementation behind the desktop click and the phone's creature tap (UI thread only).
+        // From the phone nothing is attempted while the laptop is locked.
+        FocusResult FocusCore(SessionInfo si, bool fromPhone, out string why)
+        {
+            why = "";
+            if (FocusHook != null) return FocusHook(si);
+            if (fromPhone && WorkerWindows.InputDesktopLocked()) return FocusResult.Locked;
             Anchor a;
             anchors.TryGetValue(si.Id, out a);
-            string why;
-            IntPtr h = WorkerWindows.Resolve(si.ClaudePid, si.ClaudeStarted, a, out why);
-            if (h == IntPtr.Zero) ShowNote(why);
-            else if (!WorkerWindows.Activate(h)) ShowNote("Windows didn't allow bringing that window forward.");
+            FocusResult kind;
+            IntPtr h = WorkerWindows.Resolve(si.ClaudePid, si.ClaudeStarted, a, out why, out kind);
+            if (h == IntPtr.Zero) return kind;
+            if (WorkerWindows.Activate(h)) return FocusResult.Focused;
+            why = "Windows didn't allow bringing that window forward.";
+            return FocusResult.Refused;
+        }
+
+        // Called on a server thread: runs the desktop's own focus on the UI thread (where a click would) for
+        // the worker as the board knows it right now, and waits for Windows' answer.
+        FocusResult PhoneFocus(string id)
+        {
+            if (!IsHandleCreated || IsDisposed) return FocusResult.Unavailable;
+            var result = FocusResult.Unavailable;
+            var done = new ManualResetEvent(false);
+            try
+            {
+                BeginInvoke((MethodInvoker)(() =>
+                {
+                    try { SessionInfo si; string why; result = sessions.TryGetValue(id, out si) ? FocusCore(si, true, out why) : FocusResult.Gone; }
+                    catch { result = FocusResult.Unavailable; }
+                    finally { try { done.Set(); } catch { } }
+                }));
+            }
+            catch { return FocusResult.Unavailable; }
+            return done.WaitOne(8000) ? result : FocusResult.Unavailable;
         }
 
         void ShowNote(string text)
