@@ -699,7 +699,7 @@ namespace ClaudeStatus
         readonly FileSystemWatcher watcher, cfgWatcher;
         readonly System.Windows.Forms.Timer debounce, slow, tick, cfgDebounce;
         readonly NotifyIcon tray;
-        readonly ContextMenuStrip menu;
+        readonly ContextMenuStrip menu, trayMenu;
         readonly ToolTip tip, note;
         readonly Font smallFont, bigFont, titleFont, rowFont, statusFont, closeFont;
         readonly float scale;
@@ -777,8 +777,12 @@ namespace ClaudeStatus
 
             menu = new ContextMenuStrip();
             menu.Opening += (s, e) => BuildMenu();
-            tray = new NotifyIcon { Visible = !testMode, ContextMenuStrip = menu, Text = "Claude: IDLE" };
-            tray.MouseClick += (s, e) => { if (e.Button == MouseButtons.Left) { Show(); BringToFrontNoActivate(); } };
+            // The tray icon lives as long as the app (one icon, never recreated); minimizing only hides the window.
+            trayMenu = new ContextMenuStrip();
+            trayMenu.Items.Add("Open", null, (s, e) => RestoreFromTray());
+            trayMenu.Items.Add("Quit", null, (s, e) => Close());
+            tray = new NotifyIcon { Visible = !testMode, ContextMenuStrip = trayMenu, Text = "Claude Status: IDLE" };
+            tray.MouseClick += (s, e) => { if (e.Button == MouseButtons.Left) RestoreFromTray(); };
             SetTrayIcon(Grey);
             tip = new ToolTip { ShowAlways = true, InitialDelay = 500, ReshowDelay = 200, AutoPopDelay = 8000 };
             note = new ToolTip { ShowAlways = true };
@@ -832,7 +836,10 @@ namespace ClaudeStatus
         public int ScrollOffset { get { return scroll; } set { scroll = value; ClampScroll(); } }
         public int MaxScroll { get { return Math.Max(0, ContentHeight() - ViewHeight()); } }
         public Rectangle ListViewport { get { return new Rectangle(0, TopH, ClientSize.Width, ViewHeight()); } }
-        public Rectangle[] HeaderButtons { get { return board ? new[] { BoardToggleRect, BoardGearRect, BoardCloseRect } : new[] { CompactToggleRect, CompactGearRect, CloseRect }; } }
+        public Rectangle[] HeaderButtons { get { return board ? new[] { BoardToggleRect, BoardGearRect, BoardMinRect, BoardCloseRect } : new[] { CompactToggleRect, CompactGearRect, CompactMinRect, CloseRect }; } }
+        public ContextMenuStrip TrayMenu { get { return trayMenu; } }
+        public void MinimizeNow() { MinimizeToTray(); }
+        public void RestoreNow() { RestoreFromTray(); }
         public Rectangle RowBounds(int i) { return RowRect(i); }
         public Rectangle DismissBounds(int i) { return XRect(i); }
         public Rectangle StatusBounds(int i, Graphics g) { Rectangle n, s; string st; RowText(g, i, out n, out s, out st); return s; }
@@ -911,7 +918,7 @@ namespace ClaudeStatus
 
             string st = current == null ? "IDLE" : current.State;
             if (st != trayState) { trayState = st; SetTrayIcon(ColorFor(st)); }
-            string tipLine = "Claude: " + Board.Label(st) + (current != null ? " (" + current.DisplayName + ")" : "");
+            string tipLine = "Claude Status: " + Board.Label(st) + (current != null ? " (" + current.DisplayName + ")" : "");
             tray.Text = tipLine.Length > 63 ? tipLine.Substring(0, 63) : tipLine;
             UpdateLayout();
             AdjustTick();
@@ -1097,11 +1104,13 @@ namespace ClaudeStatus
         }
 
         Rectangle CloseRect { get { return new Rectangle(ClientSize.Width - S(17), S(1), S(16), S(16)); } }
-        Rectangle CompactGearRect { get { return new Rectangle(ClientSize.Width - S(33), S(1), S(16), S(16)); } }
-        Rectangle CompactToggleRect { get { return new Rectangle(ClientSize.Width - S(49), S(1), S(16), S(16)); } }
+        Rectangle CompactMinRect { get { return new Rectangle(ClientSize.Width - S(33), S(1), S(16), S(16)); } }
+        Rectangle CompactGearRect { get { return new Rectangle(ClientSize.Width - S(49), S(1), S(16), S(16)); } }
+        Rectangle CompactToggleRect { get { return new Rectangle(ClientSize.Width - S(65), S(1), S(16), S(16)); } }
         Rectangle BoardCloseRect { get { return new Rectangle(ClientSize.Width - S(23), S(4), S(18), S(18)); } }
-        Rectangle BoardGearRect { get { return new Rectangle(ClientSize.Width - S(42), S(4), S(18), S(18)); } }
-        Rectangle BoardToggleRect { get { return new Rectangle(ClientSize.Width - S(61), S(4), S(18), S(18)); } }
+        Rectangle BoardMinRect { get { return new Rectangle(ClientSize.Width - S(42), S(4), S(18), S(18)); } }
+        Rectangle BoardGearRect { get { return new Rectangle(ClientSize.Width - S(61), S(4), S(18), S(18)); } }
+        Rectangle BoardToggleRect { get { return new Rectangle(ClientSize.Width - S(80), S(4), S(18), S(18)); } }
 
         Rectangle RowRect(int i) { return new Rectangle(S(1), TopH + S(PadTop) + i * S(RowH) - scroll, ClientSize.Width - S(2), S(RowH)); }
 
@@ -1172,6 +1181,7 @@ namespace ClaudeStatus
             {
                 DrawListIcon(g, CompactToggleRect, hover == "toggle" ? Color.White : Grey);
                 DrawGear(g, CompactGearRect, hover == "gear" ? Color.White : Grey);
+                DrawMinimize(g, CompactMinRect, hover == "minimize" ? Color.White : Grey);
             }
 
             g.SmoothingMode = SmoothingMode.AntiAlias;
@@ -1189,10 +1199,11 @@ namespace ClaudeStatus
             using (var pen = new Pen(Color.FromArgb(120, border), Math.Max(1, S(1))))
                 g.DrawRectangle(pen, 0, 0, w - 1, h - 1);
 
-            // header: title + [view toggle] [settings] [x]
+            // header: title + [view toggle] [settings] [minimize] [x]
             TextRenderer.DrawText(g, "CLAUDE WORKERS", titleFont, new Rectangle(S(10), 0, BoardToggleRect.Left - S(12), S(HeadH)), Muted, LeftText);
             ButtonBg(g, BoardToggleRect, "toggle"); DrawCompactIcon(g, BoardToggleRect, hover == "toggle" ? Color.White : Grey);
             ButtonBg(g, BoardGearRect, "gear"); DrawGear(g, BoardGearRect, hover == "gear" ? Color.White : Grey);
+            ButtonBg(g, BoardMinRect, "minimize"); DrawMinimize(g, BoardMinRect, hover == "minimize" ? Color.White : Grey);
             ButtonBg(g, BoardCloseRect, "close");
             TextRenderer.DrawText(g, "×", closeFont, BoardCloseRect, hover == "close" ? Color.White : Grey, CenterText);
             if (CfgBool("showWorkerSummary", false))
@@ -1279,6 +1290,13 @@ namespace ClaudeStatus
             g.SmoothingMode = SmoothingMode.None;
         }
 
+        // "Minimize to tray" icon: a short bar in the lower half, like a title-bar minimize button.
+        void DrawMinimize(Graphics g, Rectangle r, Color c)
+        {
+            int cx = r.Left + r.Width / 2, y = r.Top + r.Height / 2 + S(2);
+            using (var pen = new Pen(c, Math.Max(1f, 1.3f * scale))) g.DrawLine(pen, cx - S(4), y, cx + S(4), y);
+        }
+
         void DrawGear(Graphics g, Rectangle r, Color c)
         {
             float cx = r.Left + r.Width / 2f, cy = r.Top + r.Height / 2f;
@@ -1313,17 +1331,19 @@ namespace ClaudeStatus
         }
 
         // ---------- interaction ----------
-        // Hit keys: close, gear, toggle, drag, thumb, track, row:<session id>, x:<session id>.
+        // Hit keys: close, minimize, gear, toggle, drag, thumb, track, row:<session id>, x:<session id>.
         string HitTest(Point p)
         {
             if (!board)
             {
                 if (CloseRect.Contains(p)) return "close";
+                if (CompactMinRect.Contains(p)) return "minimize";
                 if (CompactGearRect.Contains(p)) return "gear";
                 if (CompactToggleRect.Contains(p)) return "toggle";
                 return "drag";
             }
             if (BoardCloseRect.Contains(p)) return "close";
+            if (BoardMinRect.Contains(p)) return "minimize";
             if (BoardGearRect.Contains(p)) return "gear";
             if (BoardToggleRect.Contains(p)) return "toggle";
             if (p.Y < TopH) return "drag";
@@ -1352,6 +1372,7 @@ namespace ClaudeStatus
             {
                 case "toggle": return board ? "Switch to Compact view" : "Switch to Worker Board";
                 case "gear": return "Settings";
+                case "minimize": return "Minimize to tray (keeps running; click the tray icon to reopen)";
                 case "close": return "Exit Claude Status";
             }
             var si = FromKey(key);
@@ -1372,6 +1393,7 @@ namespace ClaudeStatus
             switch (hit)
             {
                 case "close": Close(); return;
+                case "minimize": MinimizeToTray(); return;
                 case "toggle": SetView(!board); return;
                 case "gear": OpenSettings(); return;
                 case "thumb": thumbDrag = true; thumbStartY = e.Y; thumbStartScroll = scroll; Capture = true; return;
@@ -1475,6 +1497,26 @@ namespace ClaudeStatus
 
         void BringToFrontNoActivate() { TopMost = false; TopMost = true; }
 
+        // Hides the window only: the form, its timers, file watchers, phone dashboard and tray icon keep
+        // running, so the board, tray color and toasts stay current. View, size and position are untouched.
+        void MinimizeToTray()
+        {
+            if (settingsForm != null && !settingsForm.IsDisposed) settingsForm.Close();
+            hover = ""; pressed = ""; tipText = ""; mouseInside = false;
+            tip.SetToolTip(this, null);
+            note.Hide(this);
+            Hide();
+        }
+
+        // Shows the same window again (never a new one) on top, without taking keyboard focus.
+        void RestoreFromTray()
+        {
+            UpdateLayout();
+            if (!Visible) Show();
+            BringToFrontNoActivate();
+            Invalidate();
+        }
+
         protected override void OnFormClosed(FormClosedEventArgs e)
         {
             SavePosition();
@@ -1482,8 +1524,10 @@ namespace ClaudeStatus
             watcher.EnableRaisingEvents = false;
             cfgWatcher.EnableRaisingEvents = false;
             if (displayChanged != null) SystemEvents.DisplaySettingsChanged -= displayChanged;
+            debounce.Stop(); slow.Stop(); tick.Stop(); cfgDebounce.Stop();
             tray.Visible = false;
             tray.Dispose();
+            trayMenu.Dispose();
             base.OnFormClosed(e);
         }
 

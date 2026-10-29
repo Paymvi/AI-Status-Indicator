@@ -284,7 +284,7 @@ $root = New-Root
 $f = Form $root
 Check 'no config preference -> Worker Board is the default view' $f.IsBoard
 Check 'empty board: one "No Claude workers" row, compact height' ($f.Workers.Count -eq 0 -and $f.ClientSize.Height -lt 70) $f.ClientSize.Height
-Check 'empty: tray says IDLE' ($f.TrayText -eq 'Claude: IDLE')
+Check 'empty: tray says IDLE (with the app name)' ($f.TrayText -eq 'Claude Status: IDLE')
 $f.Dispose()
 $f = Form (New-Root -NoConfig); Check 'missing config.json -> Worker Board' $f.IsBoard; $f.Dispose()
 $f = Form (New-Root @{ startupView = 'compact' }); Check 'startupView=compact -> Compact' (-not $f.IsBoard); Check 'Compact keeps its original 124x38 size' ($f.ClientSize.Width -eq 124 -and $f.ClientSize.Height -eq 38); $f.Dispose()
@@ -309,7 +309,7 @@ $f = Form $root
 $f.Home = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea.Location   # room to grow
 Check 'mixed board in urgency order' ((Ids $f) -eq 'ny,er,b2,b1,web,v1') (Ids $f)
 Check 'names: Portal, Booking Software #1/#2, Website, Guest Form (from a v1 file)' ((($f.Workers | ForEach-Object { $_.DisplayName }) -join '|') -eq 'Portal|Analytics|Booking Software #2|Booking Software #1|Website|Guest Form')
-Check 'Compact/tray surface the most urgent worker' ($f.Surfaced.Id -eq 'ny' -and $f.TrayText -eq 'Claude: NEEDS YOU (Portal)')
+Check 'Compact/tray surface the most urgent worker' ($f.Surfaced.Id -eq 'ny' -and $f.TrayText -eq 'Claude Status: NEEDS YOU (Portal)')
 $f.SetSetting('workerSort', 'recent')
 Check 'switching to Most recent re-sorts immediately' ((Ids $f) -eq 'b2,ny,er,b1,web,v1') (Ids $f)
 Check 'Compact follows Most recent' ($f.Surfaced.Id -eq 'b2')
@@ -396,9 +396,14 @@ $f = Form (New-Root)
 $f.GetType().GetMethod('BuildMenu', [Reflection.BindingFlags]'NonPublic,Instance').Invoke($f, @())
 $menu = $f.GetType().GetField('menu', [Reflection.BindingFlags]'NonPublic,Instance').GetValue($f)
 $view = $menu.Items | Where-Object { $_.Text -eq 'View' }
-Check 'tray / right-click menu: View > Worker Board (checked) / Compact' ($view -and $view.DropDownItems[0].Text -eq 'Worker Board' -and $view.DropDownItems[0].Checked -and $view.DropDownItems[1].Text -eq 'Compact' -and -not $view.DropDownItems[1].Checked)
+Check 'right-click menu: View > Worker Board (checked) / Compact' ($view -and $view.DropDownItems[0].Text -eq 'Worker Board' -and $view.DropDownItems[0].Checked -and $view.DropDownItems[1].Text -eq 'Compact' -and -not $view.DropDownItems[1].Checked)
 $texts = @($menu.Items | ForEach-Object { $_.Text })
 Check 'menu keeps Settings, Show window, Reset position, Exit; no row actions' (($texts -like 'Settings*') -and ($texts -contains 'Show window') -and ($texts -contains 'Reset position') -and ($texts -contains 'Exit') -and -not ($texts -match 'Kill|Stop|Restart|Dismiss'))
+$trayTexts = @($f.TrayMenu.Items | ForEach-Object { $_.Text })
+Check 'tray icon has its own small menu: Open, Quit' (($trayTexts -join ',') -eq 'Open,Quit')
+$hb = $f.HeaderButtons
+Check 'Worker Board header: minimize sits between settings and close' ($hb.Count -eq 4 -and $f.HitAt((New-Object System.Drawing.Point(($hb[2].Left + 9), ($hb[2].Top + 9)))) -eq 'minimize' -and $hb[2].Left -gt $hb[1].Right - 1 -and $hb[2].Right -le $hb[3].Left + 1)
+Check 'tooltip: Minimize to tray' ($f.TooltipFor('minimize') -like 'Minimize to tray*')
 $f.Dispose()
 
 # Compact view still behaves as before
@@ -411,7 +416,7 @@ $f.ReloadNow()
 Check 'Compact with two sessions keeps WORKING ahead of DONE (urgency)' ($f.Surfaced.Id -eq 'p')
 $bmp = New-Object System.Drawing.Bitmap($f.ClientSize.Width, $f.ClientSize.Height); $gg = [System.Drawing.Graphics]::FromImage($bmp); $f.PaintTo($gg); $gg.Dispose()
 $bmp.Save((Join-Path $RenderDir 'compact-100.png')); $bmp.Dispose()
-Check 'Compact hit areas: close / settings / view toggle / drag' ($f.HitAt((New-Object System.Drawing.Point(115, 8))) -eq 'close' -and $f.HitAt((New-Object System.Drawing.Point(99, 8))) -eq 'gear' -and $f.HitAt((New-Object System.Drawing.Point(83, 8))) -eq 'toggle' -and $f.HitAt((New-Object System.Drawing.Point(30, 28))) -eq 'drag')
+Check 'Compact hit areas: close / minimize / settings / view toggle / drag' ($f.HitAt((New-Object System.Drawing.Point(115, 8))) -eq 'close' -and $f.HitAt((New-Object System.Drawing.Point(99, 8))) -eq 'minimize' -and $f.HitAt((New-Object System.Drawing.Point(83, 8))) -eq 'gear' -and $f.HitAt((New-Object System.Drawing.Point(67, 8))) -eq 'toggle' -and $f.HitAt((New-Object System.Drawing.Point(30, 28))) -eq 'drag')
 Check 'tooltips: Settings / Switch to Worker Board' ($f.TooltipFor('gear') -eq 'Settings' -and $f.TooltipFor('toggle') -eq 'Switch to Worker Board')
 $f.Dispose()
 
@@ -915,7 +920,7 @@ $f = Form $root
 Check 'port already in use: phone side reports it, desktop board works normally' (-not $f.Phone -and $f.PhoneStatus -match 'already in use' -and $f.Workers.Count -eq 2 -and $f.Dismiss('d')) $f.PhoneStatus
 $f.GetType().GetMethod('BuildMenu', [Reflection.BindingFlags]'NonPublic,Instance').Invoke($f, @())
 $menu = $f.GetType().GetField('menu', [Reflection.BindingFlags]'NonPublic,Instance').GetValue($f)
-Check 'tray menu shows the phone dashboard problem' (@($menu.Items | Where-Object { $_.Text -match '^Phone dashboard: not running: port \d+ is already in use$' }).Count -eq 1)
+Check 'right-click menu shows the phone dashboard problem' (@($menu.Items | Where-Object { $_.Text -match '^Phone dashboard: not running: port \d+ is already in use$' }).Count -eq 1)
 $np = [THttp]::FreePort(); $f.SetSetting('phonePort', $np)
 Check 'changing phonePort starts it on the new port right away' ($f.Phone -and [THttp]::CanConnect($np))
 # A child process started with inherited handles (as the tailscale.exe lookup is) must not keep the port alive.

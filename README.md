@@ -5,7 +5,7 @@
 ```text
 WORKER BOARD (default)                          COMPACT
 ┌──────────────────────────────────────┐       ┌──────────────────────────────┐
-│ CLAUDE WORKERS               ▭  ⚙  × │       │ Claude · Portal            × │
+│ CLAUDE WORKERS            ▭  ⚙  –  × │       │ Claude · Portal            × │
 ├──────────────────────────────────────┤       │ ● NEEDS YOU                  │
 │ ● Portal              NEEDS YOU · 2m │       └──────────────────────────────┘
 │ ● Booking Software #1 WORKING · 04:32│
@@ -74,7 +74,7 @@ CLAUDE WORKERS
 |---|---|
 | Switch to **Compact** | Click the small pill icon (▭) in the Worker Board header |
 | Switch to **Worker Board** | Hover over Compact and click the small list icon (☰) that appears next to the × |
-| Either, from the tray | Right-click the tray icon (or the window) → **View** → *Worker Board* / *Compact* |
+| Either, from the menu | Right-click the window → **View** → *Worker Board* / *Compact* |
 | Choose the view at startup | Settings (⚙) → *Startup view* |
 
 Every icon has a tooltip. Switching views keeps the window anchored at its saved position and never loses any session state.
@@ -200,7 +200,7 @@ Expected result: `tailscale serve status` lists `http://<laptop>.<tailnet>.ts.ne
 ### Lifecycle
 
 - The dashboard is part of the desktop app: it starts when Claude Status starts (if enabled) and stops when you exit it. There's no separate service or background process, and only one can run (one Claude Status per user; the port is opened exclusively).
-- If the dashboard can't start (e.g. another program uses port 48521), the desktop app works normally and its tray menu shows *Phone dashboard: not running: port 48521 is already in use*; set another `"phonePort"` in `config.json` and run `phone-setup.ps1` again. Its tray menu always shows the dashboard's state.
+- If the dashboard can't start (e.g. another program uses port 48521), the desktop app works normally and its right-click menu shows *Phone dashboard: not running: port 48521 is already in use*; set another `"phonePort"` in `config.json` and run `phone-setup.ps1` again. Its right-click menu always shows the dashboard's state.
 - The hooks and the desktop board never depend on the phone side.
 - `tailscale serve --bg` persists across restarts. While Claude Status isn't running, the phone shows **OFFLINE** with *Claude Status isn't answering*.
 
@@ -236,14 +236,14 @@ Or untick **Settings → Phone dashboard** (stops it immediately; the `tailscale
 | What you see | What to do |
 |---|---|
 | Page doesn't load at all | Tailscale connected on the phone? Laptop awake? Check `phone-setup.ps1 -Status` on the laptop: it shows whether the dashboard answers locally and the `tailscale serve` entry. |
-| **OFFLINE** *Claude Status isn't answering* | The laptop is reachable but Claude Status isn't running, or the dashboard is off. Start Claude Status; check its tray menu (*Phone dashboard: …*). |
+| **OFFLINE** *Claude Status isn't answering* | The laptop is reachable but Claude Status isn't running, or the dashboard is off. Start Claude Status; right-click its window and check *Phone dashboard: …*. |
 | **OFFLINE** *Can't reach the laptop* | Laptop asleep, offline, or Tailscale disconnected on either device. The board shown is the last known one; it refreshes by itself once reachable. |
 | **RECONNECTING…** with a *Last update* time | Brief interruption; rows are dimmed and not current until it says LIVE again. |
 | *This address isn't one Claude Status accepts* | Use the MagicDNS address from `phone-setup.ps1 -Status`; other names pointing at the laptop are refused on purpose. |
 | Tapping a creature says *The laptop is locked* | Expected: Windows won't switch windows on the lock screen. Unlock the laptop, or wait until you're back. |
 | Tapping a creature says *Couldn't identify that worker's window* | Same as on the desktop: send that worker a prompt from its window once (VS Code with several windows open), then it works. |
 | Tapping a creature says *Windows didn't allow…* | Windows refused to switch windows from a background request. Try again, or click the worker on the desktop board. |
-| Tray says *port 48521 is already in use* | Set `"phonePort": 48522` (any free port above 1024) in `config.json`, then `phone-setup.ps1 -Disable` and `phone-setup.ps1` again so `tailscale serve` points at the new port. |
+| Right-click menu says *port 48521 is already in use* | Set `"phonePort": 48522` (any free port above 1024) in `config.json`, then `phone-setup.ps1 -Disable` and `phone-setup.ps1` again so `tailscale serve` points at the new port. |
 
 ## How it works
 
@@ -340,7 +340,7 @@ Nothing is sent anywhere. Older v1 state files from previous versions are read a
 - Auto-sizing to the number of workers; scrolls only the list once it reaches the bottom of the screen; DPI-aware (tested at 100/125/150/200 %)
 - Draggable anywhere; remembers its position
 - Subtle sound when Claude is DONE; Windows notifications for NEEDS YOU and ERROR (all configurable)
-- System-tray icon whose color matches the most important state, with a **View** menu
+- System-tray icon whose color matches the most important state; the **–** button minimizes the window to it (monitoring keeps running), a click on the icon brings it back
 - Uses real Claude Code lifecycle hooks, works **globally across all your projects**
 - User-level install, no administrator rights
 - No Node.js, Vite, Python, or other runtime needed; it uses only what ships with Windows
@@ -426,15 +426,16 @@ Run `install.ps1` again after pulling a newer version. It's safe to run repeated
 | To… | Do this |
 |---|---|
 | **Start** | Double-click `%USERPROFILE%\.claude\status-indicator\start-indicator.vbs` |
-| **Stop** | Click the **×** in the header (top-right), right-click it → **Exit**, or right-click the tray icon → **Exit** |
+| **Stop** | Click the **×** in the header (top-right), right-click it → **Exit**, or right-click the tray icon → **Quit** |
+| **Minimize to tray** | Click the **–** next to the × (in Compact it appears on hover). Everything keeps updating; the tray icon's color and notifications still work |
 | **Move** | Drag the header (Worker Board) or anywhere (Compact) |
-| **Switch view** | The small icon next to ⚙, or tray / right-click → **View** |
+| **Switch view** | The small icon next to ⚙, or right-click → **View** |
 | **Bring a worker's window forward** | Click its row |
 | **Dismiss a finished worker** | Click the **×** at the end of its DONE row |
-| **Settings** | ⚙, or tray / right-click → **Settings…** |
+| **Settings** | ⚙, or right-click → **Settings…** |
 | **Reset position** | Right-click → **Reset position** |
-| **See all sessions** | The Worker Board, or right-click the indicator or the tray icon |
-| **Bring it back if hidden** | Left-click the tray icon |
+| **See all sessions** | The Worker Board, or right-click the indicator |
+| **Bring it back if hidden** | Left-click the tray icon, or right-click it → **Open** (same window, same view and position) |
 
 From PowerShell:
 
@@ -577,7 +578,7 @@ Its app (usually VS Code) has several windows and Claude Status hasn't yet seen 
 Create an empty file named `debug.on` in `%USERPROFILE%\.claude\status-indicator\`. Each hook call is then logged (time, event, state, session ID only) to `debug.log` in that folder. Delete `debug.on` when done.
 
 **The window disappeared off-screen.**
-Right-click the tray icon → **Reset position**.
+Left-click the tray icon (it moves the window back onto the screen if needed), then right-click the window → **Reset position** if you want its default spot.
 
 **"Running scripts is disabled on this system".**
 Use the commands exactly as shown above; they include `-ExecutionPolicy Bypass`, which applies only to that one command.

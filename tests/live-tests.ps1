@@ -132,8 +132,32 @@ $t = New-Object Windows.Forms.Timer -Property @{ Interval = 120000 }; $t.add_Tic
     $live.GetType().GetMethod('BuildMenu', [Reflection.BindingFlags]'NonPublic,Instance').Invoke($live, @())
     $menu = $live.GetType().GetField('menu', [Reflection.BindingFlags]'NonPublic,Instance').GetValue($live)
     ($menu.Items | Where-Object { $_.Text -eq 'View' }).DropDownItems[0].PerformClick(); [System.Windows.Forms.Application]::DoEvents()
-    Check 'View > Worker Board in the tray menu switches back immediately' ($live.IsBoard -and $live.ClientSize.Width -gt $expectW)
-    $live.Close(); $live.Dispose()
+    Check 'View > Worker Board in the right-click menu switches back immediately' ($live.IsBoard -and $live.ClientSize.Width -gt $expectW)
+
+    Section 'Minimize to tray (running indicator)'
+    $boundsBefore = $live.Bounds
+    $live.MinimizeNow(); [System.Windows.Forms.Application]::DoEvents()
+    Check 'minimize hides the window' (-not $live.Visible)
+    Put $root 'live' 'NEEDS_YOU' 'Toah_Nipi_Portal' 0 1 $PID $me
+    Put $root 'live2' 'WORKING' 'Toah_Nipi_Website' 0 2 $PID $me
+    for ($i = 0; $i -lt 12; $i++) { [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 50 }
+    Check 'while minimized, state changes are still picked up (board and tray)' ($live.Surfaced.State -eq 'NEEDS_YOU' -and $live.Workers.Count -eq 2 -and $live.TrayText -like 'Claude Status: NEEDS YOU*' -and -not $live.Visible) $live.TrayText
+    Remove-Item (Join-Path $root 'state\sessions\live2.json')
+    for ($i = 0; $i -lt 12; $i++) { [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 50 }
+    $null = $WW::Activate($a.Window); Start-Sleep -Milliseconds 200
+    $fgBefore = [TNative]::GetForegroundWindow()
+    $handle = $live.Handle
+    $live.RestoreNow(); [System.Windows.Forms.Application]::DoEvents()
+    Check 'restore shows the same window with the same view, size and position' ($live.Visible -and $live.Handle -eq $handle -and $live.IsBoard -and $live.Bounds -eq $boundsBefore) "$boundsBefore -> $($live.Bounds)"
+    Check 'restored window is topmost again and did not steal keyboard focus' ((([TNative]::GetWindowLong($live.Handle, -20)) -band 0x8) -ne 0 -and [TNative]::GetForegroundWindow() -eq $fgBefore)
+    $live.RestoreNow(); [System.Windows.Forms.Application]::DoEvents()
+    for ($k = 0; $k -lt 5; $k++) { $live.MinimizeNow(); [System.Windows.Forms.Application]::DoEvents(); $live.RestoreNow(); [System.Windows.Forms.Application]::DoEvents() }
+    $forms = @([System.Windows.Forms.Application]::OpenForms | Where-Object { $_ -is [ClaudeStatus.IndicatorForm] })
+    Check 'repeated minimize/restore (and restore while open) keeps exactly one window' ($forms.Count -eq 1 -and $live.Visible -and $live.Handle -eq $handle)
+    $live.MinimizeNow(); [System.Windows.Forms.Application]::DoEvents()
+    ($live.TrayMenu.Items | Where-Object { $_.Text -eq 'Quit' }).PerformClick(); [System.Windows.Forms.Application]::DoEvents()
+    Check 'tray Quit (while minimized) exits: window closed and disposed' ($live.IsDisposed)
+    if (-not $live.IsDisposed) { $live.Close(); $live.Dispose() }
     Skip 'target window on another monitor' 'single-monitor machine; activation does not depend on the monitor'
 } catch {
     Check 'live tests ran without a script error' $false ($_.Exception.Message + ' @ ' + $_.InvocationInfo.ScriptLineNumber)
