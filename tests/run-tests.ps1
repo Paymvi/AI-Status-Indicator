@@ -283,7 +283,7 @@ Section 'Indicator window (Worker Board + Compact) against temporary state folde
 $root = New-Root
 $f = Form $root
 Check 'no config preference -> Worker Board is the default view' $f.IsBoard
-Check 'empty board: one "No Claude workers" row, compact height' ($f.Workers.Count -eq 0 -and $f.ClientSize.Height -lt 70) $f.ClientSize.Height
+Check 'empty board: one "No Claude workers" row, compact height (incl. the usage strip)' ($f.Workers.Count -eq 0 -and $f.ClientSize.Height -lt 90) $f.ClientSize.Height
 Check 'empty: tray says IDLE (with the app name)' ($f.TrayText -eq 'Claude Status: IDLE')
 $f.Dispose()
 $f = Form (New-Root -NoConfig); Check 'missing config.json -> Worker Board' $f.IsBoard; $f.Dispose()
@@ -655,7 +655,7 @@ Check 'error type is the desktop short form (authentication_failed -> auth)' ((R
 Check 'only DONE rows carry a dismiss token' (((Row $bd 'Website').d -match '^[A-Za-z0-9_-]{22}$') -and @($bd.rows | Where-Object { $_.s -ne 'DONE' -and $_.d -ne '' }).Count -eq 0)
 $rawJson = (Req $pp 'GET' '/api/board').Body
 $fields = ($bd.rows | ForEach-Object { ($_.PSObject.Properties.Name) -join ',' } | Sort-Object -Unique) -join ';'
-Check 'privacy: rows contain only k,n,s,t,e,d,c; board only v,now,summary,text,rows' ($fields -eq 'k,n,s,t,e,d,c' -and (($bd.PSObject.Properties.Name) -join ',') -eq 'v,now,summary,text,rows') "$fields"
+Check 'privacy: rows contain only k,n,s,t,e,d,c; board only v,now,summary,text,rows,usage' ($fields -eq 'k,n,s,t,e,d,c' -and (($bd.PSObject.Properties.Name) -join ',') -eq 'v,now,summary,text,rows,usage') "$fields"
 Check 'privacy: no session IDs, folder names, process IDs or paths in the phone data' ($rawJson -notmatch '"(ny|er|b1|b2|web)"' -and $rawJson -notmatch 'Toah_Nipi|Users|claude_pid|\\\\' -and $rawJson -notmatch "\b$PID\b")
 $f.SetSetting('workerSort', 'recent')
 $bd = Api $pp
@@ -983,6 +983,256 @@ process.stdout.write(JSON.stringify({hats:f.HATS.length,bodies:f.BODIES.length,b
 }
 
 # ======================================================================================
+Section 'Claude Usage: status line feed, /usage cache, account checks, refresh, display, phone'
+# ======================================================================================
+$U = [ClaudeStatus.Usage]
+function UMs([DateTime]$t) { [long](($t.ToUniversalTime() - $epoch).TotalMilliseconds) }
+function USec([DateTime]$t) { [long](($t.ToUniversalTime() - $epoch).TotalSeconds) }
+# A Claude Code global config (.claude.json) with secrets that must never be copied anywhere.
+function Set-Account([string]$path, [string]$acct, $cache = $null) {
+    $o = @{ userID = 'SECRET-USERID'; projects = @{ 'C:\SECRET-PROJECT' = @{ allowedTools = @() } } }
+    if ($acct) { $o.oauthAccount = @{ accountUuid = $acct; emailAddress = 'secret.person@example.com'; organizationName = 'SECRET-ORG' } }
+    if ($null -ne $cache) { $o.cachedUsageUtilization = $cache }
+    [IO.File]::WriteAllText($path, ($o | ConvertTo-Json -Depth 10))
+}
+# Claude Code's cached /usage result, shaped like the real one (Claude Code 2.1.308).
+function New-Cache([string]$acct, [double]$agoMin, [double]$five, [double]$week, [hashtable]$more = @{}) {
+    $n = [DateTime]::UtcNow
+    $u = @{ five_hour = @{ utilization = $five; resets_at = $n.AddHours(3).ToString('o'); limit_dollars = $null }; seven_day = @{ utilization = $week; resets_at = $n.AddDays(4).ToString('o') }
+        seven_day_sonnet = $null; seven_day_opus = $null; cinder_cove = $null; extra_usage = @{ is_enabled = $false; monthly_limit = $null }
+        spend = @{ enabled = $false; used = @{ amount_minor = 0; currency = 'USD'; exponent = 2 }; limit = $null; disclaimer = 'SECRET-DISCLAIMER' }
+        seven_day_breakdown = @{ rows = @(@{ key = 'claude_code'; display_name = 'Claude Code'; percent = 100 }, @{ key = 'chat'; display_name = 'Chats'; percent = 0 }) } }
+    foreach ($k in $more.Keys) { $u[$k] = $more[$k] }
+    return @{ fetchedAtMs = (UMs $n.AddMinutes(-$agoMin)); accountUuid = $acct; utilization = $u }
+}
+
+# --- text formatting ---
+$cdWant = @{ 0 = '<1m'; 59 = '<1m'; 60 = '1m'; 3599 = '59m'; 3600 = '1h 00m'; 3661 = '1h 01m'; 86399 = '23h 59m'; 86400 = '1d 0h'; 90061 = '1d 1h'; 266400 = '3d 2h' }
+$bad = @(); foreach ($k in $cdWant.Keys) { $got = $U::Countdown([TimeSpan]::FromSeconds($k)); if ($got -ne $cdWant[$k]) { $bad += "$k=$got" } }
+Check 'reset countdown: <1m, 59m, 1h 00m, 23h 59m, 1d 0h, 3d 2h' ($bad.Count -eq 0 -and $U::Countdown([TimeSpan]::FromSeconds(-5)) -eq '<1m') ($bad -join ', ')
+Check 'percent used / left: whole numbers like /usage; above zero never shows as 0%' (
+    $U::PercentText(0) -eq '0%' -and $U::PercentText(0.2) -eq '<1%' -and $U::PercentText(0.5) -eq '1%' -and $U::PercentText(56.5) -eq '57%' -and $U::PercentText(100) -eq '100%' -and
+    $U::RemainingText(14) -eq '86% left' -and $U::RemainingText(99.7) -eq '<1% left' -and $U::RemainingText(100) -eq '0% left' -and $U::RemainingText(120) -eq '0% left')
+$base = [DateTime]::Today.AddHours(10); $nowU = $base.ToUniversalTime()
+Check 'reset time in local time: today / tomorrow / weekday + date' (
+    $U::ResetClock($base.AddHours(3).ToUniversalTime(), $nowU) -eq ('today ' + $base.AddHours(3).ToString('t')) -and
+    $U::ResetClock($base.AddHours(23).ToUniversalTime(), $nowU) -eq ('tomorrow ' + $base.AddHours(23).ToString('t')) -and
+    $U::ResetClock($base.AddDays(3).ToUniversalTime(), $nowU) -eq ($base.AddDays(3).ToString('ddd MMM d') + ', ' + $base.AddDays(3).ToString('t')))
+$l = New-Object ClaudeStatus.UsageLimit; $l.Percent = 88; $l.ResetsUtc = $nowU.AddHours(3)
+$t1 = $U::ResetText($l, $nowU)
+$l.ResetsUtc = $nowU.AddMinutes(-3)
+$t2 = $U::ResetText($l, $nowU)
+Check 'reset text: date/time + countdown; after it passes, says the new allowance is not reported yet' ($t1 -eq ('Resets today ' + $base.AddHours(3).ToString('t') + ' (in 3h 00m)') -and $t2 -match '^Reset today .+ \(3m ago\) . waiting for Claude Code to report the new allowance$') "$t1 / $t2"
+
+# --- statusline.ps1, run the way Claude Code runs a status line (stdin JSON, child powershell.exe) ---
+$slCfg = Join-Path $tmp 'sl-cfg'; $slRoot = Join-Path $slCfg 'status-indicator'
+$null = New-Item -ItemType Directory -Force $slRoot
+Copy-Item (Join-Path $src 'statusline.ps1') $slRoot
+$slJson = Join-Path $slCfg '.claude.json'
+$feedFile = Join-Path $slRoot 'state\usage-statusline.json'
+function Invoke-StatusLine($in) {
+    $json = if ($in -is [string]) { $in } else { $in | ConvertTo-Json -Compress -Depth 6 }
+    $out = $json | & $winPs -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $slRoot 'statusline.ps1')
+    return @{ Out = ($out -join "`n"); Code = $LASTEXITCODE }
+}
+$r5 = USec ([DateTime]::UtcNow.AddHours(3)); $r7 = USec ([DateTime]::UtcNow.AddDays(4))
+Set-Account $slJson 'acct-AAAA-1111'
+$r = Invoke-StatusLine @{ session_id = 'SECRET-SID-1'; transcript_path = 'C:\SECRET-TRANSCRIPT.jsonl'; cwd = 'C:\Users\Someone\SECRET-CWD'; model = @{ display_name = 'Opus' }; cost = @{ total_cost_usd = 1.23 }
+    rate_limits = @{ five_hour = @{ used_percentage = 23.5; resets_at = $r5 }; seven_day = @{ used_percentage = 41.2; resets_at = $r7 } } }
+$feedText = Get-Content $feedFile -Raw; $feed = $feedText | ConvertFrom-Json
+Check 'statusline.ps1 exits 0 and prints a short usage line' ($r.Code -eq 0 -and $r.Out -match '^5h 24% \S+ wk 41%$') $r.Out
+Check 'feed: percent + reset time per window, tagged with the account hash (same hash as usage.cs)' ($feed.v -eq 1 -and $feed.account -eq $U::AccountKey('acct-AAAA-1111') -and $feed.windows.five_hour.pct -eq 23.5 -and $feed.windows.five_hour.resets -eq $r5 -and $feed.windows.seven_day.pct -eq 41.2 -and $feed.windows.five_hour.at) $feedText
+Check 'feed has only the documented fields' ((($feed.PSObject.Properties.Name) -join ',') -eq 'v,account,windows' -and (($feed.windows.five_hour.PSObject.Properties.Name) -join ',') -eq 'pct,resets,at')
+Check 'privacy: no session data, paths, model, cost, account ID or e-mail stored' ($feedText -notmatch 'SECRET|Opus|1\.23|acct-AAAA|example\.com')
+$at5 = $feed.windows.five_hour.at
+$r = Invoke-StatusLine @{ rate_limits = @{ seven_day = @{ used_percentage = 50; resets_at = $r7 } } }
+$feed = Get-Content $feedFile -Raw | ConvertFrom-Json
+Check 'a window Claude Code leaves out keeps its last value and time (never reset to 0)' ($feed.windows.five_hour.pct -eq 23.5 -and $feed.windows.five_hour.at -eq $at5 -and $feed.windows.seven_day.pct -eq 50)
+$before = Get-Content $feedFile -Raw
+$r = Invoke-StatusLine @{ session_id = 'x'; model = @{ display_name = 'Opus' } }
+$r2 = Invoke-StatusLine 'not json {'
+Check 'no rate_limits (API key, or before the first response) / malformed input: exit 0, empty line, file untouched' ($r.Code -eq 0 -and $r.Out -eq '' -and $r2.Code -eq 0 -and $r2.Out -eq '' -and (Get-Content $feedFile -Raw) -eq $before)
+Set-Account $slJson 'acct-BBBB-2222'
+$r = Invoke-StatusLine @{ rate_limits = @{ seven_day = @{ used_percentage = 5; resets_at = $r7 } } }
+$feed = Get-Content $feedFile -Raw | ConvertFrom-Json
+Check 'another account signed in: its values replace the previous account''s entirely' ($feed.account -eq $U::AccountKey('acct-BBBB-2222') -and -not $feed.windows.PSObject.Properties['five_hour'] -and $feed.windows.seven_day.pct -eq 5)
+Set-Account $slJson ''
+$r = Invoke-StatusLine @{ rate_limits = @{ seven_day = @{ used_percentage = 7; resets_at = $r7 } } }
+Check 'no account signed in: recorded without an account, so the indicator never shows it' ((Get-Content $feedFile -Raw | ConvertFrom-Json).account -eq '')
+Set-Account $slJson 'acct-AAAA-1111'
+$r = Invoke-StatusLine @{ rate_limits = @{ spend_limit = @{ used_percentage = 62.8; resets_at = $r7; used_usd = 314.12; limit_usd = 500; period = 'monthly' } } }
+$sp = (Get-Content $feedFile -Raw | ConvertFrom-Json).windows.spend_limit
+Check 'spend limit (Claude apps gateway): percent, dollars and period kept' ($sp.pct -eq 62.8 -and $sp.used_usd -eq 314.12 -and $sp.limit_usd -eq 500 -and $sp.period -eq 'monthly')
+[IO.File]::WriteAllText((Join-Path $slRoot 'statusline-chain.json'), '{"type":"command","command":"echo my-own-status-line"}')
+$r = Invoke-StatusLine @{ rate_limits = @{ five_hour = @{ used_percentage = 30; resets_at = $r5 } } }
+Check 'a status line of your own still runs, and its output is what Claude Code shows' ($r.Out -eq 'my-own-status-line' -and (Get-Content $feedFile -Raw | ConvertFrom-Json).windows.five_hour.pct -eq 30) $r.Out
+Remove-Item (Join-Path $slRoot 'statusline-chain.json')
+
+# --- UsageMonitor: sources, accounts, freshness, failures (temporary files; no watchers or timers) ---
+$uCfg = Join-Path $tmp 'u-cfg'; $uRoot = Join-Path $uCfg 'status-indicator'
+$null = New-Item -ItemType Directory -Force (Join-Path $uRoot 'state')
+$uJson = Join-Path $uCfg '.claude.json'; $uFeed = Join-Path $uRoot 'state\usage-statusline.json'
+function Write-Feed([string]$acct, [double]$five, [double]$agoMin = 0) {
+    $o = @{ v = 1; account = $U::AccountKey($acct); windows = @{ five_hour = @{ pct = $five; resets = (USec ([DateTime]::UtcNow.AddHours(3))); at = [DateTime]::UtcNow.AddMinutes(-$agoMin).ToString('o') } } }
+    [IO.File]::WriteAllText($uFeed, ($o | ConvertTo-Json -Depth 5))
+}
+$m = New-Object ClaudeStatus.UsageMonitor($uRoot, $null)
+Check 'reads Claude Code''s .claude.json next to a custom config folder' ($m.ClaudeJsonFile -eq $uJson)
+Check 'before the first read: Loading' ($m.Snapshot.State -eq 'Loading')
+$m.ReadNow($true)
+Check 'no Claude Code account file: Unavailable, nothing shown' ($m.Snapshot.State -eq 'Unavailable' -and $m.Snapshot.Limits.Count -eq 0 -and $m.Snapshot.Message -match "Couldn't find") $m.Snapshot.Message
+Set-Account $uJson '' (New-Cache 'acct-A' 1 14 57)
+$m.ReadNow($true)
+Check 'signed out: Unavailable, and a cached /usage result is not shown' ($m.Snapshot.State -eq 'Unavailable' -and $m.Snapshot.Limits.Count -eq 0 -and $m.Snapshot.Message -match 'signed in') $m.Snapshot.Message
+Set-Account $uJson 'acct-A' (New-Cache 'acct-A' 2 14 57)
+$m.ReadNow($true); $s = $m.Snapshot
+Check '/usage cache for the signed-in account: Fresh, with /usage''s titles and values' ($s.State -eq 'Fresh' -and $s.Limits.Count -eq 2 -and $s.Limits[0].Title -eq 'Current session (5-hour window)' -and $s.Limits[0].Percent -eq 14 -and $s.Limits[1].Title -eq 'Current week (all models)' -and $s.Limits[1].Percent -eq 57 -and $s.Limits[0].Source -eq '/usage cache')
+Check 'other /usage details: extra usage, and this week''s usage by product (non-zero rows)' (($s.Notes -join '|') -eq 'Extra usage: off|This week''s usage by product: Claude Code 100%') ($s.Notes -join '|')
+Write-Feed 'acct-A' 20 0
+$m.ReadNow($true); $s = $m.Snapshot
+Check 'the newer value wins per window (status line 5-hour); the weekly one stays from /usage' ($s.Limits[0].Percent -eq 20 -and $s.Limits[0].Source -eq 'status line' -and $s.Limits[1].Percent -eq 57 -and $s.Sources.Count -eq 2)
+Write-Feed 'acct-A' 25 30
+$m.ReadNow($true)
+Check 'an older status line value never overrides a newer /usage result' ($m.Snapshot.Limits[0].Percent -eq 14)
+Write-Feed 'acct-A' 20 0
+$m.ReadNow($true)
+Set-Account $uJson 'acct-B' (New-Cache 'acct-A' 1 14 57)
+$m.ReadNow($true); $s = $m.Snapshot
+Check 'account switch: the previous account''s figures (status line and /usage) disappear at once' ($s.State -eq 'Unavailable' -and $s.Limits.Count -eq 0 -and $s.Message -match 'No usage reported for this account') $s.Message
+Check '... and, with no status line set up, says how to add it' ($s.Message -match 'install\.ps1')
+[IO.File]::WriteAllText((Join-Path $uCfg 'settings.json'), '{"statusLine":{"type":"command","command":"powershell.exe -File \"C:/x/.claude/status-indicator/statusline.ps1\""}}')
+$m.ReadNow($true)
+Check '... with it set up, says the figures come with the next response' ($m.StatusLineInstalled -and $m.Snapshot.Message -match 'next response')
+Set-Account $uJson 'acct-B' (New-Cache 'acct-B' 1 3 9)
+$m.ReadNow($true)
+Check 'the new account''s own /usage result shows' ($m.Snapshot.Limits[0].Percent -eq 3 -and $m.Snapshot.Limits[1].Percent -eq 9)
+Set-Account $uJson 'acct-B' (New-Cache 'acct-B' 40 3 9)
+$m.ReadNow($true)
+Check 'not updated for over 15 minutes: Stale, values kept exactly as reported' ($m.Snapshot.State -eq 'Stale' -and $m.Snapshot.Limits[0].Percent -eq 3)
+Set-Account $uJson 'acct-B' (New-Cache 'acct-B' 1 3 9); $m.ReadNow($true)
+[IO.File]::WriteAllText($uJson, '{"oauthAccount": {"accountUuid": "acct-B"}, "cachedUsageUtil')
+$m.ReadNow($true); $s = $m.Snapshot
+Check 'unreadable file (e.g. mid-write): last values stay, marked Stale, retry in 2 s' ($s.State -eq 'Stale' -and $s.Limits[0].Percent -eq 3 -and $s.Message -match "Couldn't read" -and $m.Failures -eq 1 -and $m.RetryDelayMs -eq 2000) $s.Message
+$m.ReadNow($true); $d2 = $m.RetryDelayMs
+for ($i = 0; $i -lt 6; $i++) { $m.ReadNow($true) }
+Check 'repeated failures back off: 2 s, 4 s, ... at most 60 s' ($d2 -eq 4000 -and $m.RetryDelayMs -eq 60000 -and $m.Snapshot.Limits.Count -eq 2)
+Set-Account $uJson 'acct-B' (New-Cache 'acct-B' 0 4 9); $m.ReadNow($true)
+Check 'next good read: Fresh again with the new values, back-off cleared' ($m.Snapshot.State -eq 'Fresh' -and $m.Snapshot.Limits[0].Percent -eq 4 -and $m.Failures -eq 0)
+$c = New-Cache 'acct-B' 1 88 9; $c.utilization.five_hour.resets_at = [DateTime]::UtcNow.AddMinutes(-2).ToString('o')
+Set-Account $uJson 'acct-B' $c; $m.ReadNow($true); $l = $m.Snapshot.Limits[0]
+Check 'reset time passed but no new figure yet: percentage not zeroed, marked as waiting' ($l.Percent -eq 88 -and $U::PastReset($l, [DateTime]::UtcNow) -and $U::ResetText($l, [DateTime]::UtcNow) -match 'waiting for Claude Code')
+$wk = [DateTime]::UtcNow.AddDays(4).ToString('o')
+Set-Account $uJson 'acct-B' (New-Cache 'acct-B' 1 3 9 @{ seven_day_sonnet = @{ utilization = 91; resets_at = $wk }; limits = @(
+    @{ kind = 'session'; group = 'session'; percent = 3; resets_at = $wk; scope = $null }, @{ kind = 'weekly_sonnet'; group = 'weekly'; percent = 91; resets_at = $wk; scope = @{ model = @{ display_name = 'Sonnet' } } },
+    @{ kind = 'weekly_opus'; group = 'weekly'; percent = 44; resets_at = $wk; scope = @{ model = @{ display_name = 'Opus' } } }) })
+Remove-Item $uFeed
+$m.ReadNow($true)
+$titles = ($m.Snapshot.Limits | ForEach-Object { $_.Title + '=' + $_.Percent }) -join '|'
+Check 'model-specific weekly limits shown with /usage-style titles, without duplicates' ($titles -eq 'Current session (5-hour window)=3|Current week (all models)=9|Current week (Sonnet only)=91|Current week (Opus only)=44') $titles
+Set-Account $uJson 'acct-B' @{ fetchedAtMs = 'x'; accountUuid = 'acct-B'; utilization = 'a changed format' }
+Write-Feed 'acct-B' 11 0
+$m.ReadNow($true)
+Check 'unknown /usage cache format: ignored without errors; the documented status line value still shows' ($m.Snapshot.Limits.Count -eq 1 -and $m.Snapshot.Limits[0].Percent -eq 11 -and (($m.Snapshot.Sources) -join ',') -eq 'status line')
+$script:uChanges = 0
+$m.add_Changed([Action] { $script:uChanges++ })
+$m.ReadNow($true); $m.ReadNow($true)
+Write-Feed 'acct-B' 12 0; $m.ReadNow($true)
+Check 'Changed fires only when something shown changes' ($script:uChanges -eq 1) $script:uChanges
+Check 'Refresh re-reads at once, at most once every 2 seconds' ($m.RefreshNow() -and -not $m.RefreshNow())
+$pj = (New-Object System.Web.Script.Serialization.JavaScriptSerializer).Serialize($U::ToPhone($m.Snapshot))
+Check 'what the phone gets: display data only (no account ID, hash, e-mail or paths)' ($pj -notmatch ('acct-|example\.com|SECRET|claude\.json|' + $U::AccountKey('acct-B'))) $pj
+$m.Dispose()
+
+# --- the desktop's usage strip, Show usage, details window ---
+$dCfg = Join-Path $tmp 'd-cfg'; $dRoot = Join-Path $dCfg 'status-indicator'
+$null = New-Item -ItemType Directory -Force (Join-Path $dRoot 'state\sessions')
+Copy-Item (Join-Path $src 'config.json') $dRoot
+$dJson = Join-Path $dCfg '.claude.json'
+Set-Account $dJson 'acct-D' (New-Cache 'acct-D' 1 14 57)
+Put $dRoot 'w1' 'WORKING' 'Toah_Nipi_Portal' 130 50 $PID $me
+Put $dRoot 'w2' 'DONE' 'Toah_Nipi_Website' 360 40 -updSec 360
+$f = Form $dRoot; $f.Usage.ReadNow($true); $f.ReloadNow()
+$ub = $f.UsageBounds
+$inStrip = New-Object System.Drawing.Point ($ub.Left + 40), ($ub.Top + 10)
+Check 'Show usage is on by default: one strip under the heading, above the worker rows' ($f.UsageShown -and $ub.Height -eq 20 -and $f.RowBounds(0).Top -ge $ub.Bottom) "$ub"
+$tipU = $f.TooltipFor('usage')
+Check 'the strip opens the details (hit test); its tooltip says it''s account-wide and lists each limit' ($f.HitAt($inStrip) -eq 'usage' -and $tipU -match 'whole account' -and $tipU -match 'Current session \(5-hour window\): 14% used' -and $tipU -match 'Current week \(all models\): 57% used') $tipU
+$h0 = $f.ClientSize.Height
+$f.SetSetting('showUsage', $false)
+Check 'Show usage off: the strip is gone and leaves no space' (-not $f.UsageShown -and $f.ClientSize.Height -eq $h0 - 20 -and $f.UsageBounds.IsEmpty -and $f.HitAt($inStrip) -ne 'usage') "$($f.ClientSize.Height) vs $h0"
+Set-Account $dJson 'acct-D' (New-Cache 'acct-D' 0 15 57); $f.Usage.ReadNow($true)
+Check 'hidden usage is still tracked (only its visibility changed)' ($f.Usage.Snapshot.Limits[0].Percent -eq 15 -and $f.Workers.Count -eq 2)
+$f.Dispose()
+$f = Form $dRoot
+Check 'Show usage off is remembered after a restart (config.json)' (-not $f.UsageShown -and (Get-Content (Join-Path $dRoot 'config.json') -Raw | ConvertFrom-Json).showUsage -eq $false)
+$f.SetSetting('showUsage', $true)
+Check 'Show usage on again: back to the same height' ($f.UsageShown -and $f.ClientSize.Height -eq $h0)
+$f.Dispose()
+$f = Form (New-Root @{ startupView = 'compact' }); Check 'Compact view stays the original pill (no usage strip)' (-not $f.UsageShown -and $f.ClientSize.Height -eq 38); $f.Dispose()
+$changes = @{}
+$sf = New-Object ClaudeStatus.SettingsForm('urgency', $false, 'workerBoard', $false, $true, [Action[string, object]] { param($k, $v) $changes[$k] = $v }, [Action] { })
+$null = $sf.Handle
+$cb = @($sf.Controls[0].Controls | Where-Object { $_ -is [System.Windows.Forms.CheckBox] -and $_.Text -like 'Show usage*' })
+if ($cb.Count) { $cb[0].Checked = $false }
+Check 'Settings window has a "Show usage" checkbox that saves showUsage' ($cb.Count -eq 1 -and $changes['showUsage'] -eq $false)
+$sf.Dispose()
+foreach ($sc in 1, 1.25, 1.5, 2) {
+    $f = Form $dRoot $sc; $f.Usage.ReadNow($true); $f.ReloadNow()
+    $bmp = New-Object System.Drawing.Bitmap $f.ClientSize.Width, $f.ClientSize.Height
+    $g = [System.Drawing.Graphics]::FromImage($bmp); $f.PaintTo($g); $g.Dispose()
+    $bmp.Save((Join-Path $RenderDir "usage-board-$($sc * 100).png")); $bmp.Dispose()
+    $uf = New-Object ClaudeStatus.UsageForm($f.Usage, $sc)
+    $bmp = New-Object System.Drawing.Bitmap 10, 10
+    for ($i = 0; $i -lt 2; $i++) { $bmp.Dispose(); $bmp = New-Object System.Drawing.Bitmap $uf.Width, $uf.Height; $uf.DrawToBitmap($bmp, (New-Object System.Drawing.Rectangle 0, 0, $uf.Width, $uf.Height)) }   # 2nd pass at the fitted height
+    $bmp.Save((Join-Path $RenderDir "usage-details-$($sc * 100).png")); $bmp.Dispose()
+    $btn = $uf.Controls[0]
+    Check "usage strip and details fit at $($sc * 100)% DPI" ($f.UsageBounds.Right -le $f.ClientSize.Width -and $f.UsageBounds.Height -eq [int][Math]::Round(20 * $sc) -and $btn.Bottom -le $uf.ClientSize.Height -and $uf.ClientSize.Height -gt 200 * $sc) "$($f.UsageBounds) btn=$($btn.Bounds) h=$($uf.ClientSize.Height)"
+    $uf.Dispose(); $f.Dispose()
+}
+
+# --- the phone gets the same figures; Refresh from the phone ---
+$pp = [THttp]::FreePort()
+$pRoot = New-PhoneRoot $pp
+$pJson = Join-Path (Split-Path -Parent $pRoot) '.claude.json'
+Set-Account $pJson 'acct-P' (New-Cache 'acct-P' 1 14 57)
+$f = Form $pRoot; $null = $f.Handle; $f.Usage.ReadNow($true); $f.ReloadNow()
+$resp = Req $pp 'GET' '/api/board'; $b = $resp.Body | ConvertFrom-Json
+Check 'phone board carries the same usage: state, titles, percentages, reset times' ($b.usage.st -eq 'fresh' -and $b.usage.lim[0].t -eq 'Current session (5-hour window)' -and $b.usage.lim[0].p -eq 14 -and $b.usage.lim[0].r -eq $U::Ms($f.Usage.Snapshot.Limits[0].ResetsUtc) -and $b.usage.lim[1].p -eq 57 -and $b.usage.notes[0] -eq 'Extra usage: off') $resp.Body
+Check 'phone board: no account ID, hash, e-mail or file paths' ($resp.Body -notmatch ('acct-P|' + $U::AccountKey('acct-P') + '|example\.com|claude\.json|SECRET'))
+$v0 = $b.v
+Set-Account $pJson 'acct-P' (New-Cache 'acct-P' 0 16 57); $f.Usage.ReadNow($true)
+$b = Api $pp
+Check 'new usage figures reach the phone (the board version moves, so the long-poll wakes up)' ($b.v -gt $v0 -and $b.usage.lim[0].p -eq 16)
+$f.SetSetting('showUsage', $false); $b = Api $pp
+Check 'hiding usage on the desktop doesn''t hide it on the phone (each device has its own switch)' (@($b.usage.lim).Count -eq 2)
+$h = DismissHeaders $pp; $h['X-Claude-Status'] = 'usage-refresh'
+$r = Req $pp 'POST' '/api/usage-refresh' $h '{}' -Pump
+[System.Windows.Forms.Application]::DoEvents()
+Check 'phone Refresh: accepted, the laptop re-reads its local files' ($r.Code -eq 200 -and $r.Body -match 'refreshing') $r.Raw
+$r = Req $pp 'POST' '/api/usage-refresh' $h '{}'
+Check 'phone Refresh: at most once every 2 s' ($r.Code -eq 429)
+$r = Req $pp 'POST' '/api/usage-refresh' (DismissHeaders $pp) '{}'
+$r2 = Req $pp 'POST' '/api/usage-refresh' @{ Origin = 'http://evil.example'; 'Content-Type' = 'application/json'; 'X-Claude-Status' = 'usage-refresh' } '{}'
+$r3 = Req $pp 'GET' '/api/usage-refresh'
+Check 'phone Refresh: other action header / cross-site refused, GET not allowed' ($r.Code -eq 403 -and $r2.Code -eq 403 -and ($r3.Code -eq 404 -or $r3.Code -eq 405)) "$($r.Code) $($r2.Code) $($r3.Code)"
+$f.Dispose()
+Remove-Item $pJson
+
+# --- phone.js usage text = usage.cs usage text ---
+if (-not $node) { Skip 'phone usage text matches the desktop' 'node not found' }
+else {
+    $cases = @(); $want = @()
+    foreach ($sec in 0, 30, 59, 60, 61, 599, 3599, 3600, 3660, 3661, 86399, 86400, 90061, 266400, 950400) { $cases += , @('c', ($sec * 1000)); $want += $U::Countdown([TimeSpan]::FromSeconds($sec)) }
+    foreach ($p in 0, 0.2, 0.49, 0.5, 1, 14, 56.5, 57.4, 99.6, 100, 120) { $cases += , @('p', $p); $want += $U::PercentText($p); $cases += , @('r', $p); $want += $U::RemainingText($p) }
+    $inFile = Join-Path $tmp 'usage-cases.json'
+    [IO.File]::WriteAllText($inFile, ($cases | ConvertTo-Json -Compress), (New-Object Text.UTF8Encoding $false))
+    $js = "const f=require(process.argv[1]);const c=JSON.parse(require('fs').readFileSync(process.argv[2],'utf8'));process.stdout.write(JSON.stringify(c.map(x=>x[0]==='c'?f.countdown(x[1]):x[0]==='p'?f.percentText(x[1]):f.remainingText(x[1]))));"
+    $got = & $node.Source -e $js (Join-Path $src 'phone.js') $inFile | Out-String | ConvertFrom-Json
+    $diff = @(); for ($i = 0; $i -lt $want.Count; $i++) { if ($got[$i] -cne $want[$i]) { $diff += "$($cases[$i] -join '/'): js='$($got[$i])' cs='$($want[$i])'" } }
+    Check "phone usage text (countdown, % used, % left) matches the desktop ($($want.Count) cases)" ($got.Count -eq $want.Count -and $diff.Count -eq 0) (($diff | Select-Object -First 5) -join '; ')
+}
+
+# ======================================================================================
 Section 'Phone page in a real browser (headless Chrome emulating Android phones)'
 # ======================================================================================
 $chrome = @("$env:ProgramFiles\Google\Chrome\Application\chrome.exe", "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe",
@@ -1005,7 +1255,10 @@ else {
     Put $root 'web' 'DONE' 'Toah_Nipi_Website' 30 60
     Put $root 'guest' 'DONE' 'Guest_Booking_Form' 360 59
     Put $root 'race' 'DONE' 'Race' 7300 58
+    $bJson = Join-Path (Split-Path -Parent $root) '.claude.json'
+    Set-Account $bJson 'acct-W' (New-Cache 'acct-W' 1 14 57 @{ seven_day_sonnet = @{ utilization = 91; resets_at = [DateTime]::UtcNow.AddDays(4).ToString('o') } })
     $f = Form $root
+    $f.Usage.ReadNow($true); $f.ReloadNow()
     $cdir = Join-Path $tmp 'browser'; $null = New-Item -ItemType Directory -Force $cdir
     $profileDir = Join-Path $tmp 'chrome-profile'
     $cp = Start-Process $chrome -ArgumentList '--headless=new', '--remote-debugging-port=0', "--user-data-dir=`"$profileDir`"", '--no-first-run', '--no-default-browser-check', '--disable-extensions', 'about:blank' -PassThru
@@ -1130,18 +1383,24 @@ $c = Get-Content (Join-Path $inst 'config.json') -Raw | ConvertFrom-Json
 if ($haveGit) {
     Check 'update keeps existing sound / staleHours choices' ($c.soundOnDone -eq $false -and $c.staleHours -eq 12)
     Check 'update keeps the saved window position and existing state files' ((Get-Content (Join-Path $inst 'position.txt')) -eq '321,123' -and (Test-Path (Join-Path $inst 'state\sessions\legacy.json')))
-    Check 'hooks unchanged by the update: settings.json untouched, no backup' ((Get-Content $settingsPath -Raw) -eq $settingsBefore -and @(Get-ChildItem $cd -Filter 'settings.json.bak*').Count -eq $backupsBefore)
+    $sAfter = Get-Content $settingsPath -Raw | ConvertFrom-Json
+    $slAdded = $sAfter.statusLine
+    $sAfter.PSObject.Properties.Remove('statusLine')
+    Check 'update only adds the usage status line (hooks and other settings unchanged, one backup)' ($slAdded -and (($sAfter | ConvertTo-Json -Depth 100 -Compress) -eq ($settingsBefore | ConvertFrom-Json | ConvertTo-Json -Depth 100 -Compress)) -and @(Get-ChildItem $cd -Filter 'settings.json.bak*').Count -eq $backupsBefore + 1)
 }
 Check 'new settings added with defaults (Worker Board, urgency, summary off)' ($c.startupView -eq 'workerBoard' -and $c.workerSort -eq 'urgency' -and $c.showWorkerSummary -eq $false)
 Check 'project aliases added' ($c.projectAliases.Toah_Nipi_Booking_Software -eq 'Booking Software' -and $c.projectAliases.Guest_Booking_Form -eq 'Guest Form')
 $s = Get-Content $settingsPath -Raw | ConvertFrom-Json
 $ours = 0; foreach ($p in $s.hooks.PSObject.Properties) { foreach ($grp in $p.Value) { foreach ($hk in $grp.hooks) { if ((@($hk.args) -join ' ') -match 'status-indicator\\hook\.ps1') { $ours++ } } } }
 Check 'exactly 9 Claude Status hooks, unrelated hook and settings kept' ($ours -eq 9 -and $s.model -eq 'opus' -and ((Get-Content $settingsPath -Raw) -match 'my-own-hook'))
+$wantSl = 'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + (Join-Path $inst 'statusline.ps1').Replace('\', '/') + '"'
+Check 'status line set to statusline.ps1 (forward slashes for Git Bash), no chain file when there was no status line' ($s.statusLine.type -eq 'command' -and $s.statusLine.command -eq $wantSl -and -not (Test-Path (Join-Path $inst 'statusline-chain.json'))) $s.statusLine.command
+Check 'usage files installed; config gets showUsage=true' ((Test-Path (Join-Path $inst 'usage.cs')) -and (Test-Path (Join-Path $inst 'statusline.ps1')) -and $c.showUsage -eq $true)
 $cfgText = Get-Content (Join-Path $inst 'config.json') -Raw
 $out = & $winPs -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repo 'install.ps1') -ClaudeDir $cd -NoStart 2>&1
 Check 're-running the installer is a no-op for settings.json and config.json' ((Get-Content (Join-Path $inst 'config.json') -Raw) -eq $cfgText -and (($out | Out-String) -match 'already up to date'))
 Check 'phone dashboard files installed; config gets phoneDashboard=false, phonePort=48521' ((@('phone.cs', 'phone.html', 'phone.css', 'phone.js', 'phone-setup.ps1') | Where-Object { -not (Test-Path (Join-Path $inst $_)) }).Count -eq 0 -and $c.phoneDashboard -eq $false -and $c.phonePort -eq 48521)
-$out = & $winPs -NoProfile -Command "Add-Type -Path '$inst\indicator.cs', '$inst\phone.cs' -ReferencedAssemblies System.Windows.Forms, System.Drawing, System.Web.Extensions; 'ok'" 2>&1
+$out = & $winPs -NoProfile -Command "Add-Type -Path '$inst\indicator.cs', '$inst\phone.cs', '$inst\usage.cs' -ReferencedAssemblies System.Windows.Forms, System.Drawing, System.Web.Extensions; 'ok'" 2>&1
 Check 'installed indicator compiles with Windows PowerShell 5.1' (($out | Out-String).Trim() -eq 'ok') ($out | Out-String)
 $auto = & $winPs -NoProfile -ExecutionPolicy Bypass -File (Join-Path $inst 'autostart.ps1') 2>&1
 Check 'autostart script runs (status query only; your Startup folder is not modified)' (($auto | Out-String) -match 'Autostart is currently')
@@ -1160,7 +1419,25 @@ Check 'phone-setup.ps1 -Disable turns it off; leaves tailscale serve alone when 
 $out = & $winPs -NoProfile -ExecutionPolicy Bypass -File (Join-Path $inst 'uninstall.ps1') -ClaudeDir $cd 2>&1
 $s = Get-Content $settingsPath -Raw
 Check 'uninstall removes the app folder' (-not (Test-Path $inst)) ($out | Out-String)
-Check 'uninstall removes only Claude Status hooks' ($s -notmatch 'status-indicator' -and $s -match 'my-own-hook' -and $s -match 'opus')
+Check 'uninstall removes only Claude Status hooks (and its status line)' ($s -notmatch 'status-indicator' -and $s -match 'my-own-hook' -and $s -match 'opus' -and -not ($s | ConvertFrom-Json).PSObject.Properties['statusLine'])
+
+# --- a status line of your own: kept running (chained), restored on uninstall; -NoUsageStatusLine ---
+$cd3 = Join-Path $tmp 'claude-sl'; $null = New-Item -ItemType Directory -Force $cd3
+$sp3 = Join-Path $cd3 'settings.json'; $inst3 = Join-Path $cd3 'status-indicator'
+[IO.File]::WriteAllText($sp3, '{"statusLine":{"type":"command","command":"echo my-own-line","padding":2}}')
+$out = & $winPs -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repo 'install.ps1') -ClaudeDir $cd3 -NoStart 2>&1
+$s3 = Get-Content $sp3 -Raw | ConvertFrom-Json
+$chain = Join-Path $inst3 'statusline-chain.json'
+Check 'existing status line: replaced by statusline.ps1, original saved to statusline-chain.json, padding kept' ($s3.statusLine.command -match 'status-indicator/statusline\.ps1' -and $s3.statusLine.padding -eq 2 -and (Test-Path $chain) -and (Get-Content $chain -Raw | ConvertFrom-Json).command -eq 'echo my-own-line') ($out | Out-String)
+$out = & $winPs -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repo 'install.ps1') -ClaudeDir $cd3 -NoStart 2>&1
+Check 're-install with a chained status line: no change, the original stays saved' ((($out | Out-String) -match 'already up to date') -and (Get-Content $chain -Raw | ConvertFrom-Json).command -eq 'echo my-own-line')
+$out = & $winPs -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repo 'install.ps1') -ClaudeDir $cd3 -NoStart -NoUsageStatusLine 2>&1
+$s3 = Get-Content $sp3 -Raw | ConvertFrom-Json
+Check '-NoUsageStatusLine: your own status line is back, chain file removed' ($s3.statusLine.command -eq 'echo my-own-line' -and $s3.statusLine.padding -eq 2 -and -not (Test-Path $chain)) ($out | Out-String)
+$null = & $winPs -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repo 'install.ps1') -ClaudeDir $cd3 -NoStart 2>&1
+$null = & $winPs -NoProfile -ExecutionPolicy Bypass -File (Join-Path $inst3 'uninstall.ps1') -ClaudeDir $cd3 2>&1
+$s3 = Get-Content $sp3 -Raw | ConvertFrom-Json
+Check 'uninstall restores your own status line exactly' ($s3.statusLine.command -eq 'echo my-own-line' -and $s3.statusLine.padding -eq 2 -and $s3.statusLine.type -eq 'command' -and -not (Test-Path $inst3))
 
 # ======================================================================================
 Section 'Privacy / no-network audit (static)'
@@ -1174,8 +1451,11 @@ $pjs = (Get-Content (Join-Path $src 'phone.js') -Raw) + (Get-Content (Join-Path 
 $pjsNoSvgNs = $pjs.Replace("'http://www.w3.org/2000/svg'", "''")   # the SVG namespace name is an identifier, not a request
 Check 'phone page: no notifications, sounds, vibration, speech, service worker, other storage or outside URLs' ($pjsNoSvgNs -cnotmatch 'Notification|vibrate|Audio|speechSynthesis|serviceWorker|sessionStorage|indexedDB|document\.cookie|innerHTML|https?://')
 $storage = @([regex]::Matches($pjs, 'localStorage\.\w+\([^)]*\)') | ForEach-Object { $_.Value })
-Check 'phone page stores only the List / Creatures choice' ($storage.Count -eq 2 -and @($storage | Where-Object { $_ -notmatch '^localStorage\.(getItem|setItem)\(VIEW_KEY(, view)?\)$' }).Count -eq 0 -and $pjs -match "VIEW_KEY = 'claudeStatus\.view'") ($storage -join '; ')
-Check 'phone page only calls its own relative API' ((([regex]::Matches($pjs, "'(api/[a-z]*)") | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique) -join ',') -eq 'api/board,api/dismiss,api/focus' -and $pjs -cnotmatch 'XMLHttpRequest|WebSocket|EventSource|sendBeacon|fetch\(\s*[''"](?!api/)')
+Check 'phone page stores only the List / Creatures choice and the Show usage / expanded choices' ($storage.Count -eq 6 -and @($storage | Where-Object { $_ -notmatch '^localStorage\.(getItem|setItem)\((VIEW_KEY(, view)?|USAGE_KEY(, .*)?|USAGE_OPEN_KEY(, .*)?)\)$' }).Count -eq 0 -and $pjs -match "VIEW_KEY = 'claudeStatus\.view'" -and $pjs -match "USAGE_KEY = 'claudeStatus\.usage', USAGE_OPEN_KEY = 'claudeStatus\.usageOpen'") ($storage -join '; ')
+Check 'phone page only calls its own relative API' ((([regex]::Matches($pjs, "'(api/[a-z-]*)") | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique) -join ',') -eq 'api/board,api/dismiss,api/focus,api/usage-refresh' -and $pjs -cnotmatch 'XMLHttpRequest|WebSocket|EventSource|sendBeacon|fetch\(\s*[''"](?!api/)')
+$usageSrc = (Get-Content (Join-Path $src 'usage.cs') -Raw) + (Get-Content (Join-Path $src 'statusline.ps1') -Raw)
+Check 'usage: never reads Claude credentials or tokens, never calls Anthropic' ($usageSrc -notmatch '(?i)\.credentials|accessToken|refreshToken|api/oauth|anthropic\.com|Authorization|Bearer')
+Check 'statusline.ps1 only uses rate_limits from the session data' ((Get-Content (Join-Path $src 'statusline.ps1') -Raw) -notmatch '\$in\.(cwd|session_id|transcript_path|model|cost|workspace|output_style)')
 $setup = Get-Content (Join-Path $src 'phone-setup.ps1') -Raw
 Check 'phone-setup.ps1 never runs Funnel and only proxies to 127.0.0.1' ($setup -notmatch '(?i)[''"]funnel[''"]|\bfunnel\s+(on|--)' -and @([regex]::Matches($setup, 'https?://[^\s''"`]+') | Where-Object { $_.Value -notmatch '^http://(127\.0\.0\.1|localhost):' }).Count -eq 0)
 Check 'indicator never reads window titles' ($code -notmatch 'GetWindowText' -and $pcs -notmatch 'GetWindowText')

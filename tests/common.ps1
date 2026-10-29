@@ -25,7 +25,7 @@ function Info([string]$text) { Report 'INFO' $text ''; Say "  info  $text" }
 function Section([string]$t) { Report 'SECTION' $t ''; Say "`n== $t" Cyan }
 
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
-Add-Type -Path (Join-Path $src 'indicator.cs'), (Join-Path $src 'phone.cs') -ReferencedAssemblies System.Windows.Forms, System.Drawing, System.Web.Extensions
+Add-Type -Path (Join-Path $src 'indicator.cs'), (Join-Path $src 'phone.cs'), (Join-Path $src 'usage.cs') -ReferencedAssemblies System.Windows.Forms, System.Drawing, System.Web.Extensions
 Add-Type @'
 using System; using System.Text; using System.Collections.Generic; using System.Runtime.InteropServices;
 public static class TNative {

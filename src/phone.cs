@@ -10,8 +10,11 @@
 //   POST /api/dismiss  {"k":..,"d":..}    dismiss one specific DONE occurrence
 //   POST /api/focus    {"k":..}           bring that worker's window forward on the laptop (the desktop's
 //                                         own click-on-a-worker action; the laptop picks the window)
+//   POST /api/usage-refresh {}            re-read the Claude Usage data on the laptop now (local files)
 // Only display data leaves the process: friendly name, state, when that state began, a short error type,
 // a creature look number, and opaque tokens. No session IDs, process IDs, folder paths or window data.
+// The board also carries the account-wide Claude Usage figures (titles, percentages, reset times, status
+// text); never account IDs, credentials or file contents.
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -129,6 +132,12 @@ namespace ClaudeStatus
         string lastFocusKey = "";
         DateTime lastFocusUtc = DateTime.MinValue;
         FocusResult lastFocus;
+        Dictionary<string, object> usageData;
+        string usageSig = "";
+        DateTime lastUsageRefreshUtc = DateTime.MinValue;
+
+        // Asks the indicator to re-read Claude Usage now (null = not available).
+        public Func<bool> UsageRefresh;
 
         public int Port { get { return port; } }
         public bool Running { get { return running; } }
@@ -210,6 +219,19 @@ namespace ClaudeStatus
                 if (published && s2 == signature) return;
                 rows = next; summaryOn = summary; summaryText = summaryLine; signature = s2;
                 published = true; version++;
+                Monitor.PulseAll(gate);
+            }
+        }
+
+        // Called by the indicator when the Claude Usage figures change (see Usage.ToPhone).
+        public void PublishUsage(Dictionary<string, object> data, string signature)
+        {
+            lock (gate)
+            {
+                if (signature == usageSig && usageData != null) { usageData = data; return; }   // only "checked" moved
+                usageData = data; usageSig = signature;
+                if (!published) return;
+                version++;
                 Monitor.PulseAll(gate);
             }
         }
@@ -306,7 +328,8 @@ namespace ClaudeStatus
             }
             if (req.Method == "POST" && req.Path == "/api/dismiss") { DismissRequest(ns, req); return; }
             if (req.Method == "POST" && req.Path == "/api/focus") { FocusRequest(ns, req); return; }
-            if (req.Path == "/api/dismiss" || req.Path == "/api/focus" || Pages.ContainsKey(req.Path) || req.Path == "/api/board") { Text(ns, 405, "Method not allowed"); return; }
+            if (req.Method == "POST" && req.Path == "/api/usage-refresh") { UsageRefreshRequest(ns, req); return; }
+            if (req.Path == "/api/dismiss" || req.Path == "/api/focus" || req.Path == "/api/usage-refresh" || Pages.ContainsKey(req.Path) || req.Path == "/api/board") { Text(ns, 405, "Method not allowed"); return; }
             Text(ns, 404, "Not found");
         }
 
@@ -391,7 +414,7 @@ namespace ClaudeStatus
             var list = new List<object>();
             foreach (var r in rows)
                 list.Add(new Dictionary<string, object> { { "k", r.Key }, { "n", r.Name }, { "s", r.State }, { "t", r.Since }, { "e", r.Err }, { "d", r.Occ }, { "c", r.Look } });
-            var o = new Dictionary<string, object> { { "v", version }, { "now", Ms(DateTime.UtcNow) }, { "summary", summaryOn }, { "text", summaryOn ? summaryText : "" }, { "rows", list } };
+            var o = new Dictionary<string, object> { { "v", version }, { "now", Ms(DateTime.UtcNow) }, { "summary", summaryOn }, { "text", summaryOn ? summaryText : "" }, { "rows", list }, { "usage", usageData } };
             return new JavaScriptSerializer().Serialize(o);
         }
 
@@ -483,6 +506,23 @@ namespace ClaudeStatus
             }
             int code = result == FocusResult.Focused ? 200 : result == FocusResult.Busy ? 429 : result == FocusResult.Unavailable ? 503 : 409;
             Json(ns, code, "{\"result\":\"" + FocusName(result) + "\"}");
+        }
+
+        // Re-reads local files on the laptop (no Claude request, nothing to rate-limit upstream); still at
+        // most once every 2 seconds. The new figures arrive through the board's long-poll.
+        void UsageRefreshRequest(NetworkStream ns, Request req)
+        {
+            if (!ActionAllowed(ns, req, "usage-refresh")) return;
+            bool run;
+            lock (focusGate)
+            {
+                run = (DateTime.UtcNow - lastUsageRefreshUtc).TotalMilliseconds >= 2000;
+                if (run) lastUsageRefreshUtc = DateTime.UtcNow;
+            }
+            if (!run) { Json(ns, 429, "{\"result\":\"busy\"}"); return; }
+            bool ok;
+            try { ok = UsageRefresh != null && UsageRefresh(); } catch { ok = false; }
+            Json(ns, ok ? 200 : 503, ok ? "{\"result\":\"refreshing\"}" : "{\"result\":\"unavailable\"}");
         }
 
         static string FocusName(FocusResult r)

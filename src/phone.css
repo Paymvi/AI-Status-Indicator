@@ -12,6 +12,8 @@
   --green: #3fb950;
   --red: #f85149;
   --grey: #808080;
+  --blue: #58a6ff;      /* usage bars (UsageForm.Blue); status colours stay reserved for workers */
+  --orange: #f0883e;
   color-scheme: dark;
 }
 
@@ -119,8 +121,20 @@ h1 { flex: 1 1 auto; margin: 0; font-size: 13.5px; font-weight: 700; color: var(
 
 .noscript { color: var(--muted); padding: 16px; }
 
-/* ---------- List / Creatures switch ---------- */
-.viewbar { display: flex; padding: 0 12px 8px 14px; }
+/* ---------- List / Creatures switch, and the Show usage switch ---------- */
+.viewbar { display: flex; align-items: center; gap: 8px; padding: 0 12px 8px 14px; }
+.segs { display: flex; }
+.tog {
+  margin: 0 0 0 auto; min-height: 36px; padding: 0 12px 0 10px;
+  display: inline-flex; align-items: center; gap: 7px;
+  border: 1px solid #3a3a3a; border-radius: 5px; background: transparent; color: var(--muted);
+  font: inherit; font-size: 14px; font-weight: 600; white-space: nowrap;
+  -webkit-tap-highlight-color: transparent; touch-action: manipulation;
+}
+.tog::before { content: ""; width: 13px; height: 13px; border: 1.5px solid var(--grey); border-radius: 3px; box-sizing: border-box; }
+.tog[aria-pressed="true"] { color: #fff; }
+.tog[aria-pressed="true"]::before { background: var(--blue); border-color: var(--blue); box-shadow: inset 0 0 0 2px #1e1e1e; }
+.tog:focus-visible { outline: 2px solid var(--name); outline-offset: 1px; }
 .seg {
   min-height: 36px; padding: 0 16px; margin: 0;
   border: 1px solid #3a3a3a; background: transparent; color: var(--muted);
@@ -132,6 +146,60 @@ h1 { flex: 1 1 auto; margin: 0; font-size: 13.5px; font-weight: 700; color: var(
 .seg[aria-pressed="true"] { background: #353535; color: #fff; }
 .seg:focus-visible { outline: 2px solid var(--name); outline-offset: 1px; position: relative; }
 .rows[hidden], .creatures[hidden], .hint[hidden] { display: none; }
+
+/* ---------- Claude Usage (account-wide; the same figures as the desktop's usage strip) ---------- */
+.usage { border-bottom: 1px solid var(--line); }
+.usage[hidden], .usage-detail[hidden], .usage-msg[hidden] { display: none; }
+.usage-sum {
+  display: flex; align-items: center; gap: 10px; width: 100%; min-height: 40px; margin: 0; padding: 6px 12px 6px 14px;
+  border: 0; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer;
+  -webkit-tap-highlight-color: transparent; touch-action: manipulation;
+}
+.usage-sum:active { background: var(--hover); }
+.usage-sum:focus-visible { outline: 2px solid var(--muted); outline-offset: -3px; }
+.usage-title { flex: none; font-size: 13.5px; font-weight: 700; color: var(--muted); }
+.usage-mini { flex: 1 1 auto; min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 14px; font-size: 14.5px; font-variant-numeric: tabular-nums; }
+.usage-mini .muted, .usage .muted { color: var(--muted); }
+.mi { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.mk { color: var(--muted); }
+.mbar { display: inline-block; width: 44px; height: 6px; background: #3a3a3a; }
+.bar { display: block; height: 8px; margin: 5px 0 4px; background: #343434; }
+.mbar i, .bar i { display: block; height: 100%; background: var(--blue); }
+.hi i { background: var(--orange); }
+.max i { background: var(--red); }
+.dim i { background: var(--grey); }
+.dim .mp, .lim.dim .used { color: var(--muted); }
+.tag { color: var(--orange); font-size: 13px; font-weight: 700; }
+.chev { flex: none; width: 9px; height: 9px; margin-right: 4px; border-right: 2px solid var(--grey); border-bottom: 2px solid var(--grey); transform: rotate(45deg) translate(-2px, -2px); }
+.usage-sum[aria-expanded="true"] .chev { transform: rotate(-135deg) translate(-2px, -2px); }
+
+.usage-detail { padding: 0 14px 12px; font-size: 14px; line-height: 1.35; }
+.usage-detail p { margin: 0; }
+.usage-scope { font-size: 12.5px; font-weight: 700; color: var(--muted); letter-spacing: .01em; }
+.usage-state { display: flex; align-items: center; gap: 7px; margin-top: 6px !important; color: var(--name); }
+.usage-state::before { content: ""; flex: none; width: 9px; height: 9px; border-radius: 50%; background: var(--grey); }
+.usage-state[data-st="fresh"]::before { background: var(--green); }
+.usage-state[data-st="stale"]::before { background: var(--orange); }
+.usage-state[data-st="unavailable"]::before { background: var(--red); }
+.usage-msg, .usage-src, .usage-notes, .lim .sub { color: var(--muted); }
+.usage-msg { margin-top: 4px !important; }
+.usage-limits, .usage-notes { list-style: none; margin: 0; padding: 0; }
+.lim { padding: 9px 0 2px; border-top: 1px solid var(--line); margin-top: 9px; }
+.lim .top { display: flex; justify-content: space-between; gap: 10px; }
+.lim .ttl { font-size: 15px; color: var(--name); overflow-wrap: anywhere; }
+.lim .used { flex: none; font-size: 15px; font-variant-numeric: tabular-nums; }
+.lim .sub { font-size: 13.5px; font-variant-numeric: tabular-nums; }
+.usage-notes { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--line); }
+.usage-notes:empty { display: none; }
+.usage-src { margin-top: 10px !important; font-size: 12.5px; }
+.usage-btn {
+  margin-top: 10px; min-height: 40px; padding: 0 18px;
+  border: 1px solid #464646; border-radius: 5px; background: #2c2c2c; color: var(--name);
+  font: inherit; font-size: 14.5px; font-weight: 600; touch-action: manipulation;
+}
+.usage-btn:disabled { opacity: .45; }
+.usage-btn:focus-visible { outline: 2px solid var(--name); outline-offset: 1px; }
+.board.stale .usage-mini, .board.stale .usage-limits { opacity: .55; }
 
 /* ---------- Creatures view: a grid of little workers ---------- */
 .pets {

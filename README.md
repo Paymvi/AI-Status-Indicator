@@ -90,6 +90,7 @@ The ⚙ button (in the Worker Board header, or in Compact while hovering) opens 
 - **Worker ordering:** Urgency / Most recent
 - **Show worker summary:** on / off
 - **Startup view:** Worker Board / Compact (used the next time Claude Status starts)
+- **Show usage:** on / off: the [Claude Usage](#claude-usage) strip under the heading (on by default). Off hides it completely; usage keeps being tracked, and the phone has its own switch.
 - **Phone dashboard (private, via Tailscale):** on / off (see [Phone dashboard](#phone-dashboard-optional))
 - **Edit project aliases (config.json)…** opens `config.json` in Notepad. Saved alias changes apply as soon as you save the file.
 
@@ -111,6 +112,61 @@ What this can't do:
 - Sessions recorded by the previous version of Claude Status (before upgrading) have no process identity yet; they become clickable after their next prompt.
 - Clicking a worker is the **only** thing that ever moves keyboard focus. State changes, sounds, notifications, view switching and resizing never take focus.
 
+## Claude Usage
+
+See your Claude plan's usage limits without opening Claude Code and running `/usage`. A one-line strip under the Worker Board heading shows the account's limits; click it for the full breakdown.
+
+```text
+CLAUDE WORKERS                ▭  ⚙  –  ×
+USAGE  5h ▬▬──── 14%   Wk ▬▬▬▬── 57%
+● Portal              WORKING · 02:10
+```
+
+- **Account-wide.** These are your Claude account's limits, shared by every worker, device and claude.ai. They aren't per worker, and the strip and the details say so.
+- **Details** (click the strip, or right-click → *Claude usage…*). For each limit Claude Code reports, shown with `/usage`'s own names (*Current session (5-hour window)*, *Current week (all models)*, *Current week (Sonnet only)*, and any other model-specific weekly limit), you get:
+  - % used and % left, with a progress bar;
+  - the reset time in your local time **and** a countdown, e.g. *Resets today 1:30 AM (in 3h 53m)*;
+  - other `/usage` details when they're available: extra usage on or off (with amounts when it's on), and what this week's usage went to (*Claude Code 100%*);
+  - behind a Claude apps gateway: the spend limit (%, dollars, period).
+- **Status:** **Fresh** (reported within the last 15 minutes), **Stale** (older, or the latest read failed; the last values stay visible and are marked), **Loading…**, or **Unavailable** with the reason (not signed in, no data yet, …). It also shows *Last updated* and which source each value came from. A stale strip is grey and says *stale*.
+- **Refresh** button in the details (and on the phone).
+- **Only real numbers.** Nothing is estimated or calculated from local token counts, context-window size or costs; a limit Claude Code doesn't report isn't shown; your plan isn't guessed. When a reset time passes, the old percentage is **not** zeroed. It says *waiting for Claude Code to report the new allowance* until the new figure arrives.
+- **Checking costs nothing.** Claude Status never starts a Claude conversation, never sends anything to Anthropic and never touches your workers.
+
+### Where the numbers come from
+
+Claude Code's `/usage` panel asks Anthropic's servers using your Claude sign-in token, through an endpoint that isn't documented for other apps. Anthropic's terms don't allow third-party apps to use Claude.ai sign-in tokens, so Claude Status **doesn't** do that. It never reads your credentials. Instead it reads two files Claude Code itself writes on your computer:
+
+| Source | What it gives | Status |
+|---|---|---|
+| **Status line data** (`statusline.ps1`) | Claude Code gives a [status line command](https://code.claude.com/docs/en/statusline#rate-limit-usage) the 5-hour and 7-day usage (% used + reset time) after each response, for Pro and Max sign-ins. The installer makes `statusline.ps1` your status line. It keeps just those numbers in `state\usage-statusline.json`. | **Documented**, supported |
+| **Claude Code's `/usage` cache** (`cachedUsageUtilization` in `~\.claude.json`) | Claude Code's own copy of the last `/usage` result: the same limits as `/usage`, including model-specific weekly limits, extra usage and the weekly breakdown. | **Undocumented.** Read-only. Its format may change with any Claude Code update; if it does, Claude Status ignores it (and keeps using the status line data) instead of guessing. |
+
+When both have a value for the same limit, the more recent one is shown.
+
+**Accounts.** Only figures for the account Claude Code is signed in with right now are shown. Claude Code tags its `/usage` cache with the account ID; `statusline.ps1` tags its numbers with a one-way hash of it, never the ID itself. After `/logout` the section says *not signed in* and shows nothing. After switching accounts, the previous account's figures disappear at once, and the new account's appear as soon as Claude Code reports them. API-key and cloud-provider sign-ins have no plan limits, and the section says so.
+
+### How often it updates
+
+There's nothing to poll: the numbers change when Claude Code reports new ones, i.e. after a Claude response in a session that runs the status line, or when Claude Code refreshes its `/usage` cache (e.g. when you open `/usage`). Claude Status:
+
+- reads both files at startup, and again within ~1.5 s whenever either changes (file watcher);
+- re-checks once a minute as a safety net (and to turn *Fresh* into *Stale* on time);
+- looks again 15 s and 3 min after each reset time, to pick up the new allowance as soon as it's reported;
+- re-reads on **Refresh** (at most once every 2 s);
+- after a failed read (e.g. a file caught mid-write), retries with back-off: 2 s, 4 s, … up to 60 s.
+
+Reads never overlap, and none of this sends a request anywhere. There is no Anthropic rate limit to hit.
+
+### Status line
+
+`install.ps1` sets Claude Code's status line to `statusline.ps1` (`statusLine` in `settings.json`, with a backup made first):
+
+- With no status line of your own, the CLI shows a short `5h 14% · wk 57%`. (Like any custom status line, it replaces the footer's keyboard hints such as *esc to interrupt*.)
+- With a status line of your own, it's saved to `statusline-chain.json` and still runs: you keep seeing **its** output, and `uninstall.ps1` (or `install.ps1 -NoUsageStatusLine`) puts it back exactly.
+- `install.ps1 -NoUsageStatusLine` skips (or removes) it; the section then relies on the `/usage` cache only.
+- Each status line update starts a short-lived `powershell.exe` (about 0.3–0.5 s, like the hooks).
+
 ## Phone dashboard (optional)
 
 See the same Worker Board on your phone, for example on Android while you're away from the desk, and dismiss finished workers from there. It is **off by default** and stays **private to your own Tailscale network**: nothing is published to the internet.
@@ -131,6 +187,7 @@ tailscale serve on the laptop  ── forwards to ──►  127.0.0.1:48521
 - **Honest connection state** (top right): **LIVE**, **CONNECTING…**, **RECONNECTING…** or **OFFLINE**. When the connection is lost, the page keeps the last board but dims it, freezes its timers, shows *Last update 11:55:07 (3s ago). The board below may be out of date.* and says why (laptop unreachable, or Claude Status not answering). Dismissing is disabled until it's LIVE again, and a dismiss is never queued for later. It reconnects by itself and refreshes as soon as the laptop answers again, including when you come back to the page after Android put it in the background.
 - **No phone notifications**: no sounds, vibration, notification prompts or background activity. (Desktop sounds and notifications are unchanged.)
 - **Two views: List or Creatures** (switch at the top). See below.
+- **Claude Usage** (account-wide): a compact line above the workers (*5h 14% · Wk 57%*); tap it for the same breakdown as the desktop, with countdowns and a **Refresh** button. **Show usage** (next to List / Creatures) hides or shows it; each phone remembers its own choice, separately from the desktop's. The phone gets only the displayed figures and text: never account IDs, credentials or file contents.
 
 ### Creatures view
 
@@ -250,7 +307,7 @@ Or untick **Settings → Phone dashboard** (stops it immediately; the `tailscale
 Claude Status uses Claude Code's official **lifecycle hooks**. It does **not**:
 
 - scrape the screen, read window titles or watch VS Code pixels;
-- poll Anthropic or make any outgoing network requests (the optional [phone dashboard](#phone-dashboard-optional) only *listens*, on 127.0.0.1);
+- poll Anthropic or make any outgoing network requests (the optional [phone dashboard](#phone-dashboard-optional) only *listens*, on 127.0.0.1), or read your Claude credentials ([Claude Usage](#claude-usage) reads files Claude Code writes locally);
 - store your prompts or Claude's responses. (Claude Code hands each hook its event data, which for a new prompt includes the prompt text. `hook.ps1` only extracts a few fields from it and never saves the prompt.)
 
 ```text
@@ -346,6 +403,7 @@ Nothing is sent anywhere. Older v1 state files from previous versions are read a
 - No Node.js, Vite, Python, or other runtime needed; it uses only what ships with Windows
 - No network connection required; negligible CPU while idle
 - Optional private [phone dashboard](#phone-dashboard-optional) over Tailscale: the same board on your phone, with synced DONE dismissal
+- [Claude Usage](#claude-usage): your plan's 5-hour and weekly limits (and more when available) with progress bars and reset countdowns, on the desktop and the phone
 
 ## Requirements
 
@@ -503,6 +561,7 @@ If the wizard says it can't find the file, use this instead: press **Win + R**, 
   "startupView": "workerBoard",
   "workerSort": "urgency",
   "showWorkerSummary": false,
+  "showUsage": true,
   "phoneDashboard": false,
   "phonePort": 48521,
   "projectAliases": {
@@ -522,6 +581,7 @@ If the wizard says it can't find the file, use this instead: press **Win + R**, 
 | `startupView` | `"workerBoard"` (default) or `"compact"`: the view Claude Status opens in. |
 | `workerSort` | `"urgency"` (default: NEEDS YOU, ERROR, WORKING, DONE) or `"recent"` (most recently updated first). Used by both views. |
 | `showWorkerSummary` | `true` shows a one-line summary under the Worker Board heading. Default `false`. |
+| `showUsage` | `true` (default) shows the [Claude Usage](#claude-usage) strip on the Worker Board; `false` hides it (no space kept). Also in Settings. |
 | `phoneDashboard` | `true` runs the [phone dashboard](#phone-dashboard-optional) on 127.0.0.1. Default `false`. Also in Settings. |
 | `phonePort` | Its local port (default `48521`). |
 | `projectAliases` | Friendly names: `"Folder_Name": "Friendly Name"`. The folder name is matched case-insensitively against the name of the folder Claude is working in. Folders without an alias get their underscores replaced with spaces. Several folders may share one alias; their workers are then numbered together. |
@@ -544,7 +604,7 @@ The uninstaller:
 
 1. stops the indicator (and with it the phone dashboard), and removes the `tailscale serve` entry `phone-setup.ps1` created, if any;
 2. removes the autostart shortcut, if it points to this install;
-3. backs up `settings.json`, then removes **only** Claude Status's hook entries;
+3. backs up `settings.json`, then removes **only** Claude Status's hook entries and its status line (a status line you had before installing is put back);
 4. deletes `%USERPROFILE%\.claude\status-indicator\` (including session files, `windows.json` and settings).
 
 It does **not** delete your cloned repository, Claude Code, the `.claude` folder, your other settings, or your other hooks. It's safe to run even if parts of Claude Status are already missing.
@@ -563,6 +623,7 @@ It does **not** delete your cloned repository, Claude Code, the `.claude` folder
 - Notifications and sounds only happen while the indicator is running.
 - **Clicking a worker** focuses its top-level window, not a specific VS Code editor tab or Windows Terminal tab. With several VS Code windows open, a session becomes clickable once you've sent it a prompt while Claude Status was running (see [Clicking a worker](#clicking-a-worker)). Sessions that have ended can't be focused.
 - A DONE worker stays on the Worker Board until you dismiss it, even after its session has closed; with Compact as your only view, dismiss old ones occasionally from the Worker Board (Compact counts them in *(N sessions)*).
+- **Claude Usage** only knows what Claude Code has reported on this computer. With no recent Claude Code activity it shows the last figures as *Stale*; usage on claude.ai or other devices appears once Claude Code reports again. The docs don't say whether the VS Code extension runs status line commands. If it doesn't, sessions there only update the `/usage` cache. The `/usage` cache is undocumented and may change with Claude Code updates.
 - If a session ends abruptly without its Claude process exiting, its last WORKING / NEEDS YOU / ERROR state lingers until `staleHours` passes.
 - Each hook call starts a short-lived `powershell.exe` (about 0.3–0.5 s). The blocking ones (`UserPromptSubmit`, `Stop`, `StopFailure`, `Notification`, `SessionEnd`) add that small delay; the rest run in the background.
 
@@ -592,6 +653,8 @@ src/
   indicator.cs           the Worker Board / Compact window (C#, WinForms)
   phone.cs               optional phone dashboard server (127.0.0.1 only) + race-safe DONE dismissal
   phone.html/.css/.js    the phone page (List and Creatures views; the creature pixel art is drawn by phone.js)
+  usage.cs               Claude Usage: reads the status line data and Claude Code's /usage cache; details window
+  statusline.ps1         Claude Code status line command: keeps only the rate_limits numbers for Claude Usage
   phone-setup.ps1        turn the phone dashboard on/off and set up `tailscale serve`
   indicator.ps1          compiles indicator.cs with Add-Type and runs it
   start-indicator.vbs    launches the indicator with no console window

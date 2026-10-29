@@ -19,11 +19,30 @@
       <span id="conn" class="conn" data-conn="connecting" role="status">CONNECTING…</span>
     </div>
     <div id="summary" class="summary" hidden></div>
-    <div class="viewbar" role="group" aria-label="View">
-      <button type="button" id="view-list" class="seg" data-view="list" aria-pressed="true">List</button>
-      <button type="button" id="view-creatures" class="seg" data-view="creatures" aria-pressed="false">Creatures</button>
+    <div class="viewbar">
+      <div class="segs" role="group" aria-label="View">
+        <button type="button" id="view-list" class="seg" data-view="list" aria-pressed="true">List</button>
+        <button type="button" id="view-creatures" class="seg" data-view="creatures" aria-pressed="false">Creatures</button>
+      </div>
+      <button type="button" id="usage-toggle" class="tog" aria-pressed="true">Show usage</button>
     </div>
   </header>
+  <section id="usage" class="usage" aria-label="Claude usage (account-wide)">
+    <button type="button" id="usage-sum" class="usage-sum" aria-expanded="false" aria-controls="usage-detail">
+      <span class="usage-title">USAGE</span>
+      <span id="usage-mini" class="usage-mini"><span class="muted">Loading…</span></span>
+      <span class="chev" aria-hidden="true"></span>
+    </button>
+    <div id="usage-detail" class="usage-detail" hidden>
+      <p class="usage-scope">Account-wide · shared by all your Claude workers and devices</p>
+      <p id="usage-state" class="usage-state"></p>
+      <p id="usage-msg" class="usage-msg" hidden></p>
+      <ul id="usage-limits" class="usage-limits"></ul>
+      <ul id="usage-notes" class="usage-notes"></ul>
+      <p id="usage-src" class="usage-src"></p>
+      <button type="button" id="usage-refresh" class="usage-btn">Refresh</button>
+    </div>
+  </section>
   <div id="banner" class="banner" hidden>
     <strong id="banner-title"></strong>
     <span id="banner-when"></span>

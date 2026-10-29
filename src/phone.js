@@ -51,6 +51,18 @@
 
   function statusText(state, err, ms, brief) { var s = statusParts(state, err, ms, brief); return s[0] + s[1]; }
 
+  // ---------- Claude Usage text: the same rules as Usage.Countdown / PercentText / RemainingText ----------
+  // Countdown to a reset: <1m, 12m, 4h 07m, 2d 3h.
+  function countdown(ms) {
+    var p = parts(ms);
+    if (p.m < 1) return '<1m';
+    if (p.h < 1) return p.m + 'm';
+    if (p.d < 1) return p.h + 'h ' + pad2(p.min) + 'm';
+    return p.d + 'd ' + p.hour + 'h';
+  }
+  function percentText(p) { return p > 0 && p < 0.5 ? '<1%' : Math.round(p) + '%'; }
+  function remainingText(used) { var l = 100 - used; return l <= 0 ? '0% left' : l < 0.5 ? '<1% left' : Math.round(l) + '% left'; }
+
   // ---------- creatures: 16x16 pixel art, drawn as SVG squares ----------
   // The laptop gives each worker a look number (row field "c", stable while it's on the board):
   // hat = HATS[c % 13], body colour = BODIES[floor(c / 13)] (phone.cs: Hats = 13, Looks = 65).
@@ -202,7 +214,7 @@
     ];
   }
 
-  if (typeof module === 'object' && module.exports) module.exports = { clock: clock, span: span, ago: ago, statusText: statusText, HATS: HATS, BODIES: BODIES, creatureLayers: creatureLayers };
+  if (typeof module === 'object' && module.exports) module.exports = { clock: clock, span: span, ago: ago, statusText: statusText, HATS: HATS, BODIES: BODIES, creatureLayers: creatureLayers, countdown: countdown, percentText: percentText, remainingText: remainingText };
   if (typeof document === 'undefined') return;
 
   // ---------- connection ----------
@@ -231,6 +243,15 @@
   var VIEW_KEY = 'claudeStatus.view';
   var view = 'list';
   try { if (localStorage.getItem(VIEW_KEY) === 'creatures') view = 'creatures'; } catch (e) { }
+
+  // Claude Usage: shown or hidden, and expanded or not, remembered in this browser only (the desktop has
+  // its own Show usage setting). Hiding only hides it; the board keeps the figures up to date.
+  var USAGE_KEY = 'claudeStatus.usage', USAGE_OPEN_KEY = 'claudeStatus.usageOpen';
+  var usageShown = true, usageOpen = false, usageBusy = false;
+  try { usageShown = localStorage.getItem(USAGE_KEY) !== 'hidden'; usageOpen = localStorage.getItem(USAGE_OPEN_KEY) === '1'; } catch (e) { }
+  var usageEl = $('usage'), usageSum = $('usage-sum'), usageMini = $('usage-mini'), usageDetail = $('usage-detail'), usageToggle = $('usage-toggle');
+  var usageState = $('usage-state'), usageMsg = $('usage-msg'), usageLimits = $('usage-limits'), usageNotes = $('usage-notes'), usageSrc = $('usage-src'), usageRefresh = $('usage-refresh');
+  var usageSig = '', limEls = [];
 
   function poll(wait) {
     var my = ++seq;
@@ -366,8 +387,141 @@
         rowsEl.appendChild(e);
       } else rows.forEach(function (r) { rowsEl.appendChild(buildRow(r)); });
     }
+    renderUsage(full);
     tick();
   }
+
+  // ---------- Claude Usage ----------
+  // Only what the laptop reported is shown: no figure is estimated, and a passed reset time doesn't zero
+  // anything (it says the new allowance hasn't been reported yet).
+  function usageNowState(u) {
+    if (!u) return data ? 'unavailable' : 'loading';
+    var st = u.st;
+    if (conn !== 'live' && st !== 'unavailable') return 'stale';
+    if (st === 'fresh' && u.obs && boardNow() - u.obs > u.fresh) return 'stale';
+    return st;
+  }
+  var STATE_LABEL = { fresh: 'Fresh', stale: 'Stale', loading: 'Loading…', unavailable: 'Unavailable' };
+
+  function resetClock(resetMs, nowMs) {
+    var r = new Date(resetMs), n = new Date(nowMs);
+    var time = r.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    var day = function (d) { return d.getFullYear() + '-' + d.getMonth() + '-' + d.getDate(); };
+    var tomorrow = new Date(n.getFullYear(), n.getMonth(), n.getDate() + 1);
+    if (day(r) === day(n)) return 'today ' + time;
+    if (day(r) === day(tomorrow)) return 'tomorrow ' + time;
+    return r.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' }) + ', ' + time;
+  }
+
+  function resetText(l, now) {
+    if (!l.r) return 'No reset time reported';
+    if (l.r <= now) return 'Reset ' + resetClock(l.r, now) + ' (' + countdown(now - l.r) + ' ago) · waiting for Claude Code to report the new allowance';
+    return 'Resets ' + resetClock(l.r, now) + ' (in ' + countdown(l.r - now) + ')';
+  }
+
+  function barClass(l, st, now) { return st === 'stale' || (l.r && l.r <= now) ? 'dim' : l.p >= 95 ? 'max' : l.p >= 80 ? 'hi' : ''; }
+
+  function bar(cls, p) {
+    var b = el('span', cls), i = document.createElement('i');
+    i.style.width = Math.max(0, Math.min(100, p)) + '%';   // CSSOM, allowed by the page's CSP
+    if (p > 0 && p < 3) i.style.minWidth = '2px';
+    b.appendChild(i);
+    return b;
+  }
+
+  function renderUsage(full) {
+    usageToggle.setAttribute('aria-pressed', String(usageShown));
+    usageEl.hidden = !usageShown;
+    if (!usageShown) return;
+    usageSum.setAttribute('aria-expanded', String(usageOpen));
+    usageDetail.hidden = !usageOpen;
+    var u = data && data.usage, now = data ? boardNow() : Date.now(), st = usageNowState(u);
+    var sig = JSON.stringify(u || null) + '|' + st;
+    if (!full && sig === usageSig) { tickUsage(); return; }
+    usageSig = sig;
+    var lim = u && Array.isArray(u.lim) ? u.lim : [];
+
+    usageMini.textContent = '';
+    if (!lim.length) usageMini.appendChild(el('span', 'muted', st === 'loading' ? 'Loading…' : 'Unavailable · tap for details'));
+    lim.slice(0, 2).forEach(function (l) {
+      var mi = el('span', 'mi ' + barClass(l, st, now));
+      mi.appendChild(el('span', 'mk', l.k));
+      mi.appendChild(bar('mbar', l.p));
+      mi.appendChild(el('span', 'mp', percentText(l.p)));
+      usageMini.appendChild(mi);
+    });
+    if (lim.length > 2) usageMini.appendChild(el('span', 'muted', '+' + (lim.length - 2)));
+    if (lim.length && st === 'stale') usageMini.appendChild(el('span', 'tag', 'stale'));
+
+    usageMsg.hidden = !(u && u.msg);
+    usageMsg.textContent = u && u.msg ? u.msg : '';
+    usageLimits.textContent = '';
+    limEls = [];
+    lim.forEach(function (l) {
+      var li = el('li', 'lim ' + barClass(l, st, now)), top = el('div', 'top');
+      top.appendChild(el('span', 'ttl', l.t));
+      top.appendChild(el('span', 'used', percentText(l.p) + ' used'));
+      li.appendChild(top);
+      li.appendChild(bar('bar', l.p));
+      var sub = el('div', 'sub');
+      li.appendChild(sub);
+      if (l.x) li.appendChild(el('div', 'sub', l.x));
+      var older = el('div', 'sub');
+      li.appendChild(older);
+      usageLimits.appendChild(li);
+      limEls.push({ l: l, sub: sub, older: older });
+    });
+    usageNotes.textContent = '';
+    (u && u.notes || []).forEach(function (n) { usageNotes.appendChild(el('li', '', n)); });
+    var src = u && u.src && u.src.length ? u.src.map(function (s) { return s === 'status line' ? 'Claude Code status line (documented)' : 'Claude Code /usage cache (undocumented)'; }).join(' + ') : '';
+    usageSrc.textContent = (src ? 'Source: ' + src + '. ' : '') + 'Read from local files on the laptop; checking never uses your Claude allowance.';
+    tickUsage();
+  }
+
+  // Countdowns and "x ago" (every second, like the worker timers).
+  function tickUsage() {
+    if (!usageShown) return;
+    var u = data && data.usage, now = data ? boardNow() : Date.now(), st = usageNowState(u);
+    usageState.dataset.st = st;
+    usageState.textContent = STATE_LABEL[st] + (u && u.obs ? ' · Last updated ' + new Date(u.obs).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) + ' (' + ago(now - u.obs) + ')' : '');
+    limEls.forEach(function (e) {
+      e.sub.textContent = remainingText(e.l.p) + ' · ' + resetText(e.l, now);
+      e.older.textContent = u && u.obs && e.l.o && u.obs - e.l.o > 300000 && u.lim.length > 1 ? 'From ' + e.l.src + ', as of ' + ago(now - e.l.o) : '';
+    });
+    usageRefresh.disabled = conn !== 'live' || usageBusy;
+  }
+
+  usageSum.addEventListener('click', function () {
+    usageOpen = !usageOpen;
+    try { localStorage.setItem(USAGE_OPEN_KEY, usageOpen ? '1' : '0'); } catch (e) { }
+    renderUsage(true);
+  });
+  usageToggle.addEventListener('click', function () {
+    usageShown = !usageShown;
+    try { localStorage.setItem(USAGE_KEY, usageShown ? 'shown' : 'hidden'); } catch (e) { }
+    renderUsage(true);
+  });
+
+  // Asks the laptop to re-read its local usage files now; new figures arrive with the board's next update.
+  usageRefresh.addEventListener('click', function () {
+    if (conn !== 'live' || usageBusy) return;
+    usageBusy = true;
+    tickUsage();
+    var c = new AbortController();
+    var timer = setTimeout(function () { c.abort(); }, 10000);
+    fetch('api/usage-refresh', {
+      method: 'POST', cache: 'no-store', credentials: 'same-origin', signal: c.signal,
+      headers: { 'Content-Type': 'application/json', 'X-Claude-Status': 'usage-refresh' }, body: '{}'
+    })
+      .then(function (res) { return res.json().catch(function () { return {}; }); })
+      .then(function (j) {
+        if (j.result === 'refreshing') note('Checked the laptop for newer usage.');
+        else if (j.result === 'busy') note('Just checked. Try again in a moment.');
+        else note("The laptop couldn't check usage right now.");
+      })
+      .catch(function () { note("Couldn't reach the laptop."); })
+      .then(function () { clearTimeout(timer); setTimeout(function () { usageBusy = false; tickUsage(); }, 2000); });
+  });
 
   function updateWhen() {
     if (!data || !lastOk) { bannerWhen.textContent = 'Not connected yet.'; return; }
@@ -399,6 +553,7 @@
 
   function tick() {
     if (!bannerEl.hidden) updateWhen();
+    renderUsage(false);
     if (!data) return;
     var now = boardNow();
     rowEls.forEach(function (e) {

@@ -4,7 +4,8 @@
 
 .DESCRIPTION
     1. Stops the indicator.  2. Removes its autostart shortcut (if any).
-    3. Removes ONLY Claude Status hook entries from settings.json (backup made first).
+    3. Removes ONLY Claude Status hook entries and its status line from settings.json (backup made
+       first); a status line you had before installing is put back.
     4. Deletes the installed %USERPROFILE%\.claude\status-indicator\ folder.
     Never deletes your cloned repository, Claude Code, the .claude folder, or unrelated settings/hooks.
     Self-contained, so it works even if other Claude Status files are already missing.
@@ -84,6 +85,20 @@ function Test-ClaudeStatusHook($h) {
     return (($parts -join ' ') -match '[\\/]status-indicator[\\/]hook\.ps1')
 }
 
+function Test-ClaudeStatusStatusLine($sl) {
+    return ($null -ne $sl -and $null -ne $sl.PSObject.Properties['command'] -and ([string]$sl.command -match '[\\/]status-indicator[\\/]statusline\.ps1'))
+}
+
+# The usage status line goes; a status line you had before installing comes back.
+function Restore-StatusLine($settings) {
+    $prop = $settings.PSObject.Properties['statusLine']
+    if (-not $prop -or -not (Test-ClaudeStatusStatusLine $prop.Value)) { return }
+    $chain = Join-Path $installDir 'statusline-chain.json'
+    $prev = $null
+    if (Test-Path -LiteralPath $chain) { try { $prev = Read-JsonFile $chain } catch {} }
+    if ($prev) { $settings.statusLine = $prev } else { $settings.PSObject.Properties.Remove('statusLine') }
+}
+
 function Remove-ClaudeStatusHooks($settings) {
     $prop = $settings.PSObject.Properties['hooks']
     if (-not $prop -or $null -eq $prop.Value) { return }
@@ -152,14 +167,15 @@ if (Test-Path -LiteralPath $lnk) {
 if ($null -ne $settings) {
     $before = $settings | ConvertTo-Json -Depth 100 -Compress
     Remove-ClaudeStatusHooks $settings
+    Restore-StatusLine $settings
     $after = $settings | ConvertTo-Json -Depth 100 -Compress
     if ($before -ceq $after) {
-        Write-Host "  no Claude Status hooks found in $settingsPath"
+        Write-Host "  no Claude Status hooks or status line found in $settingsPath"
     } else {
         $backup = $settingsPath + '.bak-claude-status-uninstall-' + (Get-Date -Format 'yyyyMMdd-HHmmss')
         Copy-Item -LiteralPath $settingsPath -Destination $backup
         Write-JsonFile $settingsPath $settings
-        Write-Host "  removed Claude Status hooks from $settingsPath (backup: $backup)"
+        Write-Host "  removed Claude Status hooks and its status line from $settingsPath (backup: $backup)"
     }
 } else {
     Write-Host "  no settings.json at $settingsPath"

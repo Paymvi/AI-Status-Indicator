@@ -5,6 +5,9 @@
 .DESCRIPTION
     Copies the application from .\src into %USERPROFILE%\.claude\status-indicator\ and merges
     Claude Status's lifecycle hooks into %USERPROFILE%\.claude\settings.json (backup made first).
+    It also sets Claude Code's status line to statusline.ps1, which records the documented usage-limit
+    data for the Claude Usage section; a status line of your own keeps running (its output is still
+    what you see) and is put back by uninstall.ps1.
     Unrelated settings and hooks are preserved. Safe to run repeatedly: hooks are never duplicated
     and an existing config.json is kept.
 
@@ -17,6 +20,10 @@
 .PARAMETER NoStart
     Don't launch the indicator after installing.
 
+.PARAMETER NoUsageStatusLine
+    Don't set up the status line feed (and remove it if an earlier install added it). The Claude Usage
+    section then only has Claude Code's /usage cache to go on.
+
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File .\install.ps1
 #>
@@ -24,7 +31,8 @@
 param(
     [string]$ClaudeDir,
     [switch]$Autostart,
-    [switch]$NoStart
+    [switch]$NoStart,
+    [switch]$NoUsageStatusLine
 )
 
 $ErrorActionPreference = 'Stop'
@@ -44,6 +52,7 @@ if ($PSVersionTable.PSEdition -eq 'Core') {
     if ($ClaudeDir) { $a += @('-ClaudeDir', $ClaudeDir) }
     if ($Autostart) { $a += '-Autostart' }
     if ($NoStart)   { $a += '-NoStart' }
+    if ($NoUsageStatusLine) { $a += '-NoUsageStatusLine' }
     & $winPs @a
     exit $LASTEXITCODE
 }
@@ -58,7 +67,7 @@ if (-not (Get-Command claude -ErrorAction SilentlyContinue)) {
 
 $src = Join-Path $PSScriptRoot 'src'
 $appFiles = @('hook.ps1', 'indicator.cs', 'indicator.ps1', 'start-indicator.vbs', 'stop-indicator.ps1', 'autostart.ps1', 'uninstall.ps1',
-              'phone.cs', 'phone.html', 'phone.css', 'phone.js', 'phone-setup.ps1')
+              'phone.cs', 'phone.html', 'phone.css', 'phone.js', 'phone-setup.ps1', 'usage.cs', 'statusline.ps1')
 foreach ($f in $appFiles + 'config.json') {
     if (-not (Test-Path -LiteralPath (Join-Path $src $f))) { Fail "Missing source file src\$f. Run install.ps1 from the root of the Claude Status repository." }
 }
@@ -68,6 +77,7 @@ $ClaudeDir    = [IO.Path]::GetFullPath($ClaudeDir)
 $installDir   = Join-Path $ClaudeDir 'status-indicator'
 $settingsPath = Join-Path $ClaudeDir 'settings.json'
 $hookPath     = Join-Path $installDir 'hook.ps1'
+$chainPath    = Join-Path $installDir 'statusline-chain.json'
 
 $repoDir = [IO.Path]::GetFullPath($PSScriptRoot).TrimEnd('\')
 if ($repoDir -ieq $installDir -or $repoDir.StartsWith($installDir + '\', [StringComparison]::OrdinalIgnoreCase)) {
@@ -118,6 +128,10 @@ function Test-ClaudeStatusHook($h) {
     if ($h.PSObject.Properties['command']) { $parts += [string]$h.command }
     if ($h.PSObject.Properties['args'])    { $parts += @($h.args | ForEach-Object { [string]$_ }) }
     return (($parts -join ' ') -match '[\\/]status-indicator[\\/]hook\.ps1')
+}
+
+function Test-ClaudeStatusStatusLine($sl) {
+    return ($null -ne $sl -and $null -ne $sl.PSObject.Properties['command'] -and ([string]$sl.command -match '[\\/]status-indicator[\\/]statusline\.ps1'))
 }
 
 # Removes every Claude Status hook entry; leaves all other hooks/groups untouched.
@@ -234,11 +248,38 @@ foreach ($p in $plan) {
     if ($settings.hooks.PSObject.Properties[$evt]) { $settings.hooks.$evt = @(@($settings.hooks.$evt) + $group) }
     else { $settings.hooks | Add-Member -NotePropertyName $evt -NotePropertyValue @($group) }
 }
+
+# ---------- 4b. Status line feed for the Claude Usage section ----------
+# Claude Code passes the documented rate_limits data only to a status line command, so statusline.ps1
+# becomes the status line. A status line you already had is saved to statusline-chain.json: statusline.ps1
+# runs it and shows its output, and uninstall.ps1 puts it back.
+$slProp = $settings.PSObject.Properties['statusLine']
+$currentSl = if ($slProp) { $slProp.Value } else { $null }
+$slNote = ''
+if ($NoUsageStatusLine) {
+    if (Test-ClaudeStatusStatusLine $currentSl) {
+        if (Test-Path -LiteralPath $chainPath) { $settings.statusLine = Read-JsonFile $chainPath; Remove-Item -LiteralPath $chainPath -Force; $slNote = 'removed the usage status line and restored your previous one' }
+        else { $settings.PSObject.Properties.Remove('statusLine'); $slNote = 'removed the usage status line' }
+    }
+} else {
+    if ($null -ne $currentSl -and -not (Test-ClaudeStatusStatusLine $currentSl)) {
+        Write-JsonFile $chainPath $currentSl
+        $slNote = 'your existing status line keeps running (saved as statusline-chain.json; uninstall restores it)'
+    } elseif ($null -eq $currentSl -and (Test-Path -LiteralPath $chainPath)) {
+        Remove-Item -LiteralPath $chainPath -Force   # the status line was removed since: don't bring the old one back
+    }
+    $slCmd = 'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + ((Join-Path $installDir 'statusline.ps1').Replace('\', '/')) + '"'
+    $sl = [ordered]@{ type = 'command'; command = $slCmd }
+    # keep the display options (padding, refreshInterval, ...) of the status line being wrapped
+    $base = if (Test-ClaudeStatusStatusLine $currentSl) { $currentSl } elseif (Test-Path -LiteralPath $chainPath) { Read-JsonFile $chainPath } else { $null }
+    if ($base) { foreach ($p in $base.PSObject.Properties) { if ($p.Name -ne 'type' -and $p.Name -ne 'command') { $sl[$p.Name] = $p.Value } } }
+    if ($slProp) { $settings.statusLine = [pscustomobject]$sl } else { $settings | Add-Member -NotePropertyName statusLine -NotePropertyValue ([pscustomobject]$sl) }
+}
 $after = $settings | ConvertTo-Json -Depth 100 -Compress
 
 $backup = $null
 if ($before -ceq $after) {
-    Write-Host "  hooks already up to date in $settingsPath (not modified)"
+    Write-Host "  hooks and status line already up to date in $settingsPath (not modified)"
 } else {
     $null = New-Item -ItemType Directory -Force -Path $ClaudeDir
     if (Test-Path -LiteralPath $settingsPath) {
@@ -249,6 +290,7 @@ if ($before -ceq $after) {
     Write-JsonFile $settingsPath $settings
     Write-Host "  merged $($plan.Count) Claude Status hooks into $settingsPath"
 }
+if ($slNote) { Write-Host "  $slNote" }
 
 # ---------- 5. Autostart / start ----------
 if ($Autostart) { & $winPs -NoProfile -ExecutionPolicy Bypass -File (Join-Path $installDir 'autostart.ps1') -Enable | ForEach-Object { "  $_" } }

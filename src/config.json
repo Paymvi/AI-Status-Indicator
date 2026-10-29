@@ -9,6 +9,7 @@
   "startupView": "workerBoard",
   "workerSort": "urgency",
   "showWorkerSummary": false,
+  "showUsage": true,
   "phoneDashboard": false,
   "phonePort": 48521,
   "projectAliases": {

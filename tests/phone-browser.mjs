@@ -132,6 +132,27 @@ try {
   const swRegs = await ev(`navigator.serviceWorker ? navigator.serviceWorker.getRegistrations().then(r => r.length) : 0`).catch(() => 0);
   check('no service worker registered', swRegs === 0, swRegs);
 
+  // ---------- 1b. Claude Usage (account-wide) ----------
+  const uSum = await ev(`({ shown: !document.getElementById('usage').hidden, mini: document.getElementById('usage-mini').textContent, open: document.getElementById('usage-detail').hidden, toggle: document.getElementById('usage-toggle').getAttribute('aria-pressed') })`);
+  check('usage: shown by default as one compact line (5h 14%, Wk 57%, +1) above the workers, collapsed', uSum.shown && /5h.*14%.*Wk.*57%.*\+1/.test(uSum.mini) && uSum.open && uSum.toggle === 'true', JSON.stringify(uSum));
+  await tap('#usage-sum');
+  const opened = await waitFor(`!document.getElementById('usage-detail').hidden && document.querySelectorAll('#usage-limits .lim').length === 3`, 3000);
+  const uDet = await ev(`(() => { const t = document.getElementById('usage-detail').textContent; const de = document.documentElement; const small = [...document.querySelectorAll('#usage *')].filter(e => e.childElementCount === 0 && e.textContent.trim() && parseFloat(getComputedStyle(e).fontSize) < 12).length; return { t, hscroll: de.scrollWidth > innerWidth, small, btn: document.getElementById('usage-refresh').getBoundingClientRect().height, saved: localStorage.getItem('claudeStatus.usageOpen') }; })()`);
+  check('usage: tap expands the full breakdown (titles, % used and left, local reset time + countdown, state, last updated, extra info)', opened && /Account-wide/.test(uDet.t) && /Current session \(5-hour window\)14% used/.test(uDet.t) && /86% left · Resets .+\(in 2h 5\dm\)/.test(uDet.t) && /Current week \(Sonnet only\)91% used/.test(uDet.t) && /Fresh · Last updated/.test(uDet.t) && /Extra usage: off/.test(uDet.t) && uDet.saved === '1', JSON.stringify(uDet).slice(0, 400));
+  check('usage: readable on a phone (no horizontal scroll, no text under 12px, 40px Refresh button)', !uDet.hscroll && uDet.small === 0 && uDet.btn >= 40, JSON.stringify({ h: uDet.hscroll, small: uDet.small, btn: uDet.btn }));
+  await shot('usage-360');
+  const refreshed = await tap('#usage-refresh') && await waitFor(`/Checked the laptop/.test(document.getElementById('note').textContent)`, 4000);
+  check('usage: Refresh asks the laptop and says so', refreshed, await ev(`document.getElementById('note').textContent`));
+  await tap('#usage-toggle');
+  const hid = await ev(`({ hidden: document.getElementById('usage').hidden, h: document.getElementById('usage').getBoundingClientRect().height, saved: localStorage.getItem('claudeStatus.usage'), conn: ${connText} })`);
+  await c.send('Page.navigate', { url: base });
+  await waitFor(`${connText} === 'LIVE'`, 8000);
+  const uAfter = await ev(`({ hidden: document.getElementById('usage').hidden, pressed: document.getElementById('usage-toggle').getAttribute('aria-pressed') })`);
+  check('usage: Show usage off hides it without leaving space, stays LIVE, and is remembered on this phone', hid.hidden && hid.h === 0 && hid.saved === 'hidden' && hid.conn === 'LIVE' && uAfter.hidden && uAfter.pressed === 'false', JSON.stringify({ hid, uAfter }));
+  await tap('#usage-toggle');
+  await tap('#usage-sum');   // collapse again for the rest of the run
+  check('usage: Show usage on again brings it back', await waitFor(`!document.getElementById('usage').hidden && document.getElementById('usage-detail').hidden`, 2000));
+
   // ---------- 2. timers tick on their own ----------
   const t1 = await ev(statusOf('Portal'));
   await sleep(2200);

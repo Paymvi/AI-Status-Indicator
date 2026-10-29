@@ -606,6 +606,9 @@ namespace ClaudeStatus
             : this(sort, summary, startup, false, set, editAliases) { }
 
         public SettingsForm(string sort, bool summary, string startup, bool phoneOn, Action<string, object> set, Action editAliases)
+            : this(sort, summary, startup, phoneOn, true, set, editAliases) { }
+
+        public SettingsForm(string sort, bool summary, string startup, bool phoneOn, bool usageOn, Action<string, object> set, Action editAliases)
         {
             Text = "Claude Status Settings";
             FormBorderStyle = FormBorderStyle.FixedToolWindow;
@@ -628,6 +631,11 @@ namespace ClaudeStatus
             var sum = new CheckBox { Text = "Show worker summary", Checked = summary, AutoSize = true, Margin = new Padding(3, 8, 3, 3) };
             sum.CheckedChanged += (s, e) => set("showWorkerSummary", sum.Checked);
             flow.Controls.Add(sum);
+
+            // Only hides the section; usage keeps being tracked (and the phone has its own switch).
+            var use = new CheckBox { Text = "Show usage  (Claude plan limits, account-wide)", Checked = usageOn, AutoSize = true, Margin = new Padding(3, 4, 3, 3) };
+            use.CheckedChanged += (s, e) => set("showUsage", use.Checked);
+            flow.Controls.Add(use);
 
             flow.Controls.Add(Heading("Startup view"));
             bool compact = string.Equals(startup, "compact", StringComparison.OrdinalIgnoreCase);
@@ -688,7 +696,7 @@ namespace ClaudeStatus
 
         // Unscaled layout (px at 100%).
         const int CompactW = 124, CompactH = 38;
-        const int BoardW = 276, HeadH = 26, SumH = 14, RowH = 22, PadTop = 3, PadBot = 5, MinRows = 4;
+        const int BoardW = 276, HeadH = 26, SumH = 14, UsageH = 20, RowH = 22, PadTop = 3, PadBot = 5, MinRows = 4;
         const TextFormatFlags LeftText = TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding | TextFormatFlags.SingleLine | TextFormatFlags.PreserveGraphicsClipping;
         const TextFormatFlags CenterText = TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding | TextFormatFlags.SingleLine;
 
@@ -719,6 +727,8 @@ namespace ClaudeStatus
         string phoneError = "";
         DateTime phoneRetryUtc = DateTime.MinValue;
         int phoneFailedPort;
+        readonly UsageMonitor usage;
+        UsageForm usageForm;
 
         protected override bool ShowWithoutActivation { get { return true; } }
         protected override CreateParams CreateParams
@@ -810,9 +820,14 @@ namespace ClaudeStatus
             tick = new System.Windows.Forms.Timer { Interval = 1000 };
             tick.Tick += (s, e) => { if (board && Visible) Invalidate(); AdjustTick(); };
 
+            // Claude Usage (usage.cs): local files only, tracked even while the section is hidden.
+            usage = new UsageMonitor(root, null);
+            usage.Changed += OnUsageChanged;
+
             Reload();
             if (!testMode)
             {
+                usage.Start(this);
                 watcher.EnableRaisingEvents = true;
                 cfgWatcher.EnableRaisingEvents = true;
                 slow.Start();
@@ -852,6 +867,9 @@ namespace ClaudeStatus
         public PhoneServer Phone { get { return phone; } }
         public string PhoneStatus { get { return PhoneStatusText; } }
         public void StopPhone() { if (phone != null) { phone.Stop(); phone = null; } }
+        public UsageMonitor Usage { get { return usage; } }
+        public bool UsageShown { get { return ShowUsage; } }
+        public Rectangle UsageBounds { get { return UsageRect; } }
         // Replaces the window lookup + activation inside FocusCore, so tests see which worker a click or a
         // phone tap would bring up without moving the real focus.
         public Func<SessionInfo, FocusResult> FocusHook;
@@ -914,6 +932,7 @@ namespace ClaudeStatus
             PruneAnchors();
             ApplyPhone();
             if (phone != null) phone.Publish(ordered, CfgBool("showWorkerSummary", false), Board.Summary(ordered));
+            PublishUsage();
             current = ordered.Count > 0 ? ordered[0] : null;
 
             string st = current == null ? "IDLE" : current.State;
@@ -982,6 +1001,7 @@ namespace ClaudeStatus
             try
             {
                 var p = new PhoneServer(root, port, PhoneDismiss, PhoneFocus, null);
+                p.UsageRefresh = PhoneUsageRefresh;
                 if (p.Start()) { phone = p; phoneError = ""; phoneFailedPort = 0; return; }
                 phoneError = p.Error;
             }
@@ -996,6 +1016,55 @@ namespace ClaudeStatus
             var r = Dismissal.DismissDone(sessionsDir, id, occurrence);
             if (r == DismissResult.Dismissed && IsHandleCreated) try { BeginInvoke((MethodInvoker)Reload); } catch { }
             return r;
+        }
+
+        // ---------- Claude Usage (usage.cs) ----------
+        void OnUsageChanged()
+        {
+            PublishUsage();
+            if (ShowUsage) Invalidate();
+        }
+
+        // The phone always gets usage (it has its own Show usage switch); display data only.
+        void PublishUsage()
+        {
+            if (phone == null || usage == null) return;
+            var s = usage.Snapshot;
+            phone.PublishUsage(ClaudeStatus.Usage.ToPhone(s), ClaudeStatus.Usage.Signature(s));
+        }
+
+        // Called on a server thread: the read itself happens on the UI thread, like every other read.
+        bool PhoneUsageRefresh()
+        {
+            if (!IsHandleCreated || IsDisposed) return false;
+            try { BeginInvoke((MethodInvoker)(() => usage.RefreshNow())); return true; } catch { return false; }
+        }
+
+        void OpenUsage()
+        {
+            if (usageForm != null && !usageForm.IsDisposed) { usageForm.Activate(); return; }
+            usageForm = new UsageForm(usage, scale);
+            usageForm.Load += (s, e) =>
+            {
+                Rectangle wa = Screen.FromControl(this).WorkingArea;
+                int x = Math.Max(wa.Left, Math.Min(Left, wa.Right - usageForm.Width));
+                int y = Bottom + S(6) + usageForm.Height <= wa.Bottom ? Bottom + S(6) : Math.Max(wa.Top, Top - S(6) - usageForm.Height);
+                usageForm.Location = new Point(x, y);
+            };
+            usageForm.Show(this);
+        }
+
+        string UsageTip()
+        {
+            var s = usage.Snapshot;
+            DateTime now = DateTime.UtcNow;
+            var sb = new StringBuilder("Claude usage for your whole account (shared by all workers)");
+            if (s.Limits.Count == 0) sb.Append("\n").Append(ClaudeStatus.Usage.StateLabel(s.State)).Append(s.Message != "" ? ": " + s.Message : "");
+            foreach (var l in s.Limits)
+                sb.Append("\n").Append(l.Title).Append(": ").Append(ClaudeStatus.Usage.PercentText(l.Percent)).Append(" used · ").Append(ClaudeStatus.Usage.ResetText(l, now));
+            if (s.ObservedUtc != DateTime.MinValue)
+                sb.Append("\n").Append(ClaudeStatus.Usage.StateLabel(s.State)).Append(" · last updated ").Append(ClaudeStatus.Usage.AgeText(s.ObservedUtc, now));
+            return sb.Append("\nClick for the full breakdown").ToString();
         }
 
         string PhoneStatusText
@@ -1065,7 +1134,11 @@ namespace ClaudeStatus
         }
 
         // ---------- layout ----------
-        int TopH { get { return S(HeadH) + (board && CfgBool("showWorkerSummary", false) ? S(SumH) : 0) + 1; } }
+        int SummaryH { get { return board && CfgBool("showWorkerSummary", false) ? S(SumH) : 0; } }
+        bool ShowUsage { get { return board && CfgBool("showUsage", true); } }
+        // Hidden usage takes no space at all.
+        int TopH { get { return S(HeadH) + SummaryH + (ShowUsage ? S(UsageH) : 0) + 1; } }
+        Rectangle UsageRect { get { return ShowUsage ? new Rectangle(S(1), S(HeadH) + SummaryH - S(2), ClientSize.Width - S(2), S(UsageH)) : Rectangle.Empty; } }
         int RowCount { get { return Math.Max(1, ordered.Count); } }
         int ContentHeight() { return S(PadTop) + RowCount * S(RowH) + S(PadBot); }
         int BoardHeight(int rows) { return TopH + S(PadTop) + rows * S(RowH) + S(PadBot) + 1; }
@@ -1208,6 +1281,7 @@ namespace ClaudeStatus
             TextRenderer.DrawText(g, "×", closeFont, BoardCloseRect, hover == "close" ? Color.White : Grey, CenterText);
             if (CfgBool("showWorkerSummary", false))
                 TextRenderer.DrawText(g, Board.Summary(ordered), smallFont, new Rectangle(S(10), S(HeadH) - S(4), w - S(20), S(SumH)), Muted, LeftText);
+            if (ShowUsage) RenderUsage(g, UsageRect);
             using (var pen = new Pen(Line)) g.DrawLine(pen, S(1), TopH - 1, w - S(2), TopH - 1);
 
             // rows (only the list scrolls; the header stays put)
@@ -1257,6 +1331,70 @@ namespace ClaudeStatus
                 using (var b = new SolidBrush(Color.FromArgb(40, 40, 40))) g.FillRectangle(b, TrackRect);
                 using (var b = new SolidBrush(hover == "thumb" || thumbDrag ? Color.FromArgb(150, 150, 150) : Color.FromArgb(95, 95, 95))) g.FillRectangle(b, ThumbRect);
             }
+        }
+
+        // One line under the heading: "USAGE  5h ▬▬ 14%   Wk ▬▬▬ 57%" for the account (not per worker).
+        // Stale values are grey and marked; nothing is shown that Claude Code didn't report.
+        void RenderUsage(Graphics g, Rectangle r)
+        {
+            var s = usage.Snapshot;
+            DateTime now = DateTime.UtcNow;
+            if (hover == "usage") using (var b = new SolidBrush(HoverBg)) g.FillRectangle(b, r);
+            const TextFormatFlags Measure = TextFormatFlags.NoPadding | TextFormatFlags.SingleLine;
+            int x = S(10), right = r.Right - S(8);
+            string label = "USAGE";
+            int lw = TextRenderer.MeasureText(g, label, titleFont, Size.Empty, Measure).Width;
+            TextRenderer.DrawText(g, label, titleFont, new Rectangle(x, r.Top, lw + S(2), r.Height), Muted, LeftText & ~TextFormatFlags.EndEllipsis);
+            x += lw + S(8);
+
+            if (s.Limits.Count == 0)
+            {
+                string t = s.State == UsageState.Loading ? "Loading…" : "Unavailable · click for details";
+                TextRenderer.DrawText(g, t, statusFont, new Rectangle(x, r.Top, right - x, r.Height), Muted, LeftText);
+                return;
+            }
+
+            bool stale = s.State == UsageState.Stale;
+            string tag = stale ? "stale" : "";
+            int tagW = tag != "" ? TextRenderer.MeasureText(g, tag, smallFont, Size.Empty, Measure).Width + S(6) : 0;
+            var shown = s.Limits.GetRange(0, Math.Min(2, s.Limits.Count));
+            int more = s.Limits.Count - shown.Count;
+            string moreText = more > 0 ? "+" + more : "";
+            int moreW = more > 0 ? TextRenderer.MeasureText(g, moreText, smallFont, Size.Empty, Measure).Width + S(6) : 0;
+            // each item: short name, a small bar (dropped if the line is too narrow), percent used
+            int barW = S(34), gap = S(10);
+            int need = 0;
+            foreach (var l in shown)
+                need += TextRenderer.MeasureText(g, ClaudeStatus.Usage.ShortLabel(l.Key) + " " + ClaudeStatus.Usage.PercentText(l.Percent), statusFont, Size.Empty, Measure).Width + S(4) + barW + gap;
+            bool bars = x + need + tagW + moreW <= right;
+            foreach (var l in shown)
+            {
+                bool dim = stale || ClaudeStatus.Usage.PastReset(l, now);
+                string name = ClaudeStatus.Usage.ShortLabel(l.Key), pct = ClaudeStatus.Usage.PercentText(l.Percent);
+                int nw = TextRenderer.MeasureText(g, name, statusFont, Size.Empty, Measure).Width;
+                TextRenderer.DrawText(g, name, statusFont, new Rectangle(x, r.Top, nw + S(2), r.Height), Muted, LeftText & ~TextFormatFlags.EndEllipsis);
+                x += nw + S(4);
+                if (bars)
+                {
+                    var bar = new Rectangle(x, r.Top + (r.Height - S(5)) / 2, barW, S(5));
+                    using (var b = new SolidBrush(Color.FromArgb(58, 58, 58))) g.FillRectangle(b, bar);
+                    int fill = (int)Math.Round(barW * Math.Max(0, Math.Min(100, l.Percent)) / 100.0);
+                    if (l.Percent > 0 && fill < S(2)) fill = S(2);
+                    using (var b = new SolidBrush(UsageForm.BarColor(l, s.State, now))) g.FillRectangle(b, new Rectangle(bar.Left, bar.Top, fill, bar.Height));
+                    x += barW + S(4);
+                }
+                else x += S(1);
+                int pw = TextRenderer.MeasureText(g, pct, statusFont, Size.Empty, Measure).Width;
+                TextRenderer.DrawText(g, pct, statusFont, new Rectangle(x, r.Top, Math.Max(0, Math.Min(pw + S(2), right - x)), r.Height), dim ? Muted : NameColor, LeftText);
+                x += pw + gap;
+            }
+            if (more > 0 && x + moreW <= right)
+            {
+                TextRenderer.DrawText(g, moreText, smallFont, new Rectangle(x - gap + S(6), r.Top, moreW, r.Height), Muted, LeftText);
+                x += moreW;
+            }
+            if (tag != "")
+                TextRenderer.DrawText(g, tag, smallFont, new Rectangle(right - tagW + S(6), r.Top, tagW, r.Height), Color.FromArgb(240, 136, 62), LeftText & ~TextFormatFlags.EndEllipsis);
         }
 
         void ButtonBg(Graphics g, Rectangle r, string key)
@@ -1346,6 +1484,7 @@ namespace ClaudeStatus
             if (BoardMinRect.Contains(p)) return "minimize";
             if (BoardGearRect.Contains(p)) return "gear";
             if (BoardToggleRect.Contains(p)) return "toggle";
+            if (ShowUsage && UsageRect.Contains(p)) return "usage";
             if (p.Y < TopH) return "drag";
             if (Scrolls && p.X >= TrackRect.Left - S(3) && p.Y < ClientSize.Height - 1)
                 return ThumbRect.Contains(new Point(ThumbRect.Left, p.Y)) ? "thumb" : "track";
@@ -1374,6 +1513,7 @@ namespace ClaudeStatus
                 case "gear": return "Settings";
                 case "minimize": return "Minimize to tray (keeps running; click the tray icon to reopen)";
                 case "close": return "Exit Claude Status";
+                case "usage": return UsageTip();
             }
             var si = FromKey(key);
             if (si == null) return "";
@@ -1417,6 +1557,7 @@ namespace ClaudeStatus
             string was = pressed;
             pressed = "";
             if (e.Button != MouseButtons.Left || was == "" || HitTest(e.Location) != was) return;
+            if (was == "usage") { OpenUsage(); return; }
             var si = FromKey(was);
             if (si == null) return;
             if (was.StartsWith("x:")) DismissDone(si);
@@ -1473,6 +1614,7 @@ namespace ClaudeStatus
             view.DropDownItems.Add(new ToolStripMenuItem("Compact", null, (s, e) => { SetView(false); Show(); }) { Checked = !board });
             menu.Items.Add(view);
             menu.Items.Add("Settings…", null, (s, e) => OpenSettings());
+            menu.Items.Add("Claude usage…", null, (s, e) => OpenUsage());
             menu.Items.Add(new ToolStripMenuItem(PhoneStatusText) { Enabled = false });
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add("Show window", null, (s, e) => { Show(); BringToFrontNoActivate(); });
@@ -1484,7 +1626,7 @@ namespace ClaudeStatus
         {
             if (settingsForm != null && !settingsForm.IsDisposed) { settingsForm.Activate(); return; }
             settingsForm = new SettingsForm(CfgStr("workerSort", "urgency"), CfgBool("showWorkerSummary", false), CfgStr("startupView", "workerBoard"),
-                CfgBool("phoneDashboard", false), SetCfg, () => { try { Process.Start("notepad.exe", "\"" + cfgPath + "\""); } catch { } });
+                CfgBool("phoneDashboard", false), CfgBool("showUsage", true), SetCfg, () => { try { Process.Start("notepad.exe", "\"" + cfgPath + "\""); } catch { } });
             settingsForm.Load += (s, e) =>
             {
                 Rectangle wa = Screen.FromControl(this).WorkingArea;
@@ -1502,6 +1644,7 @@ namespace ClaudeStatus
         void MinimizeToTray()
         {
             if (settingsForm != null && !settingsForm.IsDisposed) settingsForm.Close();
+            if (usageForm != null && !usageForm.IsDisposed) usageForm.Close();
             hover = ""; pressed = ""; tipText = ""; mouseInside = false;
             tip.SetToolTip(this, null);
             note.Hide(this);
@@ -1521,6 +1664,7 @@ namespace ClaudeStatus
         {
             SavePosition();
             StopPhone();
+            usage.Dispose();
             watcher.EnableRaisingEvents = false;
             cfgWatcher.EnableRaisingEvents = false;
             if (displayChanged != null) SystemEvents.DisplaySettingsChanged -= displayChanged;
@@ -1533,7 +1677,7 @@ namespace ClaudeStatus
 
         protected override void Dispose(bool disposing)
         {
-            if (disposing) StopPhone();
+            if (disposing) { StopPhone(); if (usage != null) usage.Dispose(); }
             base.Dispose(disposing);
         }
 
