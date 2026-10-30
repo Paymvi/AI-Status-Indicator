@@ -480,7 +480,6 @@
       usageMini.appendChild(mi);
     });
     if (lim.length > 2) usageMini.appendChild(el('span', 'muted', '+' + (lim.length - 2)));
-    if (lim.length && st === 'stale') usageMini.appendChild(el('span', 'tag', 'stale'));
 
     usageMsg.hidden = !(u && u.msg);
     usageMsg.textContent = u && u.msg ? u.msg : '';
@@ -616,6 +615,18 @@
     render(true);   // same data, same connection: only the presentation changes
   }
   viewBtns.forEach(function (b) { b.addEventListener('click', function () { if (b.dataset.view !== view) setView(b.dataset.view, true); }); });
+
+  // ---------- display settings popover (gear) ----------
+  var gearBtn = $('gear'), settingsEl = $('settings');
+  function setSettings(open) {
+    settingsEl.hidden = !open;
+    gearBtn.setAttribute('aria-expanded', String(open));
+  }
+  gearBtn.addEventListener('click', function () { setSettings(settingsEl.hidden); });
+  document.addEventListener('click', function (e) {
+    if (!settingsEl.hidden && !settingsEl.contains(e.target) && !gearBtn.contains(e.target)) setSettings(false);
+  });
+  document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !settingsEl.hidden) { setSettings(false); gearBtn.focus(); } });
 
   // A whole number of device pixels per creature square (e.g. 3 CSS px is 8 device px at a 2.625 pixel
   // ratio, not 7.875), so every square of the art is the same crisp size.

@@ -1026,11 +1026,18 @@ else {
     $js = @'
 const f=require(process.argv[1]);const c=JSON.parse(require('fs').readFileSync(process.argv[2],'utf8'));
 const out=c.map(x=>x[0]==='clock'?f.clock(x[2]):x[0]==='span'?f.span(x[2]):x[0]==='ago'?f.ago(x[2]):f.statusText(x[0],x[1],x[2],x[3]));
-process.stdout.write(JSON.stringify(out).replace(/[\u007f-￿]/g,ch=>'\\u'+ch.charCodeAt(0).toString(16).padStart(4,'0')));
+process.stdout.write(JSON.stringify(out).replace(/[^ -~]/g,ch=>'\\u'+ch.charCodeAt(0).toString(16).padStart(4,'0')));
 '@ -replace "`r?`n", ''
-    $got = & $node.Source -e $js (Join-Path $src 'phone.js') $inFile | Out-String | ConvertFrom-Json
+    # the escape regex must stay ASCII (no literal non-ASCII characters): Windows PowerShell reads this BOM-less file as ANSI.
+    # Read node's output under code page 437, as in a default console, so an unescaped "…" would show up as "ΓÇª".
+    $oldEnc = $null; try { $oldEnc = [Console]::OutputEncoding; [Console]::OutputEncoding = [Text.Encoding]::GetEncoding(437) } catch { }
+    try { $got = & $node.Source -e $js (Join-Path $src 'phone.js') $inFile | Out-String | ConvertFrom-Json }
+    finally { if ($oldEnc) { try { [Console]::OutputEncoding = $oldEnc } catch { } } }
     $diff = @(); for ($i = 0; $i -lt $want.Count; $i++) { if ($got[$i] -cne $want[$i]) { $diff += "$(($cases[$i]) -join '/'): js='$($got[$i])' cs='$($want[$i])'" } }
     Check "phone timer/status text matches the desktop exactly ($($want.Count) cases)" ($got.Count -eq $want.Count -and $diff.Count -eq 0) (($diff | Select-Object -First 5) -join '; ')
+    $longErr = 'a_really_long_e' + [char]0x2026
+    $longGot = @($got | Where-Object { $_ -and $_.Contains($longErr) }).Count
+    Check 'long error labels keep their ellipsis on the phone (a_really_long_e + U+2026), whatever the console code page' ($longGot -gt 0 -and $longGot -eq @($want | Where-Object { $_.Contains($longErr) }).Count) $longGot
     $art = @'
 const f=require(process.argv[1]);const bad=[];
 f.HATS.forEach(h=>{h.r.forEach(r=>{if(r.length!==16)bad.push(h.n+' row width '+r.length);for(const ch of r)if(ch!=='.'&&!h.c[ch])bad.push(h.n+' colour '+ch);});});
@@ -1044,7 +1051,7 @@ process.stdout.write(JSON.stringify({hats:f.HATS.length,bodies:f.BODIES.length,b
 const f=require(process.argv[1]);const H=f.SLEEP_MS,t=1e12;
 const r={before:f.isAsleep('DONE',t,t+H-1),exact:f.isAsleep('DONE',t,t+H),after:f.isAsleep('DONE',t,t+H+86400e3),working:f.isAsleep('WORKING',t,t+10*H),needs:f.isAsleep('NEEDS_YOU',t,t+10*H),error:f.isAsleep('ERROR',t,t+10*H),notime:f.isAsleep('DONE',undefined,t),
 z:f.contextInfo({p:0,o:false}).text,tiny:f.contextInfo({p:0.2,o:false}).text,n:f.contextInfo({p:42.4,o:false}).text,old:f.contextInfo({p:42,o:true}).text,none:f.contextInfo(null).text,bad:f.contextInfo({p:'x'}).text,neg:f.contextInfo({p:-1}).text,full:f.contextInfo({p:100}).text,np:f.contextInfo(null).p,H:H};
-process.stdout.write(JSON.stringify(r).replace(/[\u007f-￿]/g,ch=>'\\u'+ch.charCodeAt(0).toString(16).padStart(4,'0')));
+process.stdout.write(JSON.stringify(r).replace(/[^ -~]/g,ch=>'\\u'+ch.charCodeAt(0).toString(16).padStart(4,'0')));
 '@ -replace "`r?`n", ''
     $z = & $node.Source -e $slp (Join-Path $src 'phone.js') | ConvertFrom-Json
     Check 'sleep: DONE just before 3 h awake; exactly 3 h and later asleep (controlled clock)' ($z.H -eq 10800000 -and $z.before -eq $false -and $z.exact -eq $true -and $z.after -eq $true) ($z | ConvertTo-Json -Compress)
@@ -1828,10 +1835,15 @@ $c = Get-Content (Join-Path $inst 'config.json') -Raw | ConvertFrom-Json
 if ($haveGit) {
     Check 'update keeps existing sound / staleHours choices' ($c.soundOnDone -eq $false -and $c.staleHours -eq 12)
     Check 'update keeps the saved window position and existing state files' ((Get-Content (Join-Path $inst 'position.txt')) -eq '321,123' -and (Test-Path (Join-Path $inst 'state\sessions\legacy.json')))
-    $sAfter = Get-Content $settingsPath -Raw | ConvertFrom-Json
-    $slAdded = $sAfter.statusLine
-    $sAfter.PSObject.Properties.Remove('statusLine')
-    Check 'update only adds the usage status line (hooks and other settings unchanged, one backup)' ($slAdded -and (($sAfter | ConvertTo-Json -Depth 100 -Compress) -eq ($settingsBefore | ConvertFrom-Json | ConvertTo-Json -Depth 100 -Compress)) -and @(Get-ChildItem $cd -Filter 'settings.json.bak*').Count -eq $backupsBefore + 1)
+    # "previous version" is HEAD: once HEAD's installer adds the status line itself, the update has nothing to add
+    if (($settingsBefore | ConvertFrom-Json).statusLine) {
+        Check 'update leaves settings.json untouched when the status line is already there (no new backup)' ((Get-Content $settingsPath -Raw) -ceq $settingsBefore -and @(Get-ChildItem $cd -Filter 'settings.json.bak*').Count -eq $backupsBefore)
+    } else {
+        $sAfter = Get-Content $settingsPath -Raw | ConvertFrom-Json
+        $slAdded = $sAfter.statusLine
+        $sAfter.PSObject.Properties.Remove('statusLine')
+        Check 'update only adds the usage status line (hooks and other settings unchanged, one backup)' ($slAdded -and (($sAfter | ConvertTo-Json -Depth 100 -Compress) -eq ($settingsBefore | ConvertFrom-Json | ConvertTo-Json -Depth 100 -Compress)) -and @(Get-ChildItem $cd -Filter 'settings.json.bak*').Count -eq $backupsBefore + 1)
+    }
 }
 Check 'new settings added with defaults (Worker Board, urgency, summary off)' ($c.startupView -eq 'workerBoard' -and $c.workerSort -eq 'urgency' -and $c.showWorkerSummary -eq $false)
 Check 'project aliases added' ($c.projectAliases.Toah_Nipi_Booking_Software -eq 'Booking Software' -and $c.projectAliases.Guest_Booking_Form -eq 'Guest Form')

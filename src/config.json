@@ -10,7 +10,7 @@
   "workerSort": "urgency",
   "showWorkerSummary": false,
   "showUsage": true,
-  "phoneDashboard": true,
+  "phoneDashboard": false,
   "phonePort": 48521,
   "projectAliases": {
     "Toah_Nipi_Booking_Software": "Booking Software",

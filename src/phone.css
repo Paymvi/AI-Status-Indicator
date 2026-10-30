@@ -169,7 +169,6 @@ h1 { flex: 1 1 auto; margin: 0; font-size: 13.5px; font-weight: 700; color: var(
 .max i { background: var(--red); }
 .dim i { background: var(--grey); }
 .dim .mp, .lim.dim .used { color: var(--muted); }
-.tag { color: var(--orange); font-size: 13px; font-weight: 700; }
 .chev { flex: none; width: 9px; height: 9px; margin-right: 4px; border-right: 2px solid var(--grey); border-bottom: 2px solid var(--grey); transform: rotate(45deg) translate(-2px, -2px); }
 .usage-sum[aria-expanded="true"] .chev { transform: rotate(-135deg) translate(-2px, -2px); }
 
@@ -211,9 +210,28 @@ h1 { flex: 1 1 auto; margin: 0; font-size: 13.5px; font-weight: 700; color: var(
 
 /* ---------- Creatures view: a grid of little workers ---------- */
 /* its own options (Compact, Show context) sit under the view switch, only in this view */
-.petbar { justify-content: flex-end; margin-top: -2px; }
+.petbar { display: contents; }
 .petbar[hidden] { display: none; }
-.petbar .tog { margin: 0; }
+
+/* ---------- display settings: a small popover under the gear holding Show usage / Compact / Show context ---------- */
+.head { position: relative; }
+.gear {
+  margin: 0 0 0 auto; width: 36px; height: 36px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 0; border-radius: 5px; background: transparent; color: var(--grey);
+  -webkit-tap-highlight-color: transparent; touch-action: manipulation;
+}
+.gear[aria-expanded="true"] { background: #2a2a2a; color: var(--name); }
+.gear:focus-visible { outline: 2px solid var(--name); outline-offset: 1px; }
+.settings {
+  position: absolute; top: 100%; right: 12px; z-index: 5; margin-top: -4px;
+  display: flex; flex-direction: column; gap: 6px; padding: 8px;
+  max-width: calc(100% - 24px); box-sizing: border-box;
+  background: #252525; border: 1px solid var(--line); border-radius: 6px;
+  box-shadow: 0 6px 16px rgba(0, 0, 0, .45);
+}
+.settings[hidden] { display: none; }
+.settings .tog { margin: 0; border-color: transparent; }
 
 /* two equal columns; Compact: three, at every phone width (minmax(0, 1fr) lets them shrink evenly) */
 .pets {

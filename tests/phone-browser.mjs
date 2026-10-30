@@ -68,6 +68,13 @@ async function tap(selector) {
   await c.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
   return true;
 }
+// Show usage / Compact / Show context live in the gear's popover: open it, tap, close it again.
+async function tapSetting(selector) {
+  await tap('#gear');
+  const ok = await tap(selector);
+  await tap('#gear');
+  return ok;
+}
 const rowSel = (name) => `[...document.querySelectorAll('#rows .row')].find(r => r.querySelector('.name')?.textContent.replace(/\\u00a0/g, ' ') === ${JSON.stringify(name)})`;
 const statusOf = (name) => `(${rowSel(name)})?.querySelector('.status')?.textContent`;
 const connText = `document.getElementById('conn').textContent`;
@@ -143,13 +150,23 @@ try {
   await shot('usage-360');
   const refreshed = await tap('#usage-refresh') && await waitFor(`/Checked the laptop/.test(document.getElementById('note').textContent)`, 4000);
   check('usage: Refresh asks the laptop and says so', refreshed, await ev(`document.getElementById('note').textContent`));
-  await tap('#usage-toggle');
+  const g0 = await ev(`({ open: !document.getElementById('settings').hidden, exp: document.getElementById('gear').getAttribute('aria-expanded'), w: document.getElementById('gear').getBoundingClientRect().width })`);
+  await tap('#gear');
+  const g1 = await ev(`(() => { const p = document.getElementById('settings'), r = p.getBoundingClientRect(), de = document.documentElement; return { open: !p.hidden, exp: document.getElementById('gear').getAttribute('aria-expanded'), inside: r.left >= 0 && r.right <= innerWidth, hscroll: de.scrollWidth > innerWidth, usage: !!p.querySelector('#usage-toggle'), pet: !!p.querySelector('#compact-toggle') && !!p.querySelector('#context-toggle') }; })()`);
+  await shot('settings-360');
+  await tap('#gear');
+  const g2 = await ev(`!document.getElementById('settings').hidden`);
+  await tap('#gear'); await tap('h1');
+  const g3 = await ev(`!document.getElementById('settings').hidden`);
+  check('gear: settings closed by default; tap opens a popover with Show usage / Compact / Show context, inside the screen, no horizontal scroll; tap again or outside closes it', !g0.open && g0.exp === 'false' && g0.w >= 36 && g1.open && g1.exp === 'true' && g1.inside && !g1.hscroll && g1.usage && g1.pet && !g2 && !g3, JSON.stringify({ g0, g1, g2, g3 }));
+
+  await tapSetting('#usage-toggle');
   const hid = await ev(`({ hidden: document.getElementById('usage').hidden, h: document.getElementById('usage').getBoundingClientRect().height, saved: localStorage.getItem('claudeStatus.usage'), conn: ${connText} })`);
   await c.send('Page.navigate', { url: base });
   await waitFor(`${connText} === 'LIVE'`, 8000);
   const uAfter = await ev(`({ hidden: document.getElementById('usage').hidden, pressed: document.getElementById('usage-toggle').getAttribute('aria-pressed') })`);
   check('usage: Show usage off hides it without leaving space, stays LIVE, and is remembered on this phone', hid.hidden && hid.h === 0 && hid.saved === 'hidden' && hid.conn === 'LIVE' && uAfter.hidden && uAfter.pressed === 'false', JSON.stringify({ hid, uAfter }));
-  await tap('#usage-toggle');
+  await tapSetting('#usage-toggle');
   await tap('#usage-sum');   // collapse again for the rest of the run
   check('usage: Show usage on again brings it back', await waitFor(`!document.getElementById('usage').hidden && document.getElementById('usage-detail').hidden`, 2000));
 
@@ -213,8 +230,9 @@ try {
   const rowsBefore = await ev(`document.querySelectorAll('#rows .row:not(.placeholder)').length`);
   await ev(`window.dispatchEvent(new Event('online')); true`);   // makes the page refetch now
   const reconnecting = await waitFor(`${connText} === 'RECONNECTING…'`, 3000);
-  const staleUi = await ev(`({ stale: document.getElementById('board').classList.contains('stale'), banner: !document.getElementById('banner').hidden && /Last update \\d/.test(document.getElementById('banner-when').textContent), rows: document.querySelectorAll('#rows .row:not(.placeholder)').length, x: [...document.querySelectorAll('#rows .x')].every(b => b.disabled), empty: /No Claude workers/.test(document.getElementById('rows').textContent) })`);
+  const staleUi = await ev(`({ stale: document.getElementById('board').classList.contains('stale'), banner: !document.getElementById('banner').hidden && /Last update \\d/.test(document.getElementById('banner-when').textContent), rows: document.querySelectorAll('#rows .row:not(.placeholder)').length, x: [...document.querySelectorAll('#rows .x')].every(b => b.disabled), empty: /No Claude workers/.test(document.getElementById('rows').textContent), tag: /stale/i.test(document.getElementById('usage-mini').textContent) })`);
   check('connection lost: RECONNECTING, last update time shown, rows kept but marked stale, dismiss disabled', reconnecting && staleUi.stale && staleUi.banner && staleUi.rows === rowsBefore && staleUi.x && !staleUi.empty, JSON.stringify(staleUi));
+  check('connection lost: usage dims but shows no "stale" label on the phone', !staleUi.tag, JSON.stringify(staleUi));
   const frozen1 = await ev(statusOf('Booking Software #1')); await sleep(1100); const frozen2 = await ev(statusOf('Booking Software #1'));
   check('stale timers are frozen at the last contact (not shown as current)', frozen1 === frozen2, `${frozen1} / ${frozen2}`);
   const offline = await waitFor(`${connText} === 'OFFLINE'`, 8000);
@@ -379,9 +397,9 @@ try {
   const colsNow = `getComputedStyle(document.getElementById('pets')).gridTemplateColumns.split(' ').length`;
   const ctxVisible = `[...document.querySelectorAll('#pets .card:not(.placeholder) .cctx')].every(e => e.offsetHeight > 0)`;
   const looksA = await ev(looks);
-  await tap('#compact-toggle');
+  await tapSetting('#compact-toggle');
   const cmp = await ev(`({ cols: ${colsNow}, pressed: document.getElementById('compact-toggle').getAttribute('aria-pressed'), saved: localStorage.getItem('claudeStatus.compact'), keep: ${keepAll}, conn: ${connText} })`);
-  await tap('#context-toggle');
+  await tapSetting('#context-toggle');
   const ctxOn = await ev(`({ shown: ${ctxVisible}, saved: localStorage.getItem('claudeStatus.context'), compact: localStorage.getItem('claudeStatus.compact'), view: localStorage.getItem('claudeStatus.view'), usage: localStorage.getItem('claudeStatus.usage'), keep: ${keepAll} })`);
   await sleep(700);
   const plain = await ev('window.__plain');
@@ -451,7 +469,7 @@ try {
   const woke = await waitFor(`!${asleepOf('Sleepy Project')} && (${petSel('Sleepy Project')}).classList.contains('s-WORKING') && /^WORKING · 00:0/.test(${statusOfPet('Sleepy Project')})`, 4000);
   check('a new prompt wakes it at once into WORKING', woke, await ev(statusOfPet('Sleepy Project')));
   // Compact / Show context survive a reload; turning them off removes the third column and the bars
-  await tap('#compact-toggle'); await tap('#context-toggle');
+  await tapSetting('#compact-toggle'); await tapSetting('#context-toggle');
   const off = await ev(`({ cols: ${colsNow}, h: Math.max(...[...document.querySelectorAll('#pets .cctx')].map(e => e.offsetHeight)), saved: [localStorage.getItem('claudeStatus.compact'), localStorage.getItem('claudeStatus.context')] })`);
   check('Compact and Show context off again: two columns, no context space kept, saved', off.cols === 2 && off.h === 0 && off.saved[0] === '0' && off.saved[1] === 'hidden', JSON.stringify(off));
 
