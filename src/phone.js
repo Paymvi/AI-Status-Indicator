@@ -64,80 +64,84 @@
   function remainingText(used) { var l = 100 - used; return l <= 0 ? '0% left' : l < 0.5 ? '<1% left' : Math.round(l) + '% left'; }
 
   // ---------- creatures: 16x16 pixel art, drawn as SVG squares ----------
+  // Squat, wide bodies (12 x 7) with side nubs, four little feet and a two-dot face; a small hat on top.
   // The laptop gives each worker a look number (row field "c", stable while it's on the board):
-  // hat = HATS[c % 13], body colour = BODIES[floor(c / 13)] (phone.cs: Hats = 13, Looks = 65).
+  // hat = HATS[c % 13], body colour = BODIES[floor(c / 13)] (phone.cs: Hats = 13, Bodies = 8; the first
+  // four bodies are the orange family, which the laptop hands out to about two in three workers).
   // Status colours (yellow / green / red) stay reserved for status, so bodies and hats avoid them.
   var BODIES = [
-    { b: '#d97757', s: '#b35a3d' },   // Claude coral
-    { b: '#e8a27c', s: '#c07f5c' },   // peach
-    { b: '#c4673f', s: '#984b2c' },   // terracotta
-    { b: '#d9909f', s: '#b06c7b' },   // rose
-    { b: '#d9b07f', s: '#ae8a5e' }    // sand
+    { b: '#e8793a', s: '#b9582a' },   // bright orange
+    { b: '#d97757', s: '#ac553b' },   // Claude coral
+    { b: '#b65a2c', s: '#87401e' },   // burnt orange
+    { b: '#f1ab80', s: '#c98559' },   // peach
+    { b: '#a58fd6', s: '#7d69ad' },   // lavender
+    { b: '#7f97bd', s: '#5d7396' },   // slate blue
+    { b: '#d98fa6', s: '#b06a81' },   // rose
+    { b: '#cfb68c', s: '#a68f67' }    // sand
   ];
-  // Each hat: rows from the top of the 16x16 grid ('.' = empty), letters coloured by c.
+  // Each hat: rows from the top of the 16x16 grid ('.' = empty), letters coloured by c. Hats sit on the
+  // body's top edge (row 6).
   var HATS = [
     { n: 'party hat', c: { a: '#a371f7', b: '#ff9bce', c: '#f0f0f0' }, r: [
       '................',
       '.......cc.......',
-      '.......ab.......',
+      '.......aa.......',
       '......abba......',
-      '......baab......',
-      '.....aabbaa.....'] },
+      '......aaaa......',
+      '.....babbab.....'] },
     { n: 'beanie', c: { a: '#58a6ff', b: '#2f6fc4', c: '#f0f0f0' }, r: [
-      '................',
       '................',
       '.......cc.......',
       '......aaaa......',
       '.....aaaaaa.....',
-      '....aaaaaaaa....',
-      '...bbbbbbbbbb...'] },
-    { n: 'top hat', c: { a: '#3d3d3d', b: '#a371f7', c: '#5c5c5c' }, r: [
+      '.....aaaaaa.....',
+      '....bbbbbbbb....'] },
+    { n: 'top hat', c: { a: '#3a3a3a', b: '#a371f7', c: '#5c5c5c' }, r: [
       '................',
-      '.....aaaaaa.....',
-      '.....caaaaa.....',
-      '.....aaaaaa.....',
-      '.....bbbbbb.....',
-      '...aaaaaaaaaa...'] },
+      '......aaaa......',
+      '......caaa......',
+      '......aaaa......',
+      '......bbbb......',
+      '....aaaaaaaa....'] },
     { n: 'propeller cap', c: { a: '#39c5cf', b: '#ff7eb6', c: '#58a6ff', d: '#8b949e' }, r: [
       '................',
-      '....bbbbcccc....',
+      '.....bbbccc.....',
       '.......dd.......',
       '......aaaa......',
       '.....aaaaaa.....',
-      '....aaaaaaaa....'] },
+      '.....aaaaaa.....'] },
     { n: 'crown', c: { a: '#c9d1d9', b: '#58a6ff' }, r: [
       '................',
       '................',
-      '....a..aa..a....',
-      '....aa.aa.aa....',
-      '....aaaaaaaa....',
-      '....aabaabaa....'] },
-    { n: 'cowboy hat', c: { a: '#8b5e3c', b: '#c99a6b' }, r: [
+      '.....a.aa.a.....',
+      '.....aaaaaa.....',
+      '.....abaaba.....',
+      '.....aaaaaa.....'] },
+    { n: 'cowboy hat', c: { a: '#7a4f30', b: '#c99a6b' }, r: [
       '................',
       '................',
       '......aaaa......',
       '.....aaaaaa.....',
       '.....bbbbbb.....',
-      '.aaaaaaaaaaaaaa.'] },
+      '..aaaaaaaaaaaa..'] },
     { n: 'headphones', c: { a: '#8b949e', b: '#58a6ff' }, r: [
-      '................',
       '................',
       '................',
       '................',
       '.....aaaaaa.....',
       '....a......a....',
       '...a........a...',
-      '..bb........bb..',
-      '..bb........bb..'] },
+      '..a..........a..',
+      '.bb..........bb.',
+      '.bb..........bb.'] },
     { n: 'chef hat', c: { a: '#f0f0f0', b: '#c8c8c8' }, r: [
-      '.....aa..aa.....',
-      '....aaaaaaaa....',
-      '....aaaaaaaa....',
+      '......a..a......',
       '.....aaaaaa.....',
       '.....aaaaaa.....',
-      '.....bbbbbb.....'] },
+      '......aaaa......',
+      '......aaaa......',
+      '......bbbb......'] },
     { n: 'bow', c: { a: '#ff7eb6', b: '#c4407f' }, r: [
-      '................',
       '................',
       '................',
       '................',
@@ -152,28 +156,28 @@
       '.....a....a.....',
       '.....a....a.....'] },
     { n: 'wizard hat', c: { a: '#6e40c9', b: '#f0f0f0' }, r: [
-      '..........a.....',
-      '.........aa.....',
-      '........aaa.....',
-      '.......aabaa....',
-      '......aaaaaa....',
-      '..aaaaaaaaaaaa..'] },
+      '.........a......',
+      '........aa......',
+      '.......aaa......',
+      '......abaa......',
+      '......aaaa......',
+      '....aaaaaaaa....'] },
     { n: 'baseball cap', c: { a: '#2f81f7', b: '#1b4f99', c: '#f0f0f0' }, r: [
       '................',
       '................',
       '.......cc.......',
       '......aaaa......',
       '.....aaaaaa.....',
-      '....aaaaaaaabbbb'] },
+      '.....aaaaaabbbb.'] },
     { n: 'flower', c: { a: '#d2a8ff', b: '#f0f0f0' }, r: [
       '................',
       '................',
       '................',
-      '....a...........',
-      '...aba..........',
-      '....a...........'] }
+      '...a............',
+      '..aba...........',
+      '...a............'] }
   ];
-  var EYE = '#1e1e1e';
+  var EYE = '#1a1a1a';
 
   // [x, y, colour] squares from rows of letters
   function fromRows(rows, colors) {
@@ -183,21 +187,22 @@
   }
   function at(list, color) { return list.map(function (p) { return [p[0], p[1], color]; }); }
 
-  // Layers of one creature, each [class, squares]; the CSS shows / animates layers by status.
+  // Layers of one creature, each [class, squares]; the CSS shows / animates layers by status (and sleep).
   function creatureLayers(look) {
     look = Math.abs(Math.floor(look)) || 0;
     var hat = HATS[look % HATS.length], body = BODIES[Math.floor(look / HATS.length) % BODIES.length];
     var torso = [];
-    for (var y = 6; y <= 12; y++) for (var x = 3; x <= 12; x++) torso.push([x, y, y === 12 ? body.s : body.b]);
+    for (var y = 6; y <= 12; y++) for (var x = 2; x <= 13; x++) torso.push([x, y, y === 12 ? body.s : body.b]);
     return [
-      ['shadow', at([[4, 15], [5, 15], [6, 15], [7, 15], [8, 15], [9, 15], [10, 15], [11, 15]], '#181818')],
+      ['shadow', at([[3, 15], [4, 15], [5, 15], [6, 15], [7, 15], [8, 15], [9, 15], [10, 15], [11, 15], [12, 15]], '#0e0e0e')],
       ['fig', [
-        ['legs-a', at([[4, 13], [4, 14], [6, 13], [6, 14], [9, 13], [9, 14], [11, 13], [11, 14]], body.s)],
-        ['legs-b', at([[4, 13], [4, 14], [6, 13], [9, 13], [9, 14], [11, 13]], body.s)],
+        ['legs-a', at([[3, 13], [3, 14], [5, 13], [5, 14], [10, 13], [10, 14], [12, 13], [12, 14]], body.s)],
+        ['legs-b', at([[3, 13], [5, 13], [5, 14], [10, 13], [12, 13], [12, 14]], body.s)],
+        ['legs-sit', at([[3, 13], [5, 13], [10, 13], [12, 13]], body.s)],
         ['torso', torso],
-        ['arm-l', at([[1, 9], [2, 9], [1, 10], [2, 10]], body.b)],
-        ['arm-r', at([[13, 9], [14, 9], [13, 10], [14, 10]], body.b)],
-        ['arm-up', at([[13, 9], [13, 8], [14, 8], [14, 7], [14, 6]], body.b)],
+        ['arm-l', at([[1, 8], [1, 9]], body.b)],
+        ['arm-r', at([[14, 8], [14, 9]], body.b)],
+        ['arm-up', at([[14, 7], [14, 6], [15, 6], [15, 5]], body.b)],
         ['e-open', at([[5, 8], [5, 9], [10, 8], [10, 9]], EYE)],
         ['e-blink', at([[4, 9], [5, 9], [10, 9], [11, 9]], EYE)],
         ['e-happy', at([[4, 9], [5, 8], [6, 9], [9, 9], [10, 8], [11, 9]], EYE)],
@@ -207,14 +212,29 @@
         ['blush', at([[4, 10], [11, 10]], '#f08da0')],
         ['hat', fromRows(hat.r, hat.c)]
       ]],
-      ['fx-bang', at([[15, 1], [15, 2], [15, 3], [15, 5]], '#f85149')],
-      ['fx-sweat', at([[14, 5], [14, 6], [13, 6]], '#79c0ff')],
+      ['fx-bang', at([[0, 1], [0, 2], [0, 3], [0, 5]], '#f85149')],
+      ['fx-sweat', at([[14, 4], [14, 5], [13, 5]], '#79c0ff')],
       ['fx-spark', at([[1, 2], [0, 3], [2, 3], [1, 4], [14, 0], [13, 1], [15, 1], [14, 2]], '#fff3c4')],
-      ['fx-z', at([[11, 0], [12, 0], [13, 0], [14, 0], [15, 0], [14, 1], [13, 2], [12, 3], [11, 4], [12, 4], [13, 4], [14, 4], [15, 4]], '#a0a0a0')]
+      // sleeping: a big Z and a small z drifting up to the right
+      ['fx-z2', at([[12, 0], [13, 0], [14, 0], [15, 0], [14, 1], [13, 2], [12, 3], [13, 3], [14, 3], [15, 3]], '#b8b8b8')],
+      ['fx-z1', at([[13, 5], [14, 5], [15, 5], [14, 6], [14, 7], [15, 7]], '#8a8a8a')]
     ];
   }
 
-  if (typeof module === 'object' && module.exports) module.exports = { clock: clock, span: span, ago: ago, statusText: statusText, HATS: HATS, BODIES: BODIES, creatureLayers: creatureLayers, countdown: countdown, percentText: percentText, remainingText: remainingText };
+  // A DONE worker sleeps once it has been done for 3 hours: a look only, layered on DONE (its status text,
+  // timer, ordering and counts stay DONE). t = when it became DONE, on the laptop's clock.
+  var SLEEP_MS = 3 * 3600 * 1000;
+  function isAsleep(state, t, now) { return state === 'DONE' && typeof t === 'number' && now - t >= SLEEP_MS; }
+
+  // Per-worker context-window line: x = {p: percent, o: reading older than the worker's latest activity}
+  // or null when Claude Code hasn't reported one for that session. Missing is never shown as 0%.
+  function contextInfo(x) {
+    if (!x || typeof x.p !== 'number' || !isFinite(x.p) || x.p < 0) return { text: 'Context unavailable', p: null, old: false };
+    var p = Math.min(100, x.p);
+    return { text: 'Context ' + percentText(p) + (x.o ? ' · old' : ''), p: p, old: !!x.o };
+  }
+
+  if (typeof module === 'object' && module.exports) module.exports = { clock: clock, span: span, ago: ago, statusText: statusText, HATS: HATS, BODIES: BODIES, creatureLayers: creatureLayers, countdown: countdown, percentText: percentText, remainingText: remainingText, isAsleep: isAsleep, SLEEP_MS: SLEEP_MS, contextInfo: contextInfo };
   if (typeof document === 'undefined') return;
 
   // ---------- connection ----------
@@ -243,6 +263,14 @@
   var VIEW_KEY = 'claudeStatus.view';
   var view = 'list';
   try { if (localStorage.getItem(VIEW_KEY) === 'creatures') view = 'creatures'; } catch (e) { }
+
+  // Creatures view options, each remembered in this browser only and off unless turned on: Compact (three
+  // columns instead of two; unrelated to the desktop's Compact view) and Show context (a context-window
+  // bar on each card). Both only change classes, so the connection and the cards themselves are untouched.
+  var COMPACT_KEY = 'claudeStatus.compact', CONTEXT_KEY = 'claudeStatus.context';
+  var compact = false, contextShown = false;
+  try { compact = localStorage.getItem(COMPACT_KEY) === '1'; contextShown = localStorage.getItem(CONTEXT_KEY) === 'shown'; } catch (e) { }
+  var petbarEl = $('petbar'), compactToggle = $('compact-toggle'), contextToggle = $('context-toggle');
 
   // Claude Usage: shown or hidden, and expanded or not, remembered in this browser only (the desktop has
   // its own Show usage setting). Hiding only hides it; the board keeps the figures up to date.
@@ -567,6 +595,8 @@
     });
     Object.keys(petEls).forEach(function (k) {
       var e = petEls[k], s = statusParts(e.r.s, e.r.e, now - e.r.t, false);
+      // falls asleep by itself 3 h after finishing (laptop clock; frozen like the timers while not live)
+      e.li.classList.toggle('asleep', isAsleep(e.r.s, e.r.t, now));
       e.word.textContent = s[0];
       // narrow cards wrap only between the " · " parts, never inside "1h 05m" or "just now"
       e.rest.textContent = s[1].split(DOT).map(function (p) { return p.replace(/ /g, ' '); }).join(DOT);
@@ -580,10 +610,37 @@
     viewBtns.forEach(function (b) { b.setAttribute('aria-pressed', String(b.dataset.view === view)); });
     rowsEl.hidden = view !== 'list';
     creaturesEl.hidden = view !== 'creatures';
+    petbarEl.hidden = view !== 'creatures';
     if (remember) try { localStorage.setItem(VIEW_KEY, view); } catch (e) { }
     render(true);   // same data, same connection: only the presentation changes
   }
   viewBtns.forEach(function (b) { b.addEventListener('click', function () { if (b.dataset.view !== view) setView(b.dataset.view, true); }); });
+
+  // A whole number of device pixels per creature square (e.g. 3 CSS px is 8 device px at a 2.625 pixel
+  // ratio, not 7.875), so every square of the art is the same crisp size.
+  function snapCells() {
+    var d = window.devicePixelRatio || 1;
+    [3, 4, 5].forEach(function (n) { document.documentElement.style.setProperty('--c' + n, Math.max(1, Math.round(n * d)) / d + 'px'); });
+  }
+  snapCells();
+  window.addEventListener('resize', snapCells);
+
+  function applyPetOptions() {
+    compactToggle.setAttribute('aria-pressed', String(compact));
+    contextToggle.setAttribute('aria-pressed', String(contextShown));
+    petsEl.classList.toggle('compact', compact);
+    petsEl.classList.toggle('ctx', contextShown);
+  }
+  compactToggle.addEventListener('click', function () {
+    compact = !compact;
+    try { localStorage.setItem(COMPACT_KEY, compact ? '1' : '0'); } catch (e) { }
+    applyPetOptions();
+  });
+  contextToggle.addEventListener('click', function () {
+    contextShown = !contextShown;
+    try { localStorage.setItem(CONTEXT_KEY, contextShown ? 'shown' : 'hidden'); } catch (e) { }
+    applyPetOptions();
+  });
 
   // ---------- creatures view ----------
   var SVGNS = 'http://www.w3.org/2000/svg';
@@ -626,7 +683,7 @@
 
   function petPlaceholder(text, sleeping) {
     clearPets();
-    var li = el('li', 'card placeholder' + (sleeping ? ' sleep' : ''));
+    var li = el('li', 'card placeholder' + (sleeping ? ' sleep asleep' : ''));
     if (sleeping) { var s = el('span', 'sprite'); s.appendChild(creatureSvg(0)); li.appendChild(s); }
     else li.appendChild(el('span', 'ring'));
     li.appendChild(el('span', 'cname', text));
@@ -664,9 +721,12 @@
     sprite.appendChild(creatureSvg(r.c));
     var name = el('span', 'cname'), st = el('span', 'cstatus'), word = el('span', 'word'), rest = el('span', 'rest');
     st.appendChild(word); st.appendChild(rest);
-    pet.appendChild(sprite); pet.appendChild(name); pet.appendChild(st);
+    // this session's context window, under everything else (only shown with Show context on)
+    var ctx = el('span', 'cctx'), ctxText = el('span', 'ctext'), ctxBar = bar('ctrack', 0);
+    ctx.appendChild(ctxText); ctx.appendChild(ctxBar);
+    pet.appendChild(sprite); pet.appendChild(name); pet.appendChild(st); pet.appendChild(ctx);
     li.appendChild(pet);
-    var e = { r: r, li: li, pet: pet, sprite: sprite, name: name, word: word, rest: rest, x: null, look: r.c };
+    var e = { r: r, li: li, pet: pet, sprite: sprite, name: name, word: word, rest: rest, x: null, look: r.c, ctx: ctx, ctxText: ctxText, ctxFill: ctxBar.firstChild };
     pet.addEventListener('click', function () { activate(e); });
     li.addEventListener('animationend', function (ev) {
       if (ev.animationName === 'boing') sprite.classList.remove('boing');
@@ -688,6 +748,17 @@
     if (r.s !== 'DONE') e.li.classList.remove('celebrate');
     if (r.s !== 'ERROR') e.li.classList.remove('shake');
     e.li.classList.toggle('busy', !!pending[r.k]);
+    e.li.classList.toggle('asleep', isAsleep(r.s, r.t, boardNow()));
+    var cx = contextInfo(r.x);
+    e.ctxText.textContent = cx.text;
+    e.ctxFill.style.width = (cx.p == null ? 0 : cx.p) + '%';
+    e.ctxFill.style.minWidth = cx.p > 0 && cx.p < 3 ? '2px' : '';
+    e.ctx.classList.toggle('na', cx.p == null);
+    e.ctx.classList.toggle('old', cx.old);
+    e.ctx.classList.toggle('hi', cx.p != null && cx.p >= 80 && cx.p < 95);
+    e.ctx.classList.toggle('max', cx.p != null && cx.p >= 95);
+    e.ctx.title = cx.p == null ? "Claude Code hasn't reported this session's context window"
+      : cx.old ? "Last reported before this worker's latest activity" : "This session's context window";
     e.name.textContent = r.n.replace(/ (#\d+)$/, ' $1');
     if (r.s === 'DONE' && r.d) {
       if (!e.x) {
@@ -796,6 +867,7 @@
     noteTimer = setTimeout(function () { noteEl.hidden = true; }, 4000);
   }
 
+  applyPetOptions();
   setView(view, false);
   poll(false);
 })();

@@ -12,7 +12,8 @@
 //                                         own click-on-a-worker action; the laptop picks the window)
 //   POST /api/usage-refresh {}            re-read the Claude Usage data on the laptop now (local files)
 // Only display data leaves the process: friendly name, state, when that state began, a short error type,
-// a creature look number, and opaque tokens. No session IDs, process IDs, folder paths or window data.
+// a creature look number, that session's context-window percentage (and whether that reading is older than
+// its latest activity), and opaque tokens. No session IDs, process IDs, folder paths or window data.
 // The board also carries the account-wide Claude Usage figures (titles, percentages, reset times, status
 // text); never account IDs, credentials or file contents.
 using System;
@@ -85,11 +86,51 @@ namespace ClaudeStatus
         }
     }
 
+    // One session's context-window fullness, as statusline.ps1 recorded it from Claude Code's documented
+    // status line data (state\context\<session id>.json). Telemetry only: it never touches the session's
+    // state file, so lifecycle timers, ordering and dismissal tokens are unaffected by it.
+    public class ContextReading
+    {
+        public double? Percent;   // null = Claude Code didn't report it (early in a session, right after /compact)
+        public long Size;
+        public DateTime At;
+
+        // An older reading than the session's latest lifecycle event (minus slack for the status line's
+        // debounce): e.g. a session now continued somewhere that doesn't run the status line.
+        public const int OldAfterSeconds = 120;
+        public bool IsOldFor(SessionInfo s) { return At < s.Updated.AddSeconds(-OldAfterSeconds); }
+
+        public static ContextReading Parse(string json)
+        {
+            try
+            {
+                var d = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(json);
+                if (d == null || Board.Str(d, "v") != "1") return null;
+                DateTime at;
+                if (!DateTime.TryParse(Board.Str(d, "at"), System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind, out at)) return null;
+                var c = new ContextReading { At = at.ToUniversalTime() };
+                object p;
+                if (d.TryGetValue("pct", out p) && p != null)
+                {
+                    if (!(p is int || p is long || p is double || p is decimal)) return null;
+                    double v = Convert.ToDouble(p);
+                    if (double.IsNaN(v) || v < 0 || v > 100) return null;
+                    c.Percent = v;
+                }
+                long size;
+                if (long.TryParse(Board.Str(d, "size"), out size) && size > 0) c.Size = size;
+                return c;
+            }
+            catch { return null; }
+        }
+    }
+
     public class PhoneRow
     {
         public string Key = "", Occ = "", Name = "", State = "", Err = "";
         public long Since;
         public int Look;
+        public Dictionary<string, object> Ctx;   // {p, o} or null (no reported reading)
         internal string SessionId = "", Occurrence = "";
     }
 
@@ -97,8 +138,10 @@ namespace ClaudeStatus
     {
         public const int DefaultPort = 48521;
         const int MaxHeader = 8192, MaxBody = 1024, MaxConnections = 32, WaitMs = 20000, RepeatMs = 1500;
-        // Creature looks: phone.js draws look L as hat (L % Hats) on body colour (L / Hats); see HATS there.
-        public const int Hats = 13, Looks = 65;
+        // Creature looks: phone.js draws look L as hat (L % Hats) on body colour (L / Hats); see HATS and
+        // BODIES there. Bodies 0 .. OrangeBodies-1 are the orange family.
+        public const int Hats = 13, Bodies = 8, OrangeBodies = 4, Looks = Hats * Bodies;
+        public static bool IsOrange(int look) { return look / Hats < OrangeBodies; }
         static readonly Regex TokenRx = new Regex("^[A-Za-z0-9_-]{22}$");
         static readonly DateTime Epoch = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
         static readonly Dictionary<string, string[]> Pages = new Dictionary<string, string[]>
@@ -195,7 +238,11 @@ namespace ClaudeStatus
         }
 
         // Called by the indicator after every reload with exactly the rows it shows.
-        public void Publish(List<SessionInfo> ordered, bool summary, string summaryLine)
+        public void Publish(List<SessionInfo> ordered, bool summary, string summaryLine) { Publish(ordered, summary, summaryLine, null); }
+
+        // context: session id -> its latest context reading (from statusline.ps1); only the percentage and
+        // whether it predates the session's latest activity reach the phone.
+        public void Publish(List<SessionInfo> ordered, bool summary, string summaryLine, Dictionary<string, ContextReading> context)
         {
             var next = new List<PhoneRow>();
             var sig = new StringBuilder(summary ? "S" + summaryLine : "-");
@@ -210,8 +257,12 @@ namespace ClaudeStatus
                     Name = s.DisplayName, State = s.State, Err = s.State == Board.Error ? Board.ShortError(s.Detail) : "",
                     Since = Ms(s.StateSince), Look = looks[s.Id], SessionId = s.Id, Occurrence = occ,
                 };
+                ContextReading c;
+                if (context != null && context.TryGetValue(s.Id, out c) && c != null && c.Percent.HasValue)
+                    r.Ctx = new Dictionary<string, object> { { "p", Math.Round(c.Percent.Value, 1) }, { "o", c.IsOldFor(s) } };
                 next.Add(r);
-                sig.Append('\n').Append(r.Key).Append('|').Append(r.Occ).Append('|').Append(r.Name).Append('|').Append(r.State).Append('|').Append(r.Err).Append('|').Append(r.Since).Append('|').Append(r.Look);
+                sig.Append('\n').Append(r.Key).Append('|').Append(r.Occ).Append('|').Append(r.Name).Append('|').Append(r.State).Append('|').Append(r.Err).Append('|').Append(r.Since).Append('|').Append(r.Look)
+                   .Append('|').Append(r.Ctx == null ? "-" : r.Ctx["p"] + "/" + r.Ctx["o"]);
             }
             lock (gate)
             {
@@ -239,14 +290,17 @@ namespace ClaudeStatus
         // Each worker keeps its creature for as long as this process runs (also after a dismissal, so a worker
         // that comes back looks the same). A new worker starts from a look picked by its token and takes the
         // first one whose hat no worker on the board is wearing, so up to 13 workers all wear different hats.
+        // Orange leads the palette: a new worker gets an orange body while the board has at most twice as
+        // many orange creatures as others (so the first is orange, then about two in three).
         void AssignLooks(List<SessionInfo> ordered)
         {
             var hats = new bool[Hats];
             var taken = new HashSet<int>();
+            int orange = 0, other = 0;
             foreach (var s in ordered)
             {
                 int l;
-                if (looks.TryGetValue(s.Id, out l)) { hats[l % Hats] = true; taken.Add(l); }
+                if (looks.TryGetValue(s.Id, out l)) { hats[l % Hats] = true; taken.Add(l); if (IsOrange(l)) orange++; else other++; }
             }
             foreach (var s in ordered)
             {
@@ -260,10 +314,13 @@ namespace ClaudeStatus
                 byte[] h;
                 using (var mac = new HMACSHA256(secret)) h = mac.ComputeHash(Encoding.UTF8.GetBytes("c|" + s.Id));
                 int start = (int)(BitConverter.ToUInt32(h, 0) % Looks), pick = -1;
+                bool wantOrange = orange <= 2 * other;
+                for (int i = 0; i < Looks && pick < 0; i++) { int l = (start + i) % Looks; if (IsOrange(l) == wantOrange && !hats[l % Hats] && !taken.Contains(l)) pick = l; }
                 for (int i = 0; i < Looks && pick < 0; i++) { int l = (start + i) % Looks; if (!hats[l % Hats] && !taken.Contains(l)) pick = l; }
                 for (int i = 0; i < Looks && pick < 0; i++) { int l = (start + i) % Looks; if (!taken.Contains(l)) pick = l; }
                 if (pick < 0) pick = start;
                 looks[s.Id] = pick; hats[pick % Hats] = true; taken.Add(pick);
+                if (IsOrange(pick)) orange++; else other++;
             }
         }
 
@@ -413,7 +470,7 @@ namespace ClaudeStatus
         {
             var list = new List<object>();
             foreach (var r in rows)
-                list.Add(new Dictionary<string, object> { { "k", r.Key }, { "n", r.Name }, { "s", r.State }, { "t", r.Since }, { "e", r.Err }, { "d", r.Occ }, { "c", r.Look } });
+                list.Add(new Dictionary<string, object> { { "k", r.Key }, { "n", r.Name }, { "s", r.State }, { "t", r.Since }, { "e", r.Err }, { "d", r.Occ }, { "c", r.Look }, { "x", r.Ctx } });
             var o = new Dictionary<string, object> { { "v", version }, { "now", Ms(DateTime.UtcNow) }, { "summary", summaryOn }, { "text", summaryOn ? summaryText : "" }, { "rows", list }, { "usage", usageData } };
             return new JavaScriptSerializer().Serialize(o);
         }

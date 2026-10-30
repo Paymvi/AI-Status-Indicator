@@ -700,12 +700,12 @@ namespace ClaudeStatus
         const TextFormatFlags LeftText = TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding | TextFormatFlags.SingleLine | TextFormatFlags.PreserveGraphicsClipping;
         const TextFormatFlags CenterText = TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding | TextFormatFlags.SingleLine;
 
-        readonly string root, sessionsDir, posPath, cfgPath, anchorsPath;
+        readonly string root, sessionsDir, contextDir, posPath, cfgPath, anchorsPath;
         readonly bool testMode;
         Dictionary<string, object> cfg;
         bool cfgOk = true;
-        readonly FileSystemWatcher watcher, cfgWatcher;
-        readonly System.Windows.Forms.Timer debounce, slow, tick, cfgDebounce;
+        readonly FileSystemWatcher watcher, cfgWatcher, ctxWatcher;
+        readonly System.Windows.Forms.Timer debounce, slow, tick, cfgDebounce, ctxDebounce;
         readonly NotifyIcon tray;
         readonly ContextMenuStrip menu, trayMenu;
         readonly ToolTip tip, note;
@@ -716,6 +716,7 @@ namespace ClaudeStatus
         List<SessionInfo> ordered = new List<SessionInfo>();
         readonly WorkerNumbering numbering = new WorkerNumbering();
         Dictionary<string, Anchor> anchors = new Dictionary<string, Anchor>();
+        Dictionary<string, ContextReading> contextKept = new Dictionary<string, ContextReading>();
         SessionInfo current;
         bool initialized, board, mouseInside, dragging, thumbDrag;
         string trayState, hover = "", pressed = "", tipText = "";
@@ -759,7 +760,9 @@ namespace ClaudeStatus
             posPath = Path.Combine(root, "position.txt");
             cfgPath = Path.Combine(root, "config.json");
             anchorsPath = Path.Combine(root, "state\\windows.json");
+            contextDir = Path.Combine(root, "state\\context");
             Directory.CreateDirectory(sessionsDir);
+            try { Directory.CreateDirectory(contextDir); } catch { }
             cfg = LoadConfig(cfgPath, out cfgOk);
             anchors = LoadAnchors(anchorsPath);
 
@@ -816,6 +819,15 @@ namespace ClaudeStatus
             cfgDebounce = new System.Windows.Forms.Timer { Interval = 250 };
             cfgDebounce.Tick += (s, e) => { cfgDebounce.Stop(); bool ok; cfg = LoadConfig(cfgPath, out ok); cfgOk = ok; Reload(); };
 
+            // Context-window readings (phone only) republish the phone board without re-reading any session.
+            ctxWatcher = new FileSystemWatcher(contextDir, "*.json") { SynchronizingObject = this, IncludeSubdirectories = false,
+                NotifyFilter = NotifyFilters.FileName | NotifyFilters.LastWrite };
+            FileSystemEventHandler xh = (s, e) => { ctxDebounce.Stop(); ctxDebounce.Start(); };
+            ctxWatcher.Changed += xh; ctxWatcher.Created += xh; ctxWatcher.Deleted += xh;
+            ctxWatcher.Renamed += (s, e) => { ctxDebounce.Stop(); ctxDebounce.Start(); };
+            ctxDebounce = new System.Windows.Forms.Timer { Interval = 250 };
+            ctxDebounce.Tick += (s, e) => { ctxDebounce.Stop(); PublishPhone(); };
+
             // Timers are presentation only: labels are recomputed from stored timestamps, nothing is rewritten.
             tick = new System.Windows.Forms.Timer { Interval = 1000 };
             tick.Tick += (s, e) => { if (board && Visible) Invalidate(); AdjustTick(); };
@@ -830,6 +842,7 @@ namespace ClaudeStatus
                 usage.Start(this);
                 watcher.EnableRaisingEvents = true;
                 cfgWatcher.EnableRaisingEvents = true;
+                try { ctxWatcher.EnableRaisingEvents = true; } catch { }
                 slow.Start();
                 tick.Start();
                 displayChanged = (s, e) => { try { BeginInvoke((MethodInvoker)UpdateLayout); } catch { } };
@@ -846,6 +859,7 @@ namespace ClaudeStatus
         public string TrayText { get { return tray.Text; } }
         public Point Home { get { return home; } set { home = value; UpdateLayout(); } }
         public void ReloadNow() { Reload(); }
+        public void PublishContextNow() { PublishPhone(); }
         public void PaintTo(Graphics g) { Render(g); }
         public bool Dismiss(string id) { SessionInfo si; return sessions.TryGetValue(id, out si) && DismissDone(si); }
         public int ScrollOffset { get { return scroll; } set { scroll = value; ClampScroll(); } }
@@ -931,7 +945,7 @@ namespace ClaudeStatus
             initialized = true;
             PruneAnchors();
             ApplyPhone();
-            if (phone != null) phone.Publish(ordered, CfgBool("showWorkerSummary", false), Board.Summary(ordered));
+            PublishPhone();
             PublishUsage();
             current = ordered.Count > 0 ? ordered[0] : null;
 
@@ -1008,6 +1022,38 @@ namespace ClaudeStatus
             catch (Exception e) { phoneError = e.Message; }
             phoneFailedPort = port;
             phoneRetryUtc = DateTime.UtcNow.AddSeconds(30);
+        }
+
+        void PublishPhone()
+        {
+            if (phone == null) return;
+            phone.Publish(ordered, CfgBool("showWorkerSummary", false), Board.Summary(ordered), LoadContexts());
+        }
+
+        // Per-session context-window readings (state\context\<id>.json, written by statusline.ps1). Only read
+        // for the phone; they never change sessions, timers, ordering or dismissal. A reading whose session has
+        // left the board is kept for a day (the session may come back), then removed.
+        Dictionary<string, ContextReading> LoadContexts()
+        {
+            var map = new Dictionary<string, ContextReading>();
+            string[] files;
+            try { files = Directory.GetFiles(contextDir, "*.json"); } catch { return map; }
+            DateTime now = DateTime.UtcNow;
+            foreach (var f in files)
+            {
+                string id = Path.GetFileNameWithoutExtension(f);
+                if (!sessions.ContainsKey(id))
+                {
+                    try { if ((now - File.GetLastWriteTimeUtc(f)).TotalHours > 24) File.Delete(f); } catch { }
+                    continue;
+                }
+                ContextReading c = null;
+                try { c = ContextReading.Parse(ReadShared(f)); } catch { }
+                if (c == null) contextKept.TryGetValue(id, out c);   // mid-replace or unreadable: keep what we had
+                if (c != null) map[id] = c;
+            }
+            contextKept = map;
+            return map;
         }
 
         // Called on a server thread; the file-level check makes it safe without the UI thread.
@@ -1667,8 +1713,9 @@ namespace ClaudeStatus
             usage.Dispose();
             watcher.EnableRaisingEvents = false;
             cfgWatcher.EnableRaisingEvents = false;
+            ctxWatcher.EnableRaisingEvents = false;
             if (displayChanged != null) SystemEvents.DisplaySettingsChanged -= displayChanged;
-            debounce.Stop(); slow.Stop(); tick.Stop(); cfgDebounce.Stop();
+            debounce.Stop(); slow.Stop(); tick.Stop(); cfgDebounce.Stop(); ctxDebounce.Stop();
             tray.Visible = false;
             tray.Dispose();
             trayMenu.Dispose();

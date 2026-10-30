@@ -164,7 +164,8 @@ Reads never overlap, and none of this sends a request anywhere. There is no Anth
 
 - With no status line of your own, the CLI shows a short `5h 14% · wk 57%`. (Like any custom status line, it replaces the footer's keyboard hints such as *esc to interrupt*.)
 - With a status line of your own, it's saved to `statusline-chain.json` and still runs: you keep seeing **its** output, and `uninstall.ps1` (or `install.ps1 -NoUsageStatusLine`) puts it back exactly.
-- `install.ps1 -NoUsageStatusLine` skips (or removes) it; the section then relies on the `/usage` cache only.
+- `install.ps1 -NoUsageStatusLine` skips (or removes) it; the section then relies on the `/usage` cache only, and the phone's [context bars](#creatures-view) show *Context unavailable*.
+- It also keeps each session's context-window percentage for the phone's *Show context* bars (see [Where the context numbers come from](#where-the-context-numbers-come-from)).
 - Each status line update starts a short-lived `powershell.exe` (about 0.3–0.5 s, like the hooks).
 
 ## Phone dashboard (optional)
@@ -186,15 +187,28 @@ tailscale serve on the laptop  ── forwards to ──►  127.0.0.1:48521
 - **Dismiss DONE rows from either screen.** Tap the **×** on a DONE row on the phone and it disappears from both screens; dismiss it on the desktop and it disappears from the phone. As on the desktop, this only removes Claude Status's row: Claude isn't stopped or messaged and no session or file is touched, and a later prompt in that session brings the worker back. WORKING, NEEDS YOU and ERROR rows can't be dismissed.
 - **Honest connection state** (top right): **LIVE**, **CONNECTING…**, **RECONNECTING…** or **OFFLINE**. When the connection is lost, the page keeps the last board but dims it, freezes its timers, shows *Last update 11:55:07 (3s ago). The board below may be out of date.* and says why (laptop unreachable, or Claude Status not answering). Dismissing is disabled until it's LIVE again, and a dismiss is never queued for later. It reconnects by itself and refreshes as soon as the laptop answers again, including when you come back to the page after Android put it in the background.
 - **No phone notifications**: no sounds, vibration, notification prompts or background activity. (Desktop sounds and notifications are unchanged.)
-- **Two views: List or Creatures** (switch at the top). See below.
+- **Two views: List or Creatures** (switch at the top). Creatures has two options of its own, **Compact** (three columns) and **Show context** (per-worker context-window bars). See below.
 - **Claude Usage** (account-wide): a compact line above the workers (*5h 14% · Wk 57%*); tap it for the same breakdown as the desktop, with countdowns and a **Refresh** button. **Show usage** (next to List / Creatures) hides or shows it; each phone remembers its own choice, separately from the desktop's. The phone gets only the displayed figures and text: never account IDs, credentials or file contents.
 
 ### Creatures view
 
 Tap **Creatures** at the top of the page for a grid of little pixel creatures, one per worker, instead of rows. **List** is the default; the phone's browser remembers your choice (only that choice is stored, and only on the phone). Switching views keeps the same live connection and board.
 
-- **Same board.** Same workers, names, `#n` numbers, order, status text, timers, cleanup and **×** dismissal as the list. Each card shows the name (long names wrap) and the real status line, e.g. *WORKING · 04:32*. No made-up numbers: there are no context or progress percentages.
-- **Each worker has its own creature.** A worker keeps the same body colour and hat (party hat, beanie, top hat, propeller cap, crown, cowboy hat, headphones, chef hat, bow, antennae, wizard hat, cap or flower) for as long as it's on the board, on every phone and in both views. Up to 13 workers all wear different hats. Restarting Claude Status deals out new creatures.
+```text
+TWO COLUMNS (default)                  COMPACT (three columns)
+┌───────────────┐┌───────────────┐     ┌─────────┐┌─────────┐┌─────────┐
+│   (creature)  ││  (creature) × │     │ creature││ creature││ creature│
+│    Portal     ││    Website    │     │ Portal  ││ Booking ││ Website │
+│ NEEDS YOU · 2m││ DONE · 6m ago │     │NEEDS YOU││Software ││ DONE ·  │
+│  Context 42%  ││  Context 61%  │     │ · 2m    ││   #1    ││ 6m ago  │
+│  ▬▬▬▬──────   ││  ▬▬▬▬▬▬────   │     │ ...     ││ ...     ├─────────┤
+└───────────────┘└───────────────┘     └─────────┘└─────────┘│    ×    │
+                                                             └─────────┘
+```
+
+- **Same board.** Same workers, names, `#n` numbers, order, status text, timers, cleanup and **×** dismissal as the list. Each card shows the full name (long names wrap as far as they need to; nothing is cut off) and the real status line, e.g. *WORKING · 04:32*.
+- **Layout.** Compact dark tiles with a thin border in the status colour, the creature centred on top. **Two equal columns** by default. **Compact** (next to *Show context*, under the List / Creatures switch) switches to **three equal columns** at every phone width, from 320 px up; the creatures get a little smaller and a DONE card's **×** moves to a full-width strip at the bottom of the card, so it never covers part of the creature. Compact is off until you turn it on, is remembered by that phone's browser (separately from the view, *Show usage* and *Show context*), changes the layout instantly without reconnecting, and has nothing to do with the desktop app's Compact view. The List view is never affected.
+- **Each worker has its own creature.** Squat, wide pixel bodies with side nubs, four little feet and a two-dot face, wearing a small hat (party hat, beanie, top hat, propeller cap, crown, cowboy hat, headphones, chef hat, bow, antennae, wizard hat, cap or flower). Bodies come in bright orange, Claude coral, burnt orange and peach, plus lavender, slate blue, rose and sand. Orange leads: the first worker on the board is always orange, and later ones are orange about two times in three. A body colour says nothing about status (the status text and card border do). A worker keeps the same body and hat for as long as it's on the board, through every status change, page reload and on every phone, in both views. Up to 13 workers all wear different hats. Restarting Claude Status deals out new creatures. The art is drawn by the page itself as crisp squares sized to whole screen pixels (no images, nothing downloaded).
 - **Creatures act out their status** (the status text and card border colour always say it too):
 
   | Status | Creature |
@@ -202,10 +216,27 @@ Tap **Creatures** at the top of the page for a grid of little pixel creatures, o
   | WORKING | small busy bounce, stepping feet, the occasional blink |
   | NEEDS YOU | waves a hand, with a red **!** |
   | DONE | happy face; hops with sparkles when it finishes while you're watching |
+  | DONE for 3 hours or more | **asleep**: eyes shut, settled down onto tucked-in feet, with a small *z* and a slowly blinking *Z* |
   | ERROR | worried face, sweat drop, striped red card; a small shake when it fails while you're watching |
   | (no workers) | one sleeping creature, *No Claude workers* |
 
-  Motion is small and stops while the page is in the background or the board isn't live. With **Reduce motion** / **Remove animations** turned on in Android's accessibility settings there's no animation at all.
+  Motion is small and stops while the page is in the background or the board isn't live. With **Reduce motion** / **Remove animations** turned on in Android's accessibility settings there's no animation at all (a sleeping creature then simply shows its *z* and *Z*).
+
+**Sleeping is only a look.** A creature falls asleep once its worker has been **DONE for 3 hours**, counted from the moment it finished (the same DONE time the timer uses, on the laptop's clock, not from when you opened the page). It happens by itself on screen at the 3-hour mark, and a reopened page shows it asleep straight away. Everything else stays DONE: the status text and timer (*DONE · 3h ago*), the green border, ordering, the summary count, the **×** and tap-to-bring-up. There's no sound or notification. A new prompt wakes it immediately (it's WORKING again). WORKING, NEEDS YOU and ERROR creatures never fall asleep, however long they've been unchanged. While the page isn't live the clock is frozen like the timers, so nothing falls asleep on stale data.
+
+**Show context** (off until you turn it on, remembered per phone) adds a small bar under each card for **that worker's own Claude session**: how full its context window is, e.g. *Context 42%*. This is not your account's plan usage (that's the *Claude Usage* line).
+
+- The number is Claude Code's own `context_window.used_percentage`, from the [status line data](https://code.claude.com/docs/en/statusline#available-data) of that session (see [Where the context numbers come from](#where-the-context-numbers-come-from)). Nothing is estimated from token totals, costs or time.
+- *Context 0%* is a real zero. *Context unavailable* (with an empty, dashed track) means Claude Code hasn't reported a figure for that session: e.g. the session runs in the VS Code extension, or it hasn't had a reply yet, or it has just been compacted and not had its next reply.
+- *Context 42% · old* (grey bar) means the reading is from before that worker's latest activity, e.g. the session is now being continued somewhere that doesn't report context. An idle DONE worker's last reading isn't old: nothing has changed since.
+- After `/compact` it drops to the new, lower figure; a different context size (200k / 1M) is handled by Claude Code's percentage.
+- Context readings never change a worker's status, timer, order or dismissal, and never bring back a dismissed worker. Turning the bars off removes them and their space completely.
+
+#### Where the context numbers come from
+
+Claude Code passes its status line command each session's `session_id` and a documented `context_window` object after every reply, after `/compact` and when a session starts. `statusline.ps1` (already your status line for [Claude Usage](#status-line)) keeps just three values per session in `state\context\<session id>.json`: `used_percentage`, `context_window_size` and when it was reported. The session id is what the hooks use too, so two workers of the same project never share or overwrite a reading. When Claude Code reports `current_usage` as null (before the first reply, and right after `/compact`), the fullness is recorded as unknown rather than keeping the pre-compaction figure. If `used_percentage` is missing but `current_usage` is present, it uses the documented input-only formula behind it. Nothing else from the status line data, no conversation content and no credentials are read, and no request is made. The phone gets only the percentage and whether it's old, never session ids.
+
+**Where it works:** the Claude Code **CLI**, in any terminal, as long as `statusline.ps1` is the status line (the default after `install.ps1`; not with `-NoUsageStatusLine`). A status line of your own keeps working through the chain as before. The **VS Code extension** doesn't run status line commands (verified with Claude Code 2.1.312: sessions in the extension never invoke it, and the docs don't list it there), so its workers show *Context unavailable*. That's honest: there's no documented local source for it there.
 
 **Tap a creature to bring up its window on the laptop.** It hops right away, and the laptop then does exactly what clicking that worker on the desktop board does (see [Clicking a worker](#clicking-a-worker)): it finds **that session's** window, telling apart two workers in the same project, and brings it to the front, or refuses rather than guess. Nothing is opened or launched on the phone or the laptop; it's the existing window or nothing. The phone then says what the laptop reported:
 
@@ -276,7 +307,7 @@ Each DONE row on the phone carries an opaque token for that particular DONE occu
 - The dashboard listens on `127.0.0.1` only; it's reachable from the phone solely through `tailscale serve`, i.e. by devices signed in to your tailnet. It is not exposed on your Wi-Fi/LAN.
 - Requests must be addressed to `127.0.0.1`/`localhost` or this laptop's own Tailscale name/IP (protects against DNS-rebinding pages). The two actions (dismiss, and bring up a worker's window) are POST-only and each requires a same-origin `Origin`, a JSON body and its own custom header, so other websites can't trigger them; there's no CORS. The page has a strict Content-Security-Policy and isn't cached.
 - The only things the phone can make happen are dismissing a current DONE row and bringing up a current worker's existing window. Both name the worker by a random token from the current board; the laptop looks up the worker and picks the window itself. The browser can't name files, paths, programs, commands, process IDs or URLs; extra fields are ignored.
-- The phone receives only what it displays: friendly name, state, when the state began, the short error type, a creature number (0–64), and random-looking tokens. No session IDs, process IDs, folder paths, window data, prompts or Claude output. Nothing is logged.
+- The phone receives only what it displays: friendly name, state, when the state began, the short error type, a creature number (0–103), that worker's context-window percentage and whether it's old, and random-looking tokens. No session IDs, process IDs, folder paths, window data, prompts or Claude output. Nothing is logged.
 - No accounts, cloud hosting, database or paid services.
 
 ### Turn it off / remove it
@@ -384,6 +415,7 @@ Each session file contains only:
 
 The other files Claude Status writes, all on your computer only:
 
+- `state\context\<session-id>.json` (written by `statusline.ps1`, read only for the phone's *Show context*): `{"v":1,"pct":42.5,"size":200000,"at":"…"}`, that session's context-window percentage, size and when Claude Code reported it. A reading is removed a day after its session has left the board.
 - `state\windows.json`: for sessions in an app with several windows (e.g. two VS Code windows), the window that was in front when you last prompted that session: `{"<session-id>": {"hwnd": 67076, "pid": 21748, "started": "…"}}`. That's a window handle number plus the owning process ID and start time, with no window title or content. Entries are removed when their session disappears from the board.
 - `position.txt` (window position), `config.json` (your settings), the `settings.json` backups the installer/uninstaller make next to your settings, and, only if you turn on debugging, `debug.log`.
 
@@ -624,6 +656,7 @@ It does **not** delete your cloned repository, Claude Code, the `.claude` folder
 - **Clicking a worker** focuses its top-level window, not a specific VS Code editor tab or Windows Terminal tab. With several VS Code windows open, a session becomes clickable once you've sent it a prompt while Claude Status was running (see [Clicking a worker](#clicking-a-worker)). Sessions that have ended can't be focused.
 - A DONE worker stays on the Worker Board until you dismiss it, even after its session has closed; with Compact as your only view, dismiss old ones occasionally from the Worker Board (Compact counts them in *(N sessions)*).
 - **Claude Usage** only knows what Claude Code has reported on this computer. With no recent Claude Code activity it shows the last figures as *Stale*; usage on claude.ai or other devices appears once Claude Code reports again. The docs don't say whether the VS Code extension runs status line commands. If it doesn't, sessions there only update the `/usage` cache. The `/usage` cache is undocumented and may change with Claude Code updates.
+- **Phone context bars** need the status line, which the VS Code extension doesn't run: workers there show *Context unavailable*. In the CLI a reading arrives with each Claude reply, so it isn't updated mid-reply while a long tool call runs.
 - If a session ends abruptly without its Claude process exiting, its last WORKING / NEEDS YOU / ERROR state lingers until `staleHours` passes.
 - Each hook call starts a short-lived `powershell.exe` (about 0.3–0.5 s). The blocking ones (`UserPromptSubmit`, `Stop`, `StopFailure`, `Notification`, `SessionEnd`) add that small delay; the rest run in the background.
 
@@ -655,6 +688,7 @@ src/
   phone.html/.css/.js    the phone page (List and Creatures views; the creature pixel art is drawn by phone.js)
   usage.cs               Claude Usage: reads the status line data and Claude Code's /usage cache; details window
   statusline.ps1         Claude Code status line command: keeps only the rate_limits numbers for Claude Usage
+                         and each session's context-window percentage for the phone's context bars
   phone-setup.ps1        turn the phone dashboard on/off and set up `tailscale serve`
   indicator.ps1          compiles indicator.cs with Add-Type and runs it
   start-indicator.vbs    launches the indicator with no console window
@@ -680,7 +714,7 @@ powershell -ExecutionPolicy Bypass -File .\tests\run-tests.ps1 -E2E     # + one 
 powershell -ExecutionPolicy Bypass -File .\tests\run-tests.ps1 -Browser # + phone page in headless Chrome at Android sizes (needs Node.js 22+)
 ```
 
-They cover the hook lifecycle and privacy (run as real child processes with secret-laden inputs), aliases, numbering, both orderings, timers, v1 compatibility, DONE retention and dismissal, layout at 100–200 % DPI with 1/6/90 workers, worker → window identification (terminals, multi-window apps, closed windows, reused process IDs), focus stealing, and install → update → re-install → uninstall against a temporary Claude config folder. The phone dashboard tests cover desktop/phone parity, dismissal in both directions, the delayed-dismiss race and 400 randomized hook-write/dismiss interleavings, malformed and cross-site requests, Host/Origin checks, start/stop/port conflicts, and that phone.js formats timers exactly like the desktop. For the Creatures view they check that a tap reaches the desktop's own click-on-a-worker routine for exactly that worker (and that a desktop click uses the same routine), with window lookup and activation **mocked** so the tests never move your focus. They also check that rapid taps make one request, that taps and **×** never trigger each other, stale and malformed references, the action's request protections, and stable, distinct creature looks. `-Browser` additionally drives the real page at 320/360/412 px widths in both views through disconnects, a 502 from `tailscale serve`, resume and recovery, reduced motion, keyboard use and background pausing, saving `phone-*.png` screenshots. These are emulated phones; Tailscale itself and a physical Android device are not part of the automated tests. `-RenderDir <folder>` saves PNG renders of the board for a visual check.
+They cover the hook lifecycle and privacy (run as real child processes with secret-laden inputs), aliases, numbering, both orderings, timers, v1 compatibility, DONE retention and dismissal, layout at 100–200 % DPI with 1/6/90 workers, worker → window identification (terminals, multi-window apps, closed windows, reused process IDs), focus stealing, and install → update → re-install → uninstall against a temporary Claude config folder. The phone dashboard tests cover desktop/phone parity, dismissal in both directions, the delayed-dismiss race and 400 randomized hook-write/dismiss interleavings, malformed and cross-site requests, Host/Origin checks, start/stop/port conflicts, and that phone.js formats timers exactly like the desktop. For the Creatures view they check that a tap reaches the desktop's own click-on-a-worker routine for exactly that worker (and that a desktop click uses the same routine), with window lookup and activation **mocked** so the tests never move your focus. They also check that rapid taps make one request, that taps and **×** never trigger each other, stale and malformed references, the action's request protections, and stable, distinct, mostly orange creature looks (the first always orange). Context bars: per-session readings for two workers of one project, a real 0%, missing / malformed / post-`/compact` (unknown) / lower-after-compaction / changed-capacity / old readings, and that a context update leaves state files, timer starts, order, looks and dismiss tokens untouched and never revives a dismissed worker. Sleeping uses a fixed clock for just before, exactly at and after 3 hours, and checks it never applies to WORKING / NEEDS YOU / ERROR. `-Browser` additionally drives the real page at 320/360/390/412 px widths in both views, with two columns and Compact's three, with and without context bars (equal columns, nothing overlapping or cut off, crisp centred sprites), the Compact / Show context switches (saved per phone, no reconnect or rebuild, List unaffected), a creature falling asleep by itself at the 3-hour mark, staying asleep across background / reload / view switch / reduced motion, and waking on a new prompt, through disconnects, a 502 from `tailscale serve`, resume and recovery, reduced motion, keyboard use and background pausing, saving `phone-*.png` screenshots. These are emulated phones; Tailscale itself and a physical Android device are not part of the automated tests. `-RenderDir <folder>` saves PNG renders of the board for a visual check.
 
 ## Ideas for later
 

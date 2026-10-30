@@ -655,7 +655,7 @@ Check 'error type is the desktop short form (authentication_failed -> auth)' ((R
 Check 'only DONE rows carry a dismiss token' (((Row $bd 'Website').d -match '^[A-Za-z0-9_-]{22}$') -and @($bd.rows | Where-Object { $_.s -ne 'DONE' -and $_.d -ne '' }).Count -eq 0)
 $rawJson = (Req $pp 'GET' '/api/board').Body
 $fields = ($bd.rows | ForEach-Object { ($_.PSObject.Properties.Name) -join ',' } | Sort-Object -Unique) -join ';'
-Check 'privacy: rows contain only k,n,s,t,e,d,c; board only v,now,summary,text,rows,usage' ($fields -eq 'k,n,s,t,e,d,c' -and (($bd.PSObject.Properties.Name) -join ',') -eq 'v,now,summary,text,rows,usage') "$fields"
+Check 'privacy: rows contain only k,n,s,t,e,d,c,x; board only v,now,summary,text,rows,usage' ($fields -eq 'k,n,s,t,e,d,c,x' -and (($bd.PSObject.Properties.Name) -join ',') -eq 'v,now,summary,text,rows,usage') "$fields"
 Check 'privacy: no session IDs, folder names, process IDs or paths in the phone data' ($rawJson -notmatch '"(ny|er|b1|b2|web)"' -and $rawJson -notmatch 'Toah_Nipi|Users|claude_pid|\\\\' -and $rawJson -notmatch "\b$PID\b")
 $f.SetSetting('workerSort', 'recent')
 $bd = Api $pp
@@ -764,6 +764,65 @@ $before = @{}; foreach ($w in $bd.rows) { $before[$w.k] = $w.c }
 Put $root 'b1' 'NEEDS_YOU' 'Toah_Nipi_Booking_Software' 1 30 $PID $me; Put $root 'zz' 'WORKING' 'Another_One' 1 1 $PID $me; $f.ReloadNow()
 $bd = Api $pp
 Check 'looks stay the same when states change and workers come and go' (@($bd.rows | Where-Object { $before.ContainsKey($_.k) -and $before[$_.k] -ne $_.c }).Count -eq 0 -and @($bd.rows | Where-Object { $before.ContainsKey($_.k) }).Count -eq $before.Count)
+$orange = @($bd.rows | Where-Object { [ClaudeStatus.PhoneServer]::IsOrange($_.c) }).Count
+Check 'orange leads the palette: at least half the creatures on the board have an orange body, but not all' ($orange * 2 -ge $bd.rows.Count -and $orange -lt $bd.rows.Count) "$orange of $($bd.rows.Count)"
+$okFirst = $true
+$pq = [THttp]::FreePort()
+$soloRoot = New-PhoneRoot $pq
+$solo = New-Object ClaudeStatus.PhoneServer($soloRoot, $pq, (Dismisser (Join-Path $soloRoot 'state\sessions')), [TFake]::Names(@()))
+$null = $solo.Start()
+foreach ($n in 1..40) {
+    $one = New-Object 'System.Collections.Generic.List[ClaudeStatus.SessionInfo]'
+    $si1 = New-Object ClaudeStatus.SessionInfo; $si1.Id = "first-$n"; $si1.State = 'WORKING'; $si1.Name = "P$n"; $one.Add($si1)
+    $solo.Publish($one, $false, '')
+    if (-not [ClaudeStatus.PhoneServer]::IsOrange((Api $pq).rows[0].c)) { $okFirst = $false }
+}
+$solo.Stop()
+Check 'the first worker on an empty board always gets an orange creature (40 different sessions)' $okFirst
+
+# --- per-worker context window (state\context, from statusline.ps1): telemetry only ---
+$ctxd = Join-Path $root 'state\context'
+function PutCtx([string]$dir, [string]$id, $pct, [int]$agoSec = 0, [long]$size = 200000) {
+    $o = [ordered]@{ v = 1; pct = $pct; size = $size; at = (Iso ([DateTime]::UtcNow.AddSeconds(-$agoSec))) }
+    [IO.File]::WriteAllText((Join-Path $dir "$id.json"), ($o | ConvertTo-Json -Compress))
+}
+Put $root 'b1' 'WORKING' 'Toah_Nipi_Booking_Software' 272 30 $PID $me
+Put $root 'b2' 'WORKING' 'Toah_Nipi_Booking_Software' 68 20 $PID $me
+Put $root 'cd' 'DONE' 'Ctx_Done' 600 3
+$f.ReloadNow()
+$bd0 = Api $pp
+$files0 = @{}; foreach ($id in 'b1', 'b2', 'ny', 'er', 'cd') { $files0[$id] = Get-Content (SessFile $root $id) -Raw }
+$since0 = @{}; foreach ($w in $f.Workers) { $since0[$w.Id] = $w.StateSince.Ticks.ToString() + '/' + $w.Updated.Ticks }
+Check 'context: no reading yet -> x is null (shown as unavailable, never 0%)' (@($bd0.rows | Where-Object { $null -ne $_.x }).Count -eq 0)
+PutCtx $ctxd 'b1' 12.5; PutCtx $ctxd 'b2' 71; PutCtx $ctxd 'ny' 0; PutCtx $ctxd 'er' $null; [IO.File]::WriteAllText((Join-Path $ctxd 'cd.json'), '{not json')
+$f.PublishContextNow()
+$bd1 = Api $pp
+$x1 = (Row $bd1 'Booking Software #1').x; $x2 = (Row $bd1 'Booking Software #2').x
+Check 'context: two workers in the same project each get their own session''s reading' ($x1.p -eq 12.5 -and $x2.p -eq 71 -and $x1.o -eq $false -and $x2.o -eq $false) "$($x1 | ConvertTo-Json -Compress) $($x2 | ConvertTo-Json -Compress)"
+Check 'context: a real 0% is sent as 0; unknown (after /compact) and malformed readings are sent as no reading' ((Row $bd1 'Portal').x.p -eq 0 -and $null -eq (Row $bd1 'Analytics').x -and $null -eq (Row $bd1 'Ctx Done').x)
+Check 'context: only p and o reach the phone' ((((Row $bd1 'Booking Software #1').x.PSObject.Properties.Name) -join ',') -eq 'p,o')
+$same = $true
+for ($i = 0; $i -lt $bd0.rows.Count; $i++) { $a0 = $bd0.rows[$i]; $a1 = $bd1.rows[$i]; if ($a0.k -ne $a1.k -or $a0.t -ne $a1.t -or $a0.d -ne $a1.d -or $a0.s -ne $a1.s -or $a0.c -ne $a1.c -or $a0.n -ne $a1.n) { $same = $false } }
+Check 'context update: new board version, but same rows, order, states, timer starts, looks and dismiss tokens' ($bd1.v -gt $bd0.v -and $same -and $bd1.rows.Count -eq $bd0.rows.Count)
+$filesSame = @($files0.Keys | Where-Object { (Get-Content (SessFile $root $_) -Raw) -ne $files0[$_] }).Count -eq 0
+$sinceSame = @($f.Workers | Where-Object { $since0[$_.Id] -ne ($_.StateSince.Ticks.ToString() + '/' + $_.Updated.Ticks) }).Count -eq 0
+Check 'context update: session state files and the desktop''s lifecycle times are untouched' ($filesSame -and $sinceSame)
+PutCtx $ctxd 'b1' 3.5
+$f.PublishContextNow(); $bd2 = Api $pp
+Check 'context: a lower reading after compaction replaces the higher one' ((Row $bd2 'Booking Software #1').x.p -eq 3.5)
+PutCtx $ctxd 'b2' 40 600
+$f.PublishContextNow(); $bd2 = Api $pp
+Check 'context: a reading from before the worker''s latest activity is marked old' ((Row $bd2 'Booking Software #2').x.p -eq 40 -and (Row $bd2 'Booking Software #2').x.o -eq $true)
+PutCtx $ctxd 'cd' 55
+$f.PublishContextNow(); $cdRow = Row (Api $pp) 'Ctx Done'
+Check 'context: an idle DONE worker''s last reading stays current (nothing has happened since)' ($cdRow.x.p -eq 55 -and $cdRow.x.o -eq $false)
+$r = Dis $pp $cdRow.k (Row $bd0 'Ctx Done').d
+Check 'context: a dismiss token from before the context update still dismisses that DONE worker' ($r.Result -eq 'dismissed') $r.Body
+$f.ReloadNow(); PutCtx $ctxd 'cd' 60; $f.PublishContextNow()
+Check 'context: a reading for a dismissed worker does not bring it back' (-not (Row (Api $pp) 'Ctx Done') -and -not ($f.Workers | Where-Object Id -eq 'cd'))
+[IO.File]::SetLastWriteTimeUtc((Join-Path $ctxd 'cd.json'), [DateTime]::UtcNow.AddHours(-30))
+$f.PublishContextNow()
+Check 'context: readings of sessions gone from the board are cleaned up after a day' (-not (Test-Path (Join-Path $ctxd 'cd.json')) -and (Test-Path (Join-Path $ctxd 'b1.json')))
 
 # --- tap a creature: the desktop's own click action, with window lookup/activation mocked ---
 $null = $f.Handle
@@ -979,7 +1038,19 @@ for(let l=0;l<f.HATS.length*f.BODIES.length;l++){const walk=a=>a.forEach(x=>Arra
 process.stdout.write(JSON.stringify({hats:f.HATS.length,bodies:f.BODIES.length,bad:bad.slice(0,5)}));
 '@ -replace "`r?`n", ''
     $a = & $node.Source -e $art (Join-Path $src 'phone.js') | ConvertFrom-Json
-    Check 'creature art: 13 hats x 5 bodies (= the laptop''s look numbers), every square inside the 16x16 grid with a colour' ($a.hats -eq [ClaudeStatus.PhoneServer]::Hats -and $a.hats * $a.bodies -eq [ClaudeStatus.PhoneServer]::Looks -and @($a.bad).Count -eq 0) (@($a.bad) -join '; ')
+    Check 'creature art: 13 hats x 8 bodies (= the laptop''s look numbers), every square inside the 16x16 grid with a colour' ($a.hats -eq [ClaudeStatus.PhoneServer]::Hats -and $a.bodies -eq [ClaudeStatus.PhoneServer]::Bodies -and $a.hats * $a.bodies -eq [ClaudeStatus.PhoneServer]::Looks -and @($a.bad).Count -eq 0) (@($a.bad) -join '; ')
+    # sleeping (a look layered on DONE, from 3 hours after it finished) and the context line, with a fixed clock
+    $slp = @'
+const f=require(process.argv[1]);const H=f.SLEEP_MS,t=1e12;
+const r={before:f.isAsleep('DONE',t,t+H-1),exact:f.isAsleep('DONE',t,t+H),after:f.isAsleep('DONE',t,t+H+86400e3),working:f.isAsleep('WORKING',t,t+10*H),needs:f.isAsleep('NEEDS_YOU',t,t+10*H),error:f.isAsleep('ERROR',t,t+10*H),notime:f.isAsleep('DONE',undefined,t),
+z:f.contextInfo({p:0,o:false}).text,tiny:f.contextInfo({p:0.2,o:false}).text,n:f.contextInfo({p:42.4,o:false}).text,old:f.contextInfo({p:42,o:true}).text,none:f.contextInfo(null).text,bad:f.contextInfo({p:'x'}).text,neg:f.contextInfo({p:-1}).text,full:f.contextInfo({p:100}).text,np:f.contextInfo(null).p,H:H};
+process.stdout.write(JSON.stringify(r).replace(/[\u007f-￿]/g,ch=>'\\u'+ch.charCodeAt(0).toString(16).padStart(4,'0')));
+'@ -replace "`r?`n", ''
+    $z = & $node.Source -e $slp (Join-Path $src 'phone.js') | ConvertFrom-Json
+    Check 'sleep: DONE just before 3 h awake; exactly 3 h and later asleep (controlled clock)' ($z.H -eq 10800000 -and $z.before -eq $false -and $z.exact -eq $true -and $z.after -eq $true) ($z | ConvertTo-Json -Compress)
+    Check 'sleep: WORKING / NEEDS YOU / ERROR never fall asleep, however long unchanged' ($z.working -eq $false -and $z.needs -eq $false -and $z.error -eq $false -and $z.notime -eq $false)
+    Check 'context line: 0% is 0%, tiny is <1%, whole percents like the usage figures, old marked, missing/malformed = "Context unavailable" with no fill' (
+        $z.z -eq 'Context 0%' -and $z.tiny -eq 'Context <1%' -and $z.n -eq 'Context 42%' -and $z.old -eq ('Context 42% ' + [char]0x00B7 + ' old') -and $z.none -eq 'Context unavailable' -and $z.bad -eq 'Context unavailable' -and $z.neg -eq 'Context unavailable' -and $z.full -eq 'Context 100%' -and $null -eq $z.np) ($z | ConvertTo-Json -Compress)
 }
 
 # ======================================================================================
@@ -1067,6 +1138,46 @@ Check 'spend limit (Claude apps gateway): percent, dollars and period kept' ($sp
 $r = Invoke-StatusLine @{ rate_limits = @{ five_hour = @{ used_percentage = 30; resets_at = $r5 } } }
 Check 'a status line of your own still runs, and its output is what Claude Code shows' ($r.Out -eq 'my-own-status-line' -and (Get-Content $feedFile -Raw | ConvertFrom-Json).windows.five_hour.pct -eq 30) $r.Out
 Remove-Item (Join-Path $slRoot 'statusline-chain.json')
+
+# --- statusline.ps1: per-session context window (documented context_window fields) ---
+$ctxDir = Join-Path $slRoot 'state\context'
+function CtxFile([string]$sid) { $p = Join-Path $ctxDir "$sid.json"; if (Test-Path $p) { Get-Content $p -Raw | ConvertFrom-Json } else { $null } }
+function CW($pct, [long]$size = 200000, $cu = 'default') {
+    $o = [ordered]@{ total_input_tokens = 12345; total_output_tokens = 678; context_window_size = $size; used_percentage = $pct; remaining_percentage = $(if ($null -ne $pct) { 100 - $pct } else { $null }) }
+    $o.current_usage = if ($cu -is [string] -and $cu -eq 'default') { @{ input_tokens = 10; output_tokens = 5; cache_creation_input_tokens = 20; cache_read_input_tokens = 30 } } else { $cu }
+    return $o
+}
+Remove-Item $ctxDir -Recurse -Force -ErrorAction SilentlyContinue
+$r = Invoke-StatusLine @{ session_id = 'sess-A'; cwd = 'C:\Users\Someone\SECRET-CWD\Same_Project'; transcript_path = 'C:\SECRET-TRANSCRIPT.jsonl'; model = @{ display_name = 'Opus' }; context_window = (CW 42.5); rate_limits = @{ five_hour = @{ used_percentage = 31; resets_at = $r5 } } }
+$r2 = Invoke-StatusLine @{ session_id = 'sess-B'; cwd = 'C:\Users\Someone\SECRET-CWD\Same_Project'; context_window = (CW 7) }
+$ca = CtxFile 'sess-A'; $cb2 = CtxFile 'sess-B'
+Check 'context: each session gets its own reading (two sessions in the same folder never share one)' ($ca.pct -eq 42.5 -and $ca.size -eq 200000 -and $cb2.pct -eq 7 -and $r.Code -eq 0 -and $r2.Code -eq 0) "$($ca | ConvertTo-Json -Compress) $($cb2 | ConvertTo-Json -Compress)"
+$ctxText = (Get-Content (Join-Path $ctxDir 'sess-A.json') -Raw)
+Check 'context: only v, pct, size and a time are stored (no tokens, paths, model, transcript)' ((($ca.PSObject.Properties.Name) -join ',') -eq 'v,pct,size,at' -and $ctxText -notmatch 'SECRET|Opus|12345|Same_Project')
+Check 'context: the usage feed and status line output are unchanged alongside it' ((Get-Content $feedFile -Raw | ConvertFrom-Json).windows.five_hour.pct -eq 31 -and $r.Out -match '^5h 31%')
+$null = Invoke-StatusLine @{ session_id = 'sess-A'; context_window = (CW 0) }
+Check 'context: a genuine 0% is stored as 0 (not as missing)' ((CtxFile 'sess-A').pct -eq 0 -and $null -ne (CtxFile 'sess-A').pct)
+$null = Invoke-StatusLine @{ session_id = 'sess-A'; context_window = (CW 88) }
+$null = Invoke-StatusLine @{ session_id = 'sess-A'; context_window = (CW 88 200000 $null) }
+Check 'context: right after /compact (current_usage null) it is unknown, never the pre-compaction value' ($null -eq (CtxFile 'sess-A').pct) ((CtxFile 'sess-A') | ConvertTo-Json -Compress)
+$null = Invoke-StatusLine @{ session_id = 'sess-A'; context_window = (CW 19) }
+Check 'context: after compaction the lower reading replaces the old one' ((CtxFile 'sess-A').pct -eq 19)
+$null = Invoke-StatusLine @{ session_id = 'sess-A'; context_window = (CW 19 1000000) }
+Check 'context: a change of capacity (200k -> 1M) is recorded with the reported percentage' ((CtxFile 'sess-A').pct -eq 19 -and (CtxFile 'sess-A').size -eq 1000000)
+$null = Invoke-StatusLine @{ session_id = 'sess-C'; context_window = (CW $null 200000 @{ input_tokens = 10000; output_tokens = 99999; cache_creation_input_tokens = 15000; cache_read_input_tokens = 25000 }) }
+Check 'context: used_percentage missing but current_usage present: the documented input-only formula (output tokens excluded)' ((CtxFile 'sess-C').pct -eq 25) ((CtxFile 'sess-C') | ConvertTo-Json -Compress)
+$null = Invoke-StatusLine @{ session_id = 'sess-D'; context_window = (CW $null 200000 $null) }
+Check 'context: nothing reported yet (start of a session): stored as unknown, not 0' ((Test-Path (Join-Path $ctxDir 'sess-D.json')) -and $null -eq (CtxFile 'sess-D').pct)
+$null = Invoke-StatusLine @{ session_id = 'sess-E'; context_window = @{ used_percentage = 'lots'; context_window_size = 'big' } }
+$null = Invoke-StatusLine @{ session_id = 'sess-F'; model = @{ display_name = 'Opus' } }
+$null = Invoke-StatusLine @{ context_window = (CW 50) }
+$null = Invoke-StatusLine 'not json {'
+Check 'context: malformed values stored as unknown; no context_window / no session_id / bad input: nothing written' ($null -eq (CtxFile 'sess-E').pct -and -not (Test-Path (Join-Path $ctxDir 'sess-F.json')) -and @(Get-ChildItem $ctxDir -Filter *.json).Count -eq 5)
+$null = Invoke-StatusLine @{ session_id = '..\..\evil/x'; context_window = (CW 5) }
+Check 'context: the session id is made file-name safe like hook.ps1 does (no path tricks)' ((Test-Path (Join-Path $ctxDir '______evil_x.json')) -and -not (Test-Path (Join-Path $slCfg 'evil')))
+$t1 = (CtxFile 'sess-B').at
+$null = Invoke-StatusLine @{ session_id = 'sess-B'; context_window = (CW 7) }
+Check 'context: an identical reading within a minute leaves the file alone' ((CtxFile 'sess-B').at -eq $t1)
 
 # --- UsageMonitor: sources, accounts, freshness, failures (temporary files; no watchers or timers) ---
 $uCfg = Join-Path $tmp 'u-cfg'; $uRoot = Join-Path $uCfg 'status-indicator'
@@ -1296,17 +1407,27 @@ else {
                     'start'               { $f.SetSetting('phoneDashboard', $true) }
                     'clear*'              { Get-ChildItem (Join-Path $root 'state\sessions') -Filter *.json | Remove-Item; $f.ReloadNow() }
                     'repopulate'          {
-                        Put $root 'pny' 'NEEDS_YOU' 'Toah_Nipi_Portal' 130 50 $PID $me
+                        Put $root 'pny' 'NEEDS_YOU' 'Toah_Nipi_Portal' (4 * 3600) 300 $PID $me   # waiting 4 h: never asleep
                         Put $root 'pe1' 'ERROR' 'A_Very_Long_Project_Folder_Name_That_Keeps_Going_And_Going' 200 45 $PID $me
                         $j = Get-Content (SessFile $root 'pe1') -Raw | ConvertFrom-Json; $j.detail = 'rate_limit'; [IO.File]::WriteAllText((SessFile $root 'pe1'), ($j | ConvertTo-Json -Compress))
-                        Put $root 'pe2' 'ERROR' 'Analytics' 400 44 $PID $me
+                        Put $root 'pe2' 'ERROR' 'Analytics' (4 * 3600) 299 $PID $me                 # failed 4 h ago: never asleep
                         Put $root 'pb1' 'WORKING' 'Toah_Nipi_Booking_Software' 272 30 $PID $me
                         Put $root 'pb2' 'WORKING' 'Toah_Nipi_Booking_Software' 68 20 $PID $me
                         foreach ($i in 1..3) { Put $root "px$i" 'WORKING' "Side_Project_$i" (30 * $i) (60 + $i) $PID $me }
                         Put $root 'pd1' 'DONE' 'Toah_Nipi_Website' 30 60
                         Put $root 'pd2' 'DONE' 'Guest_Booking_Form' 360 59
+                        Put $root 'ps1' 'DONE' 'Sleepy_Project' (3 * 3600 + 600) 298              # done 3 h 10 m ago: asleep
+                        Put $root 'ps2' 'DONE' 'Almost_Asleep' 3600 297
+                        Put $root 'plong' 'WORKING' 'Long_Runner' (5 * 3600) 296 $PID $me       # working 5 h: never asleep
+                        # context readings (as statusline.ps1 writes them): two workers of one project differ,
+                        # a real 0%, a nearly full one, an old one; the rest have none ("Context unavailable")
+                        $pc = Join-Path $root 'state\context'
+                        PutCtx $pc 'pb1' 31; PutCtx $pc 'pb2' 76.4; PutCtx $pc 'pny' 0; PutCtx $pc 'pe1' 97; PutCtx $pc 'ps1' 50; PutCtx $pc 'px1' 12 3600
                         $f.ReloadNow()
                     }
+                    'sleep-edge'          { Put $root 'ps2' 'DONE' 'Almost_Asleep' (3 * 3600 - 4) 297; $f.ReloadNow() }   # 4 s before the 3 h mark
+                    'wake'                { Put $root 'ps1' 'WORKING' 'Sleepy_Project' 0 298 $PID $me; $f.ReloadNow() }    # a new prompt
+                    'ctx-update'          { PutCtx (Join-Path $root 'state\context') 'pb2' 18; PutCtx (Join-Path $root 'state\context') 'ps2' 64; $f.PublishContextNow() }
                     'pets-change'         { Put $root 'pb1' 'NEEDS_YOU' 'Toah_Nipi_Booking_Software' 1 30 $PID $me; Put $root 'px1' 'DONE' 'Side_Project_1' 0 61; $f.ReloadNow() }
                     'focus-log*'          { [IO.File]::WriteAllText((Join-Path $cdir 'focus-log.txt'), ($script:browserFocus -join ',')) }
                     'focus-clear*'        { $script:browserFocus.Clear() }
@@ -1451,11 +1572,11 @@ $pjs = (Get-Content (Join-Path $src 'phone.js') -Raw) + (Get-Content (Join-Path 
 $pjsNoSvgNs = $pjs.Replace("'http://www.w3.org/2000/svg'", "''")   # the SVG namespace name is an identifier, not a request
 Check 'phone page: no notifications, sounds, vibration, speech, service worker, other storage or outside URLs' ($pjsNoSvgNs -cnotmatch 'Notification|vibrate|Audio|speechSynthesis|serviceWorker|sessionStorage|indexedDB|document\.cookie|innerHTML|https?://')
 $storage = @([regex]::Matches($pjs, 'localStorage\.\w+\([^)]*\)') | ForEach-Object { $_.Value })
-Check 'phone page stores only the List / Creatures choice and the Show usage / expanded choices' ($storage.Count -eq 6 -and @($storage | Where-Object { $_ -notmatch '^localStorage\.(getItem|setItem)\((VIEW_KEY(, view)?|USAGE_KEY(, .*)?|USAGE_OPEN_KEY(, .*)?)\)$' }).Count -eq 0 -and $pjs -match "VIEW_KEY = 'claudeStatus\.view'" -and $pjs -match "USAGE_KEY = 'claudeStatus\.usage', USAGE_OPEN_KEY = 'claudeStatus\.usageOpen'") ($storage -join '; ')
+Check 'phone page stores only the List / Creatures choice, the Show usage / expanded choices and the Compact / Show context choices' ($storage.Count -eq 10 -and @($storage | Where-Object { $_ -notmatch '^localStorage\.(getItem|setItem)\((VIEW_KEY(, view)?|USAGE_KEY(, .*)?|USAGE_OPEN_KEY(, .*)?|COMPACT_KEY(, .*)?|CONTEXT_KEY(, .*)?)\)$' }).Count -eq 0 -and $pjs -match "COMPACT_KEY = 'claudeStatus\.compact', CONTEXT_KEY = 'claudeStatus\.context'" -and $pjs -match "VIEW_KEY = 'claudeStatus\.view'" -and $pjs -match "USAGE_KEY = 'claudeStatus\.usage', USAGE_OPEN_KEY = 'claudeStatus\.usageOpen'") ($storage -join '; ')
 Check 'phone page only calls its own relative API' ((([regex]::Matches($pjs, "'(api/[a-z-]*)") | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique) -join ',') -eq 'api/board,api/dismiss,api/focus,api/usage-refresh' -and $pjs -cnotmatch 'XMLHttpRequest|WebSocket|EventSource|sendBeacon|fetch\(\s*[''"](?!api/)')
 $usageSrc = (Get-Content (Join-Path $src 'usage.cs') -Raw) + (Get-Content (Join-Path $src 'statusline.ps1') -Raw)
 Check 'usage: never reads Claude credentials or tokens, never calls Anthropic' ($usageSrc -notmatch '(?i)\.credentials|accessToken|refreshToken|api/oauth|anthropic\.com|Authorization|Bearer')
-Check 'statusline.ps1 only uses rate_limits from the session data' ((Get-Content (Join-Path $src 'statusline.ps1') -Raw) -notmatch '\$in\.(cwd|session_id|transcript_path|model|cost|workspace|output_style)')
+Check 'statusline.ps1 only uses rate_limits, context_window and session_id from the session data' ((Get-Content (Join-Path $src 'statusline.ps1') -Raw) -notmatch '\$in\.(cwd|transcript_path|model|cost|workspace|output_style|prompt_id|prompt_cache)')
 $setup = Get-Content (Join-Path $src 'phone-setup.ps1') -Raw
 Check 'phone-setup.ps1 never runs Funnel and only proxies to 127.0.0.1' ($setup -notmatch '(?i)[''"]funnel[''"]|\bfunnel\s+(on|--)' -and @([regex]::Matches($setup, 'https?://[^\s''"`]+') | Where-Object { $_.Value -notmatch '^http://(127\.0\.0\.1|localhost):' }).Count -eq 0)
 Check 'indicator never reads window titles' ($code -notmatch 'GetWindowText' -and $pcs -notmatch 'GetWindowText')

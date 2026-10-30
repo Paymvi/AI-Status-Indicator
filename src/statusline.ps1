@@ -4,7 +4,10 @@
 # kept: for each window (five_hour, seven_day, and spend_limit behind a Claude apps gateway) the percent
 # used and the reset time. They go to state\usage-statusline.json, tagged with a one-way hash of the
 # account Claude Code is signed in with, so the indicator never shows one account's usage as another's.
-# Nothing else from stdin (paths, session, model, costs, ...) is stored, and nothing is sent anywhere.
+# For the phone's per-worker context bars it also keeps the documented "context_window" fullness of this
+# session (used_percentage and context_window_size) in state\context\<session id>.json, the same file name
+# hook.ps1 uses in state\sessions. Nothing else from stdin (paths, model, costs, ...) is stored, and
+# nothing is sent anywhere.
 #
 # Output (what Claude Code shows as the status line): your own previous status line command's output, if
 # you had one (install.ps1 saved it as statusline-chain.json); otherwise a short usage summary.
@@ -86,9 +89,50 @@ try {
     $in = $null
     if ($raw) { $i = $raw.IndexOf('{'); if ($i -ge 0) { $in = $raw.Substring($i) | ConvertFrom-Json } }
     $rl = if ($in -and $in.PSObject.Properties['rate_limits']) { $in.rate_limits } else { $null }
+    $cw = if ($in -and $in.PSObject.Properties['context_window']) { $in.context_window } else { $null }
+    $sid = if ($in -and $in.PSObject.Properties['session_id'] -and $in.session_id) { ([string]$in.session_id) -replace '[^A-Za-z0-9_-]', '_' } else { '' }
     $in = $null   # nothing else from the session data is used
 
     $now = [DateTime]::UtcNow
+
+    # Context window of this session. used_percentage is Claude Code's own figure. current_usage is null
+    # before the first API call and again right after /compact (documented), so the fullness isn't known
+    # then: that is recorded as unknown (pct null), never as 0 and never as the pre-compaction value.
+    if ($cw -and $sid -and $sid.Length -le 128) {
+        $pct = Get-Num $cw 'used_percentage'
+        $size = Get-Num $cw 'context_window_size'
+        $cu = if ($cw.PSObject.Properties['current_usage']) { $cw.current_usage } else { 'absent' }
+        if ($null -eq $cu) { $pct = $null }
+        elseif ($null -eq $pct -and $cu -ne 'absent' -and $size -gt 0) {
+            # the documented input-only formula behind used_percentage
+            $tok = 0; $okTok = $true
+            foreach ($n in 'input_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens') { $t = Get-Num $cu $n; if ($null -eq $t) { $okTok = $false } else { $tok += $t } }
+            if ($okTok) { $pct = 100 * $tok / $size }
+        }
+        if ($null -ne $pct -and ($pct -lt 0 -or [double]::IsNaN($pct))) { $pct = $null }
+        $ctx = [ordered]@{ v = 1; pct = $(if ($null -ne $pct) { [Math]::Round([Math]::Min($pct, 100), 1) } else { $null }); size = $(if ($size -gt 0) { [long]$size } else { $null }); at = $now.ToString('o') }
+        $cdir = Join-Path $root 'state\context'
+        $cfile = Join-Path $cdir ($sid + '.json')
+        $write = $true
+        try {
+            if (Test-Path -LiteralPath $cfile) {
+                $old = [IO.File]::ReadAllText($cfile) | ConvertFrom-Json
+                # same reading within the last minute: leave the file alone (fewer writes, same freshness)
+                if ($old.pct -eq $ctx.pct -and $old.size -eq $ctx.size -and ($now - [DateTime]::Parse([string]$old.at).ToUniversalTime()).TotalSeconds -lt 60) { $write = $false }
+            }
+        } catch {}
+        if ($write) {
+            if (-not (Test-Path -LiteralPath $cdir)) { $null = New-Item -ItemType Directory -Force -Path $cdir }
+            $tmp = Join-Path $cdir ($sid + '.' + [Guid]::NewGuid().ToString('N') + '.tmp')
+            [IO.File]::WriteAllText($tmp, ($ctx | ConvertTo-Json -Compress), (New-Object System.Text.UTF8Encoding $false))
+            try {
+                for ($i = 0; $i -lt 10; $i++) {
+                    try { if (Test-Path -LiteralPath $cfile) { [IO.File]::Replace($tmp, $cfile, [NullString]::Value) } else { [IO.File]::Move($tmp, $cfile) }; break }
+                    catch { Start-Sleep -Milliseconds 15 }
+                }
+            } finally { if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue } }
+        }
+    }
     $seen = [ordered]@{}
     if ($rl) {
         foreach ($name in 'five_hour', 'seven_day', 'spend_limit') {

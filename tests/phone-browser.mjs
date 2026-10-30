@@ -267,9 +267,10 @@ try {
   const sw = await ev(`({ conn: ${connText}, names: [...document.querySelectorAll('#pets .cname')].map(n => n.textContent).join('|'), pressed: document.getElementById('view-creatures').getAttribute('aria-pressed'), saved: localStorage.getItem('claudeStatus.view') })`);
   check('toggle to Creatures: same workers, names, #n and order as the list; still LIVE; choice saved', switched && sw.conn === 'LIVE' && sw.names === listNames && sw.pressed === 'true' && sw.saved === 'creatures', JSON.stringify(sw));
 
-  const PETS = `(async () => {
+  // cols: 2 (default) or 3 (Compact); ctx: Show context on
+  const PETS = (cols = 2, ctx = false) => `(async () => {
     const api = await (await fetch('api/board', { cache: 'no-store' })).json();
-    const de = document.documentElement, problems = [];
+    const de = document.documentElement, problems = [], cols = ${cols}, ctx = ${ctx};
     if (de.scrollWidth > innerWidth || document.body.scrollWidth > innerWidth) problems.push('horizontal scroll ' + de.scrollWidth + '>' + innerWidth);
     const cards = [...document.querySelectorAll('#pets .card:not(.placeholder)')];
     const names = cards.map(c => c.querySelector('.cname').textContent.replace(/\\u00a0/g, ' ')).join('|');
@@ -292,27 +293,62 @@ try {
       if (parseFloat(getComputedStyle(name).fontSize) < 15 || parseFloat(getComputedStyle(st).fontSize) < 14) problems.push(tag + 'tiny text');
       if (pet.tagName !== 'BUTTON' || !pet.textContent.includes(d.n.replace(/ (#\\d+)$/, '\u00a0$1'))) problems.push(tag + 'creature is not a button labelled with the full name');
       if (!svg || svg.getAttribute('shape-rendering') !== 'crispEdges' || svg.getAttribute('viewBox') !== '0 0 16 16') problems.push(tag + 'sprite not crisp');
-      const sz = svg.getBoundingClientRect().width;
-      if (sz % 16 !== 0 || sz < 64) problems.push(tag + 'sprite ' + sz + 'px is not a whole multiple of 16');
+      const sr = svg.getBoundingClientRect(), dp = sr.width / 16 * devicePixelRatio;
+      if (Math.abs(dp - Math.round(dp)) > .02 || sr.width < (cols === 3 ? 48 : 64)) problems.push(tag + 'sprite ' + sr.width + 'px: squares are not whole device pixels / too small');
+      if (Math.abs((sr.left + sr.right) / 2 - (cr.left + cr.right) / 2) > 1.5) problems.push(tag + 'creature not centred');
+      const nr = name.getBoundingClientRect(), tr = st.getBoundingClientRect(), cx = c.querySelector('.cctx'), xr2 = cx.getBoundingClientRect();
+      if (nr.bottom > tr.top + .5) problems.push(tag + 'name overlaps status');
+      if (ctx) {
+        const want = d.x && typeof d.x.p === 'number' ? new RegExp('^Context ' + (d.x.p > 0 && d.x.p < .5 ? '<1%' : Math.round(d.x.p) + '%') + (d.x.o ? ' \u00b7 old' : '') + '$') : /^Context unavailable$/;
+        if (!want.test(cx.textContent)) problems.push(tag + 'context "' + cx.textContent + '" for ' + JSON.stringify(d.x));
+        const fill = cx.querySelector('i').getBoundingClientRect().width;
+        if (!d.x && fill !== 0) problems.push(tag + 'unavailable context has a filled bar');
+        if (xr2.height === 0 || tr.bottom > xr2.top + .5 || xr2.bottom > cr.bottom + .5 || xr2.left < cr.left - .5 || xr2.right > cr.right + .5) problems.push(tag + 'context bar not under the status inside the card');
+        if (parseFloat(getComputedStyle(cx).fontSize) < 13) problems.push(tag + 'context text too small');
+        if (cx.scrollWidth > cx.clientWidth + 1) problems.push(tag + 'context text overflows');
+      } else if (xr2.height !== 0 || cx.offsetParent !== null) problems.push(tag + 'context shown / space kept while off');
+      const asleep = d.s === 'DONE' && api.now - d.t >= 3 * 3600e3;
+      if (c.classList.contains('asleep') !== asleep) problems.push(tag + 'asleep=' + c.classList.contains('asleep') + ' want ' + asleep);
       if (d.s === 'DONE') {
         if (!x) problems.push(tag + 'no dismiss x');
-        else { const xr = x.getBoundingClientRect(); if (xr.width < 44 || xr.height < 44) problems.push(tag + 'x target ' + xr.width + 'x' + xr.height); if (xr.right > cr.right + .5 || xr.top < cr.top - .5) problems.push(tag + 'x outside card'); if (pet.contains(x)) problems.push(tag + 'x inside the creature button'); }
+        else {
+          const xr = x.getBoundingClientRect();
+          if (xr.width < 44 || xr.height < 44) problems.push(tag + 'x target ' + xr.width + 'x' + xr.height);
+          if (xr.right > cr.right + .5 || xr.top < cr.top - .5 || xr.bottom > cr.bottom + .5) problems.push(tag + 'x outside card');
+          if (pet.contains(x)) problems.push(tag + 'x inside the creature button');
+          if (cols === 3 && xr.top < pet.getBoundingClientRect().bottom - .5) problems.push(tag + 'Compact x overlaps the creature button');
+        }
       } else if (x) problems.push(tag + 'x on a ' + d.s + ' card');
     });
+    const lefts = new Set(cards.map(c => Math.round(c.getBoundingClientRect().left)));
+    if (lefts.size !== Math.min(cols, cards.length)) problems.push(lefts.size + ' columns, want ' + cols);
+    const widths = cards.map(c => c.getBoundingClientRect().width);
+    if (Math.max(...widths) - Math.min(...widths) > 1) problems.push('unequal card widths ' + Math.min(...widths) + '-' + Math.max(...widths));
+    const gc = getComputedStyle(document.getElementById('pets')).gridTemplateColumns.split(' ').length;
+    if (gc !== cols) problems.push('grid has ' + gc + ' columns');
     if (hats.size !== cards.length) problems.push('two creatures share a hat');
     const conn = document.getElementById('conn').getBoundingClientRect();
     if (conn.width === 0 || conn.right > innerWidth) problems.push('connection label not visible');
     return { problems, cards: cards.length };
   })()`;
-  for (const [w, h] of [[320, 640], [360, 800], [412, 915]]) {
+  // defaults: two columns, no context bars; the options row only in this view
+  const opt = await ev(`({ compact: document.getElementById('compact-toggle').getAttribute('aria-pressed'), ctx: document.getElementById('context-toggle').getAttribute('aria-pressed'), bar: !document.getElementById('petbar').hidden, cols: getComputedStyle(document.getElementById('pets')).gridTemplateColumns.split(' ').length, saved: [localStorage.getItem('claudeStatus.compact'), localStorage.getItem('claudeStatus.context')] })`);
+  check('Creatures defaults: Compact off (two columns) and Show context off, nothing saved yet; the options row shows in this view', opt.compact === 'false' && opt.ctx === 'false' && opt.bar && opt.cols === 2 && opt.saved[0] === null && opt.saved[1] === null, JSON.stringify(opt));
+  for (const [w, h] of [[320, 640], [360, 800], [390, 844], [412, 915]]) {
     await phone(w, h);
     await c.send('Page.navigate', { url: base });
     const ok = await waitFor(`${connText} === 'LIVE' && !document.getElementById('creatures').hidden && document.querySelectorAll('#pets .card:not(.placeholder)').length > 5`, 8000);
     check(`${w}px creatures: opens in the remembered Creatures view and goes LIVE`, ok, await ev(connText));
-    const l = await ev(PETS);
-    check(`${w}px creatures: same data as the laptop; names wrap inside cards; no horizontal scroll; crisp sprites; distinct hats; 44px x on DONE only`, l.problems.length === 0, l.problems.slice(0, 6).join('; '));
-    await shot(`creatures-${w}`);
+    for (const [cols, ctx] of [[2, false], [2, true], [3, true], [3, false]]) {
+      await ev(`localStorage.setItem('claudeStatus.compact', '${cols === 3 ? 1 : 0}'); localStorage.setItem('claudeStatus.context', '${ctx ? 'shown' : 'hidden'}'); true`);
+      await c.send('Page.navigate', { url: base });
+      await waitFor(`${connText} === 'LIVE' && document.querySelectorAll('#pets .card:not(.placeholder)').length > 5`, 8000);
+      const l = await ev(PETS(cols, ctx));
+      check(`${w}px creatures, ${cols === 3 ? 'Compact (3 columns)' : '2 columns'}${ctx ? ' + context' : ''}: ${cols} equal columns; same data as the laptop; names wrap, nothing cut off or overlapping; no horizontal scroll; crisp centred sprites; sleep; distinct hats; 44px x on DONE only`, l.problems.length === 0, l.problems.slice(0, 6).join('; '));
+      if (ctx || w === 360) await shot(`creatures-${w}-${cols}col${ctx ? '-context' : ''}`);
+    }
   }
+  await ev(`localStorage.removeItem('claudeStatus.compact'); localStorage.removeItem('claudeStatus.context'); true`);
 
   // identity and in-place updates
   await phone(360, 800);
@@ -335,6 +371,89 @@ try {
   await waitFor(`document.querySelectorAll('#pets .card:not(.placeholder)').length > 5`, 3000);
   const looks3 = await ev(looks);
   check('switching to List and back: same live board, same creatures', backList && JSON.stringify(looks3) === JSON.stringify(looks2), JSON.stringify(looks3));
+
+  // ---------- Compact and Show context: options of this phone only, never touching the connection ----------
+  // a "plain" board fetch (not the long-poll's own wait=1 renewal) would mean a reconnect / refetch
+  await ev(`window.__plain = 0; (() => { const o = window.fetch; window.fetch = function (u) { if (String(u).includes('api/board') && !String(u).includes('wait=1')) window.__plain++; return o.apply(this, arguments); }; })(); document.querySelectorAll('#pets .card').forEach(c => c.__keep = true); true`);
+  const keepAll = `[...document.querySelectorAll('#pets .card:not(.placeholder)')].every(c => c.__keep)`;
+  const colsNow = `getComputedStyle(document.getElementById('pets')).gridTemplateColumns.split(' ').length`;
+  const ctxVisible = `[...document.querySelectorAll('#pets .card:not(.placeholder) .cctx')].every(e => e.offsetHeight > 0)`;
+  const looksA = await ev(looks);
+  await tap('#compact-toggle');
+  const cmp = await ev(`({ cols: ${colsNow}, pressed: document.getElementById('compact-toggle').getAttribute('aria-pressed'), saved: localStorage.getItem('claudeStatus.compact'), keep: ${keepAll}, conn: ${connText} })`);
+  await tap('#context-toggle');
+  const ctxOn = await ev(`({ shown: ${ctxVisible}, saved: localStorage.getItem('claudeStatus.context'), compact: localStorage.getItem('claudeStatus.compact'), view: localStorage.getItem('claudeStatus.view'), usage: localStorage.getItem('claudeStatus.usage'), keep: ${keepAll} })`);
+  await sleep(700);
+  const plain = await ev('window.__plain');
+  check('Compact on: three columns at once, saved on this phone; the same card elements and creatures, still LIVE', cmp.cols === 3 && cmp.pressed === 'true' && cmp.saved === '1' && cmp.keep && cmp.conn === 'LIVE' && JSON.stringify(await ev(looks)) === JSON.stringify(looksA), JSON.stringify(cmp));
+  check('Show context on: a context line under every card, saved separately from Compact, the view and Show usage', ctxOn.shown && ctxOn.saved === 'shown' && ctxOn.compact === '1' && ctxOn.view === 'creatures' && ctxOn.usage !== 'hidden' && ctxOn.keep, JSON.stringify(ctxOn));
+  check('switching Compact / Show context makes no request (no reconnect, no refetch)', plain === 0, plain);
+  await shot('creatures-360-3col-context-toggled');
+
+  await tap('#view-list');
+  const lv = await ev(`({ barHidden: document.getElementById('petbar').hidden, rows: document.querySelectorAll('#rows .row:not(.placeholder)').length, extra: document.querySelectorAll('#rows .cctx, #rows .sprite').length })`);
+  const ll = await ev(LAYOUT);
+  check('List view with Compact + Show context on: options row hidden, list unchanged (same layout checks pass)', lv.barHidden && lv.rows > 5 && lv.extra === 0 && ll.problems.length === 0, JSON.stringify(lv) + ' ' + ll.problems.slice(0, 3).join('; '));
+  await tap('#view-creatures');
+  await waitFor(`document.querySelectorAll('#pets .card:not(.placeholder)').length > 5`, 3000);
+  const back2 = await ev(`({ cols: ${colsNow}, ctx: ${ctxVisible} })`);
+  check('back to Creatures: Compact and Show context are kept', back2.cols === 3 && back2.ctx, JSON.stringify(back2));
+
+  // context values: each worker its own session's reading
+  const ctxOf = (n) => `(${petSel(n)})?.querySelector('.cctx')?.textContent`;
+  const cv = await ev(`({ b1: ${ctxOf('Booking Software #1')}, b2: ${ctxOf('Booking Software #2')}, portal: ${ctxOf('Portal')}, long: ${ctxOf('A Very Long Project Folder Name That Keeps Going And Going')}, sp1: ${ctxOf('Side Project 1')}, an: ${ctxOf('Analytics')}, anFill: (${petSel('Analytics')}).querySelector('.cctx i').getBoundingClientRect().width, anNa: (${petSel('Analytics')}).querySelector('.cctx').classList.contains('na') })`);
+  check('context: two workers of one project show their own readings (31% vs 76%), a real 0% shows 0%, 97% full, an old reading marked old, none = "Context unavailable" with an empty track',
+    /^Context 31%( · old)?$/.test(cv.b1) && /^Context 76%( · old)?$/.test(cv.b2) && /^Context 0%/.test(cv.portal) && /^Context 97%/.test(cv.long) && cv.sp1 === 'Context 12% · old' && cv.an === 'Context unavailable' && cv.anFill === 0 && cv.anNa, JSON.stringify(cv));
+  const statusOfPet = (n) => `(${petSel(n)})?.querySelector('.cstatus')?.textContent.replace(/\\u00a0/g, ' ')`;
+  // the List layout check above fetched the board itself, and List -> Creatures rebuilt the cards
+  await ev(`window.__plain = 0; document.querySelectorAll('#pets .card').forEach(c => c.__keep = true); true`);
+  const timerBefore = await ev(statusOfPet('Booking Software #2'));
+  await ask('ctx-update');
+  const ctxUpd = await waitFor(`/^Context 18%/.test(${ctxOf('Booking Software #2')}) && /^Context 64%/.test(${ctxOf('Almost Asleep')})`, 4000);
+  const timerAfter = await ev(statusOfPet('Booking Software #2'));
+  const secs = (t) => { const m = /(\d\d):(\d\d)$/.exec(t || ''); return m ? +m[1] * 60 + +m[2] : -1; };
+  const upd = { ctxUpd, keep: await ev(keepAll), plain: await ev('window.__plain'), b2: await ev(ctxOf('Booking Software #2')), aa: await ev(ctxOf('Almost Asleep')) };
+  check('context update arrives live, in place: same cards, the WORKING timer keeps counting (not reset), no refetch', upd.ctxUpd && upd.keep && secs(timerAfter) >= secs(timerBefore) && secs(timerBefore) > 0 && upd.plain === 0, `${timerBefore} -> ${timerAfter} ${JSON.stringify(upd)}`);
+
+  // ---------- sleeping: a look layered on DONE, from 3 hours after it finished ----------
+  const asleepOf = (n) => `(${petSel(n)})?.classList.contains('asleep')`;
+  const disp = (n, layer) => `getComputedStyle((${petSel(n)}).querySelector('.px .${layer}')).display`;
+  const sl = await ev(`({ sleepy: ${asleepOf('Sleepy Project')}, text: ${statusOfPet('Sleepy Project')}, x: !!(${petSel('Sleepy Project')}).querySelector('.x'), done: (${petSel('Sleepy Project')}).classList.contains('s-DONE'),
+    z1: ${disp('Sleepy Project', 'fx-z1')}, z2: ${disp('Sleepy Project', 'fx-z2')}, shut: ${disp('Sleepy Project', 'e-blink')}, open: ${disp('Sleepy Project', 'e-open')}, happy: ${disp('Sleepy Project', 'e-happy')},
+    almost: ${asleepOf('Almost Asleep')}, long: ${asleepOf('Long Runner')}, portal: ${asleepOf('Portal')}, an: ${asleepOf('Analytics')}, website: ${asleepOf('Website')} })`);
+  check('DONE 3 h 10 m ago: asleep (eyes shut, z / Z), still "DONE · 3h ago", DONE colours and its x', sl.sleepy && sl.text === 'DONE · 3h ago' && sl.x && sl.done && sl.z1 === 'inline' && sl.z2 === 'inline' && sl.shut === 'inline' && sl.open === 'none' && sl.happy === 'none', JSON.stringify(sl));
+  check('never asleep: WORKING 5 h, NEEDS YOU 4 h, ERROR 4 h; DONE 1 h ago is still awake', !sl.long && !sl.portal && !sl.an && !sl.almost && !sl.website, JSON.stringify(sl));
+  await shot('creatures-360-3col-asleep');
+  await ask('sleep-edge');   // Almost Asleep: DONE 3 h minus 4 s
+  const edgeIn = await waitFor(`/^DONE · 2h ago$/.test(${statusOfPet('Almost Asleep')})`, 4000);
+  const awakeAtEdge = await ev(`!${asleepOf('Almost Asleep')}`);
+  const plainBefore = await ev('window.__plain');
+  const fell = await waitFor(asleepOf('Almost Asleep'), 9000);
+  const fellText = await ev(statusOfPet('Almost Asleep'));
+  check('4 s before 3 h: awake; at the 3 h mark it falls asleep by itself (no new data, no reload) and still says DONE · 3h ago', edgeIn && awakeAtEdge && fell && fellText === 'DONE · 3h ago' && await ev('window.__plain') === plainBefore, `${edgeIn} ${awakeAtEdge} ${fell} ${fellText}`);
+  await ev(`Object.defineProperty(document, 'hidden', { configurable: true, get: () => true }); document.dispatchEvent(new Event('visibilitychange')); true`);
+  await sleep(1200);
+  await ev(`Object.defineProperty(document, 'hidden', { configurable: true, get: () => false }); document.dispatchEvent(new Event('visibilitychange')); true`);
+  const bgOk = await waitFor(`${connText} === 'LIVE'`, 3000) && await ev(`${asleepOf('Sleepy Project')} && ${asleepOf('Almost Asleep')} && !${asleepOf('Long Runner')}`);
+  check('background and resume: sleepers stay asleep, others awake', bgOk);
+  await c.send('Page.navigate', { url: base });
+  const reopened = await waitFor(`${connText} === 'LIVE' && !!(${petSel('Sleepy Project')})`, 8000) && await ev(`${asleepOf('Sleepy Project')} && ${asleepOf('Almost Asleep')} && !${asleepOf('Website')}`);
+  check('reopening the page: sleepers are asleep as soon as the board arrives (the clock is the laptop\'s DONE time, not page load)', reopened);
+  check('reopening the page: Compact and Show context are remembered', await ev(`${colsNow} === 3 && ${ctxVisible}`));
+  await tap('#view-list');
+  await tap('#view-creatures');
+  check('view switch: sleepers still asleep', await waitFor(`${asleepOf('Sleepy Project')} && ${asleepOf('Almost Asleep')}`, 3000));
+  await c.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
+  const rm = await ev(`({ z2: getComputedStyle((${petSel('Sleepy Project')}).querySelector('.px .fx-z2')).animationName, z2d: ${disp('Sleepy Project', 'fx-z2')}, z1d: ${disp('Sleepy Project', 'fx-z1')}, shut: ${disp('Sleepy Project', 'e-blink')} })`);
+  check('reduced motion: sleeping art is still (no animation) and still recognisable (eyes shut, z and Z shown)', rm.z2 === 'none' && rm.z2d === 'inline' && rm.z1d === 'inline' && rm.shut === 'inline', JSON.stringify(rm));
+  await c.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'no-preference' }] });
+  await ask('wake');   // a new prompt in Sleepy Project
+  const woke = await waitFor(`!${asleepOf('Sleepy Project')} && (${petSel('Sleepy Project')}).classList.contains('s-WORKING') && /^WORKING · 00:0/.test(${statusOfPet('Sleepy Project')})`, 4000);
+  check('a new prompt wakes it at once into WORKING', woke, await ev(statusOfPet('Sleepy Project')));
+  // Compact / Show context survive a reload; turning them off removes the third column and the bars
+  await tap('#compact-toggle'); await tap('#context-toggle');
+  const off = await ev(`({ cols: ${colsNow}, h: Math.max(...[...document.querySelectorAll('#pets .cctx')].map(e => e.offsetHeight)), saved: [localStorage.getItem('claudeStatus.compact'), localStorage.getItem('claudeStatus.context')] })`);
+  check('Compact and Show context off again: two columns, no context space kept, saved', off.cols === 2 && off.h === 0 && off.saved[0] === '0' && off.saved[1] === 'hidden', JSON.stringify(off));
 
   // tap: immediate reaction, then the laptop's own focus action for that worker
   await ask('focus-clear-1');
@@ -422,8 +541,8 @@ try {
   const cardsBefore = await ev(`document.querySelectorAll('#pets .card:not(.placeholder)').length`);
   await ev(`window.dispatchEvent(new Event('online')); true`);
   const petsRecon = await waitFor(`${connText} === 'RECONNECTING…'`, 3000);
-  const petsStale = await ev(`({ stale: document.getElementById('board').classList.contains('stale'), banner: !document.getElementById('banner').hidden && /Last update \\d/.test(document.getElementById('banner-when').textContent), cards: document.querySelectorAll('#pets .card:not(.placeholder)').length, x: [...document.querySelectorAll('#pets .x')].every(b => b.disabled), paused: ${anim(workingFig)} })`);
-  check('Creatures view, connection lost: RECONNECTING with last update, creatures kept but stale and still, x disabled', petsRecon && petsStale.stale && petsStale.banner && petsStale.cards === cardsBefore && petsStale.x && petsStale.paused === 'bob/paused', JSON.stringify(petsStale));
+  const petsStale = await ev(`({ stale: document.getElementById('board').classList.contains('stale'), banner: !document.getElementById('banner').hidden && /Last update \\d/.test(document.getElementById('banner-when').textContent), cards: document.querySelectorAll('#pets .card:not(.placeholder)').length, x: [...document.querySelectorAll('#pets .x')].every(b => b.disabled), paused: ${anim(workingFig)}, asleep: document.querySelectorAll('#pets .card.asleep').length })`);
+  check('Creatures view, connection lost: RECONNECTING with last update, creatures kept (sleepers still asleep) but stale and still, x disabled', petsRecon && petsStale.stale && petsStale.banner && petsStale.cards === cardsBefore && petsStale.x && petsStale.paused === 'bob/paused' && petsStale.asleep >= 1, JSON.stringify(petsStale));
   await ev(`(${petSel('Side Project 2')}).setAttribute('data-t', 'sp2'); true`);
   await tap('#pets .card[data-t="sp2"] .pet');
   const offlineTap = await waitFor(`/isn't connected/.test(document.getElementById('note').textContent)`, 2000);
