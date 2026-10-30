@@ -417,6 +417,7 @@
     }
     renderUsage(full);
     tick();
+    if (full && reveal && data) showReveal();
   }
 
   // ---------- Claude Usage ----------
@@ -860,6 +861,224 @@
       .then(function () { clearTimeout(timer); });
   }
 
+  // ---------- notifications (Web Push; optional) ----------
+  // The laptop sends each NEEDS YOU / DONE once to this phone's push service, which wakes sw.js to show it
+  // even with this page closed. Needs this page's HTTPS address. Only the laptop's public key reaches the
+  // page; this phone's settings live on the laptop, under this phone's own push address.
+  var NOTIFY_OPEN_KEY = 'claudeStatus.notifyOpen', NOTIFY_KEY = 'claudeStatus.notify';
+  var notifyOpen = false;
+  try { notifyOpen = localStorage.getItem(NOTIFY_OPEN_KEY) === '1'; } catch (e) { }
+  var nSum = $('notify-sum'), nMini = $('notify-mini'), nDetail = $('notify-detail'), nState = $('notify-state'), nMsg = $('notify-msg');
+  var nPrefsEl = $('notify-prefs'), nNeeds = $('notify-needs'), nDone = $('notify-done');
+  var nEnable = $('notify-enable'), nTest = $('notify-test'), nOff = $('notify-off');
+  var nSt = 'checking', nInfo = '', nPrefs = { needs: true, done: true }, nBusy = false, nEndpoint = '';
+  var pushOk = !!(window.isSecureContext && 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window);
+  var N_LABEL = { checking: 'Checking…', unsupported: 'Not available here', denied: 'Blocked', new: 'Not set up', off: 'Off', on: 'On', error: 'Problem' };
+  var N_STATE = {
+    checking: 'Checking…', unsupported: 'Not supported', denied: 'Permission denied', new: 'Not yet configured',
+    off: 'Disabled', on: 'Enabled', error: 'Something went wrong'
+  };
+
+  function setNotify(st, info) { nSt = st; nInfo = info || ''; renderNotify(); }
+
+  function renderNotify() {
+    nMini.textContent = '';
+    nMini.appendChild(el('span', nSt === 'on' ? '' : 'muted', N_LABEL[nSt]));
+    nSum.setAttribute('aria-expanded', String(notifyOpen));
+    nDetail.hidden = !notifyOpen;
+    nState.textContent = N_STATE[nSt];
+    nState.dataset.st = nSt;
+    nMsg.hidden = !nInfo;
+    nMsg.textContent = nInfo;
+    var on = nSt === 'on';
+    nPrefsEl.hidden = !on;
+    nNeeds.setAttribute('aria-pressed', String(nPrefs.needs));
+    nDone.setAttribute('aria-pressed', String(nPrefs.done));
+    nEnable.hidden = on || nSt === 'unsupported' || nSt === 'denied' || nSt === 'checking';
+    nTest.hidden = nOff.hidden = !on;
+    [nEnable, nTest, nOff, nNeeds, nDone].forEach(function (b) { b.disabled = nBusy; });
+  }
+
+  function pushApi(body) {
+    var c = new AbortController(), timer = setTimeout(function () { c.abort(); }, 25000);
+    return fetch('api/push', {
+      method: 'POST', cache: 'no-store', credentials: 'same-origin', signal: c.signal,
+      headers: { 'Content-Type': 'application/json', 'X-Claude-Status': 'push' }, body: JSON.stringify(body)
+    })
+      .then(function (r) { return r.json().catch(function () { return {}; }).then(function (j) { j.status = r.status; return j; }); })
+      .then(function (j) { clearTimeout(timer); return j; }, function (e) { clearTimeout(timer); throw e; });
+  }
+
+  function remembered(v) { try { if (v) localStorage.setItem(NOTIFY_KEY, v); return localStorage.getItem(NOTIFY_KEY) || ''; } catch (e) { return ''; } }
+
+  function currentSub() {
+    return navigator.serviceWorker.getRegistration().then(function (r) { return r ? r.pushManager.getSubscription() : null; });
+  }
+
+  function checkNotify() {
+    if (!pushOk) {
+      setNotify('unsupported', location.protocol !== 'https:' ? 'Notifications need the HTTPS address of this dashboard (see phone-setup.ps1 -Https).' : "This browser can't receive push notifications.");
+      return;
+    }
+    if (Notification.permission === 'denied') {
+      setNotify('denied', 'Notifications are blocked for this site. Allow them in the browser’s site settings, then reload this page.');
+      return;
+    }
+    currentSub().then(function (sub) {
+      if (!sub) { nEndpoint = ''; setNotify(remembered() === 'off' ? 'off' : 'new', ''); return; }
+      nEndpoint = sub.endpoint;
+      return pushApi({ op: 'status', endpoint: sub.endpoint }).then(function (j) {
+        if (j.known && Notification.permission === 'granted') {
+          nPrefs = { needs: !!j.needs, done: !!j.done };
+          setNotify('on', j.last ? 'Last message: ' + j.last + '.' : '');
+        } else setNotify('new', j.known ? '' : 'The laptop doesn’t have this phone registered (any more). Tap Enable.');
+      });
+    }).catch(function () { setNotify('error', "Couldn't check notifications with the laptop."); });
+  }
+
+  function keyBytes(b64) {
+    var s = b64.replace(/-/g, '+').replace(/_/g, '/'); while (s.length % 4) s += '=';
+    var raw = atob(s), out = new Uint8Array(raw.length);
+    for (var i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
+    return out;
+  }
+
+  function sameKey(buf, bytes) {
+    if (!buf) return false;
+    var a = new Uint8Array(buf);
+    if (a.length !== bytes.length) return false;
+    for (var i = 0; i < a.length; i++) if (a[i] !== bytes[i]) return false;
+    return true;
+  }
+
+  // "accepted" only means the push service took the message; whether it shows is up to this phone.
+  function testText(result, last) {
+    switch (result) {
+      case 'accepted': return 'Test sent: the push service accepted it. It should appear on this phone within a few seconds; if it doesn’t, see the phone’s battery settings for this browser.';
+      case 'rejected': return 'The push service rejected the test' + (last ? ' (' + last + ')' : '') + '.';
+      case 'unreachable': return "The laptop couldn't reach the push service. Check the laptop's internet connection.";
+      case 'expired': return 'The push service says this phone’s registration has expired. Tap Enable again.';
+      case 'too_soon': return 'A test was just sent. Try again in a few seconds.';
+      default: return "The laptop couldn't send a test.";
+    }
+  }
+
+  function busy(on) { nBusy = on; renderNotify(); }
+
+  function enableNotify() {
+    if (nBusy || !pushOk) return;
+    busy(true);
+    // asked straight from the tap, as Android requires
+    Notification.requestPermission().then(function (perm) {
+      if (perm !== 'granted') {
+        if (perm === 'denied') setNotify('denied', 'Notifications are blocked for this site. Allow them in the browser’s site settings, then reload this page.');
+        else setNotify('new', 'Notifications weren’t allowed. Tap Enable to try again.');
+        return;
+      }
+      return Promise.all([
+        navigator.serviceWorker.register('sw.js').then(function () { return navigator.serviceWorker.ready; }),
+        pushApi({ op: 'key' })
+      ]).then(function (a) {
+        var reg = a[0], key = a[1] && a[1].key;
+        if (!key) throw new Error('the laptop has no notification key');
+        var bytes = keyBytes(key);
+        return reg.pushManager.getSubscription().then(function (old) {
+          // after a reinstall the laptop has a new key: the old registration can't be used with it
+          if (old && !sameKey(old.options.applicationServerKey, bytes)) return old.unsubscribe().then(function () { return null; });
+          return old;
+        }).then(function (old) { return old || reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: bytes }); });
+      }).then(function (sub) {
+        var j = sub.toJSON();
+        nEndpoint = j.endpoint;
+        return pushApi({ op: 'subscribe', endpoint: j.endpoint, p256dh: j.keys.p256dh, auth: j.keys.auth, needs: nPrefs.needs, done: nPrefs.done });
+      }).then(function (j) {
+        if (j.result !== 'subscribed') {
+          throw new Error(j.result === 'full' ? 'the laptop already has the most phones it allows (10)' : j.result === 'bad_endpoint' ? "this browser's push service isn't one Claude Status sends to" : 'the laptop refused the registration');
+        }
+        remembered('on');
+        setNotify('on', 'Enabled. ' + testText(j.test, j.last));
+      });
+    }).catch(function (e) {
+      setNotify('error', "Couldn't turn on notifications: " + (e && e.message ? e.message : 'no answer from the laptop') + '.');
+    }).then(function () { busy(false); });
+  }
+
+  function savePrefs(next) {
+    if (nBusy || !nEndpoint) return;
+    var before = nPrefs;
+    nPrefs = next;
+    busy(true);
+    pushApi({ op: 'prefs', endpoint: nEndpoint, needs: next.needs, done: next.done })
+      .then(function (j) {
+        if (j.result === 'saved') return;
+        nPrefs = before;
+        if (j.result === 'unknown') setNotify('new', 'The laptop doesn’t have this phone registered (any more). Tap Enable.');
+        else note("Not saved: the laptop refused the change.");
+      })
+      .catch(function () { nPrefs = before; note("Not saved: couldn't reach the laptop."); })
+      .then(function () { busy(false); });
+  }
+
+  function sendTest() {
+    if (nBusy || !nEndpoint) return;
+    busy(true);
+    pushApi({ op: 'test', endpoint: nEndpoint })
+      .then(function (j) {
+        if (j.result === 'unknown' || j.result === 'expired') setNotify('new', testText(j.result, j.last));
+        else nInfo = testText(j.result, j.last);
+      })
+      .catch(function () { nInfo = "Couldn't reach the laptop."; })
+      .then(function () { busy(false); });
+  }
+
+  function turnOff() {
+    if (nBusy) return;
+    busy(true);
+    var ep = nEndpoint;
+    (ep ? pushApi({ op: 'unsubscribe', endpoint: ep }).catch(function () { }) : Promise.resolve())
+      .then(currentSub)
+      .then(function (sub) { return sub ? sub.unsubscribe() : true; })
+      .then(function () { nEndpoint = ''; remembered('off'); setNotify('off', 'Turned off. This phone gets no notifications.'); })
+      .catch(function () { setNotify('error', "Couldn't fully turn off notifications. Try again."); })
+      .then(function () { busy(false); });
+  }
+
+  nSum.addEventListener('click', function () {
+    notifyOpen = !notifyOpen;
+    try { localStorage.setItem(NOTIFY_OPEN_KEY, notifyOpen ? '1' : '0'); } catch (e) { }
+    renderNotify();
+  });
+  nEnable.addEventListener('click', enableNotify);
+  nTest.addEventListener('click', sendTest);
+  nOff.addEventListener('click', turnOff);
+  nNeeds.addEventListener('click', function () { savePrefs({ needs: !nPrefs.needs, done: nPrefs.done }); });
+  nDone.addEventListener('click', function () { savePrefs({ needs: nPrefs.needs, done: !nPrefs.done }); });
+  document.addEventListener('visibilitychange', function () { if (!document.hidden && !nBusy) checkNotify(); });   // e.g. permission changed meanwhile
+
+  // A tapped notification opens "#k=<row token>": that worker is scrolled to and briefly highlighted.
+  var reveal = '';
+  function takeHash() {
+    var m = /^#k=([A-Za-z0-9_-]{22})$/.exec(location.hash);
+    if (!m) return;
+    reveal = m[1];
+    try { history.replaceState(null, '', location.pathname + location.search); } catch (e) { }
+  }
+  function showReveal() {
+    var k = reveal, target = null;
+    reveal = '';   // once: a token from before a laptop restart simply matches nothing
+    rowEls.forEach(function (e) { if (e.r.k === k) target = e.li; });
+    if (!target && petEls[k]) target = petEls[k].pet;
+    if (!target) return;
+    target.scrollIntoView({ block: 'center', behavior: reduceMotion.matches ? 'auto' : 'smooth' });
+    target.classList.add('flash');
+    setTimeout(function () { target.classList.remove('flash'); }, 2500);
+  }
+  window.addEventListener('hashchange', function () { takeHash(); if (reveal && data) render(true); });
+  if ('serviceWorker' in navigator) navigator.serviceWorker.addEventListener('message', function (e) {
+    if (e.data && typeof e.data.k === 'string' && /^[A-Za-z0-9_-]{22}$/.test(e.data.k)) { reveal = e.data.k; if (data) render(true); }
+  });
+  takeHash();
+
   function note(text) {
     noteEl.textContent = text;
     noteEl.hidden = false;
@@ -869,5 +1088,7 @@
 
   applyPetOptions();
   setView(view, false);
+  renderNotify();
+  checkNotify();
   poll(false);
 })();

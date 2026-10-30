@@ -199,6 +199,14 @@ h1 { flex: 1 1 auto; margin: 0; font-size: 13.5px; font-weight: 700; color: var(
 }
 .usage-btn:disabled { opacity: .45; }
 .usage-btn:focus-visible { outline: 2px solid var(--name); outline-offset: 1px; }
+.usage-btn[hidden], .notify-row[hidden] { display: none; }
+
+/* ---------- Notifications (same look as the usage section) ---------- */
+.notify-row { display: flex; flex-wrap: wrap; gap: 0 8px; }
+.notify-row .tog { margin: 10px 0 0; }
+.usage-state[data-st="on"]::before { background: var(--green); }
+.usage-state[data-st="error"]::before, .usage-state[data-st="denied"]::before { background: var(--red); }
+.row.flash { background: var(--hover); }
 .board.stale .usage-mini, .board.stale .usage-limits { opacity: .55; }
 
 /* ---------- Creatures view: a grid of little workers ---------- */

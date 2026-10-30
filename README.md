@@ -308,7 +308,23 @@ Each DONE row on the phone carries an opaque token for that particular DONE occu
 - Requests must be addressed to `127.0.0.1`/`localhost` or this laptop's own Tailscale name/IP (protects against DNS-rebinding pages). The two actions (dismiss, and bring up a worker's window) are POST-only and each requires a same-origin `Origin`, a JSON body and its own custom header, so other websites can't trigger them; there's no CORS. The page has a strict Content-Security-Policy and isn't cached.
 - The only things the phone can make happen are dismissing a current DONE row and bringing up a current worker's existing window. Both name the worker by a random token from the current board; the laptop looks up the worker and picks the window itself. The browser can't name files, paths, programs, commands, process IDs or URLs; extra fields are ignored.
 - The phone receives only what it displays: friendly name, state, when the state began, the short error type, a creature number (0–103), that worker's context-window percentage and whether it's old, and random-looking tokens. No session IDs, process IDs, folder paths, window data, prompts or Claude output. Nothing is logged.
-- No accounts, cloud hosting, database or paid services.
+- No accounts, cloud hosting, database or paid services. Phone notifications (optional, above) are the only thing that contacts the internet: encrypted, through your browser's own push service.
+
+### Phone notifications (optional)
+
+The phone can get a real push notification when a worker enters **NEEDS YOU** (*Claude needs your attention* — name and, when known, what it's waiting for) or **DONE** (*Claude finished a task* — name). It arrives with the phone locked and the dashboard closed. WORKING, ERROR and idle never notify. Tapping one opens the dashboard at that worker.
+
+**How it works.** Standard Web Push: the laptop sends each message to your browser's push service (Google's FCM for Chrome on Android), which wakes the dashboard's service worker (`sw.js`) to show it. The message is encrypted to your phone (RFC 8291), so the push service sees only its size and timing, not the text. No Firebase project, account, app or paid service. The laptop needs internet access; the phone doesn't need Tailscale connected to *receive* one (only to open the dashboard).
+
+**What leaves the laptop:** per notification, one HTTPS request to your phone's push service containing the encrypted title, worker display name, short reason, state and two random tokens. Never prompts, Claude output, paths, session IDs or code.
+
+**Needs HTTPS.** Browsers only allow push on secure pages, so the dashboard has to be served at its `https://` address: enable **HTTPS Certificates** for your tailnet in the Tailscale admin console (DNS page), then run `phone-setup.ps1 -Https`. The certificate puts this laptop's tailnet name (`<machine>.<tailnet>.ts.net`) in public Certificate Transparency logs; access stays tailnet-only (`serve`, never Funnel — `phone-setup.ps1` refuses to report success if Funnel is on).
+
+**Turn it on:** open the `https://` address on the phone → **NOTIFICATIONS** → **Enable** → allow. A test notification is sent right away; the panel says whether the push service *accepted* it (that is not proof the phone showed it). Switches for NEEDS YOU and DONE, **Send test** and **Turn off** are in the same panel. On Samsung phones, set the browser's battery usage to **Unrestricted** and keep it out of *Sleeping apps*, or notifications may be delayed.
+
+**Exactly once per transition.** A transition is one stay in a state (`state_since` changes only on a real change), recorded once on the laptop, so reloads, polling, reconnecting and repeated hook events never repeat one. After a laptop restart, only transitions less than 10 minutes old are sent. A notification that can't be sent (no internet, push service busy) is kept in a queue and retried, also across restarts, for up to an hour, unless it stops being true first (a NEEDS YOU that was answered or whose session ended; a DONE whose session got a new prompt). The service worker also drops a repeated copy of a transition it showed in the last 24 h (best effort: clearing browser data clears that memory).
+
+**Stored:** keys, phone registrations, preferences, the sent-transition ledger (24 h) and the queue, in `state\push.dat`, encrypted with Windows DPAPI for your Windows user. Re-running the installer keeps it. `uninstall.ps1` deletes it with the rest of the folder: after reinstalling, tap **Enable** again on the phone. A `push.dat` that can't be decrypted (another Windows user/PC) is renamed `*.unreadable`, never deleted.
 
 ### Turn it off / remove it
 

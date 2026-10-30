@@ -11,6 +11,9 @@
 //   POST /api/focus    {"k":..}           bring that worker's window forward on the laptop (the desktop's
 //                                         own click-on-a-worker action; the laptop picks the window)
 //   POST /api/usage-refresh {}            re-read the Claude Usage data on the laptop now (local files)
+//   GET  /sw.js                           the service worker that shows push notifications (push.cs)
+//   POST /api/push {"op":..}              this phone's notifications: on/off, preferences, a test
+//                                         (only the public VAPID key is ever sent to the page)
 // Only display data leaves the process: friendly name, state, when that state began, a short error type,
 // a creature look number, that session's context-window percentage (and whether that reading is older than
 // its latest activity), and opaque tokens. No session IDs, process IDs, folder paths or window data.
@@ -149,8 +152,9 @@ namespace ClaudeStatus
             { "/", new[] { "phone.html", "text/html; charset=utf-8" } },
             { "/phone.css", new[] { "phone.css", "text/css; charset=utf-8" } },
             { "/phone.js", new[] { "phone.js", "text/javascript; charset=utf-8" } },
+            { "/sw.js", new[] { "sw.js", "text/javascript; charset=utf-8" } },
         };
-        const string Csp = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+        const string Csp = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
         readonly int port;
         readonly string root;
@@ -181,6 +185,8 @@ namespace ClaudeStatus
 
         // Asks the indicator to re-read Claude Usage now (null = not available).
         public Func<bool> UsageRefresh;
+        // Phone push notifications (null = not available).
+        public PushNotifier Push;
 
         public int Port { get { return port; } }
         public bool Running { get { return running; } }
@@ -324,6 +330,9 @@ namespace ClaudeStatus
             }
         }
 
+        // The board token of that worker's row (what a tapped notification opens).
+        public string KeyFor(string sessionId) { return Token("k|" + sessionId); }
+
         string Token(string value)
         {
             using (var h = new HMACSHA256(secret))
@@ -386,7 +395,8 @@ namespace ClaudeStatus
             if (req.Method == "POST" && req.Path == "/api/dismiss") { DismissRequest(ns, req); return; }
             if (req.Method == "POST" && req.Path == "/api/focus") { FocusRequest(ns, req); return; }
             if (req.Method == "POST" && req.Path == "/api/usage-refresh") { UsageRefreshRequest(ns, req); return; }
-            if (req.Path == "/api/dismiss" || req.Path == "/api/focus" || req.Path == "/api/usage-refresh" || Pages.ContainsKey(req.Path) || req.Path == "/api/board") { Text(ns, 405, "Method not allowed"); return; }
+            if (req.Method == "POST" && req.Path == "/api/push") { PushRequest(ns, req); return; }
+            if (req.Path == "/api/dismiss" || req.Path == "/api/focus" || req.Path == "/api/usage-refresh" || req.Path == "/api/push" || Pages.ContainsKey(req.Path) || req.Path == "/api/board") { Text(ns, 405, "Method not allowed"); return; }
             Text(ns, 404, "Not found");
         }
 
@@ -580,6 +590,74 @@ namespace ClaudeStatus
             bool ok;
             try { ok = UsageRefresh != null && UsageRefresh(); } catch { ok = false; }
             Json(ns, ok ? 200 : 503, ok ? "{\"result\":\"refreshing\"}" : "{\"result\":\"unavailable\"}");
+        }
+
+        // This phone's notification setup. A phone names itself by its own push endpoint (an unguessable URL
+        // only it and this laptop know). Nothing here takes notification text; the only thing it sends is the
+        // fixed test message to that same phone (push.cs allows one every few seconds).
+        void PushRequest(NetworkStream ns, Request req)
+        {
+            if (!ActionAllowed(ns, req, "push")) return;
+            var push = Push;
+            if (push == null) { Json(ns, 503, "{\"result\":\"unavailable\"}"); return; }
+            Dictionary<string, object> d = null;
+            try { d = new JavaScriptSerializer { MaxJsonLength = MaxBody, RecursionLimit = 4 }.Deserialize<Dictionary<string, object>>(Encoding.UTF8.GetString(req.Body)); } catch { }
+            object o;
+            string op = d != null && d.TryGetValue("op", out o) ? o as string : null;
+            string endpoint = d != null && d.TryGetValue("endpoint", out o) ? o as string : null;
+            bool needs = d != null && d.TryGetValue("needs", out o) && o is bool && (bool)o;
+            bool done = d != null && d.TryGetValue("done", out o) && o is bool && (bool)o;
+            var ser = new JavaScriptSerializer();
+            if (op == "key") { Json(ns, 200, ser.Serialize(new Dictionary<string, object> { { "key", push.PublicKey } })); return; }
+            if (!PushNotifier.ValidEndpoint(endpoint)) { Json(ns, 400, "{\"result\":\"bad_request\"}"); return; }
+            switch (op)
+            {
+                case "status":
+                    {
+                        var s = push.Find(endpoint);
+                        Json(ns, 200, ser.Serialize(s == null ? new Dictionary<string, object> { { "known", false } }
+                            : new Dictionary<string, object> { { "known", true }, { "needs", s.Needs }, { "done", s.Done }, { "last", s.Last } }));
+                        return;
+                    }
+                case "subscribe":
+                    {
+                        string p256dh = d.TryGetValue("p256dh", out o) ? o as string : null, auth = d.TryGetValue("auth", out o) ? o as string : null;
+                        string err = push.Subscribe(endpoint, p256dh, auth, needs, done);
+                        if (err != null) { Json(ns, err == "full" ? 409 : 400, ser.Serialize(new Dictionary<string, object> { { "result", err } })); return; }
+                        int code = push.Test(endpoint);
+                        Json(ns, 200, ser.Serialize(new Dictionary<string, object> { { "result", "subscribed" }, { "test", TestName(code) }, { "code", code }, { "last", LastOf(push, endpoint) } }));
+                        return;
+                    }
+                case "prefs":
+                    if (push.SetPrefs(endpoint, needs, done)) Json(ns, 200, "{\"result\":\"saved\"}");
+                    else Json(ns, 404, "{\"result\":\"unknown\"}");
+                    return;
+                case "test":
+                    {
+                        int code = push.Test(endpoint);
+                        Json(ns, code == PushNotifier.Unknown ? 404 : code == PushNotifier.TooSoon ? 429 : 200,
+                            ser.Serialize(new Dictionary<string, object> { { "result", TestName(code) }, { "code", code }, { "last", LastOf(push, endpoint) } }));
+                        return;
+                    }
+                case "unsubscribe":
+                    push.Unsubscribe(endpoint);
+                    Json(ns, 200, "{\"result\":\"removed\"}");
+                    return;
+            }
+            Json(ns, 400, "{\"result\":\"bad_request\"}");
+        }
+
+        static string LastOf(PushNotifier push, string endpoint) { var s = push.Find(endpoint); return s == null ? "" : s.Last; }
+
+        // "accepted" = the push service took the message; it says nothing about whether the phone showed it.
+        static string TestName(int code)
+        {
+            if (code == PushNotifier.Unknown) return "unknown";
+            if (code == PushNotifier.TooSoon) return "too_soon";
+            if (code == 0) return "unreachable";
+            if (code >= 200 && code < 300) return "accepted";
+            if (code == 404 || code == 410) return "expired";
+            return "rejected";
         }
 
         static string FocusName(FocusResult r)

@@ -577,7 +577,7 @@ public static class TRace {
 # The server calls these on its own threads, so they must be real .NET delegates (not script blocks).
 function Dismisser([string]$dir) { [Delegate]::CreateDelegate([Func[string, string, ClaudeStatus.DismissResult]], $dir, [ClaudeStatus.Dismissal].GetMethod('DismissDone')) }
 $epoch = New-Object DateTime(1970, 1, 1, 0, 0, 0, [DateTimeKind]::Utc)
-$phoneFiles = 'phone.html', 'phone.css', 'phone.js'
+$phoneFiles = 'phone.html', 'phone.css', 'phone.js', 'sw.js'
 function New-PhoneRoot([int]$port, [hashtable]$extra = @{}) {
     $o = @{ phoneDashboard = $true; phonePort = $port }; foreach ($k in $extra.Keys) { $o[$k] = $extra[$k] }
     $r = New-Root $o
@@ -1344,6 +1344,330 @@ else {
 }
 
 # ======================================================================================
+Section 'Phone push notifications: transitions, queue, persistence, crypto, endpoint protection'
+# ======================================================================================
+Add-Type -AssemblyName System.Security
+Add-Type @'
+using System; using System.Collections.Generic;
+// Stand-in push service: records every message the notifier hands it and answers with the next code. Takes the
+// subscription as object (the product types live in another in-memory assembly); bound with CreateDelegate.
+public class TPush {
+    public List<string[]> Sent = new List<string[]>();   // endpoint, payload, topic
+    public Queue<int> Codes = new Queue<int>();
+    public int Code = 201; public bool Throw;
+    public int Send(object s, string payload, string topic) {
+        lock (Sent) Sent.Add(new[] { (string)s.GetType().GetField("Endpoint").GetValue(s), payload, topic });
+        if (Throw) throw new Exception("network down");
+        return Codes.Count > 0 ? Codes.Dequeue() : Code;
+    }
+    public int Count { get { lock (Sent) return Sent.Count; } }
+}
+'@
+$PN = [ClaudeStatus.PushNotifier]
+$dash = [string][char]0x2014   # this file is read as ANSI by Windows PowerShell 5.1: no literal non-ASCII
+$t0 = [DateTime]::UtcNow
+$epA = 'https://fcm.googleapis.com/fcm/send/phone-A-test'; $epB = 'https://fcm.googleapis.com/fcm/send/phone-B-test'
+$uaPub = 'BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4'; $uaAuth = 'BTBZMqHH6r4Tts7J_aSIgg'
+# A board row as the indicator has it after a reload (state_since fixed per occurrence, like hook.ps1 writes it).
+function PSess([string]$id, [string]$st, [DateTime]$since, [string]$name, [string]$evt = 'x', [string]$detail = '') {
+    $si = New-Object ClaudeStatus.SessionInfo
+    $si.Id = $id; $si.State = $st; $si.StateSince = $since; $si.Updated = $since; $si.FirstSeen = $since.AddMinutes(-5)
+    $si.Name = $name; $si.Event = $evt; $si.Detail = $detail; $si.Project = 'C_Users_SECRET_PATH_' + $id
+    return $si
+}
+function BoardOf { $l = New-Object 'System.Collections.Generic.List[ClaudeStatus.SessionInfo]'; foreach ($x in $args) { foreach ($y in @($x)) { $l.Add($y) } }; return , $l }
+function FakeFn($fake) { [Delegate]::CreateDelegate([Func[ClaudeStatus.PushSub, string, string, int]], $fake, [TPush].GetMethod('Send')) }
+function NewN([string]$path, $fake) { $n = New-Object ClaudeStatus.PushNotifier($path); $n.Transport = FakeFn $fake; return $n }
+function Obs($n, $board, [DateTime]$at) { $n.Observe($board, $at, [Func[string, string]] { param($id) 'row-' + $id }) }
+function Msg($fake, [int]$i) { $fake.Sent[$i][1] | ConvertFrom-Json }
+
+$pdir = Join-Path $tmp 'push1'; $null = New-Item -ItemType Directory -Force $pdir
+$ppath = Join-Path $pdir 'push.dat'
+$fk = New-Object TPush
+$n = NewN $ppath $fk
+$old = PSess 'old' 'DONE' $t0.AddMinutes(-2) 'Old Task'
+Obs $n (BoardOf $old) $t0
+Check 'push: nothing is stored or sent until a phone turns notifications on' (-not (Test-Path $ppath) -and $fk.Count -eq 0 -and $n.Count -eq 0)
+Check 'push: subscribing with a valid FCM subscription works' ($null -eq $n.Subscribe($epA, $uaPub, $uaAuth, $true, $true) -and $n.Count -eq 1 -and (Test-Path $ppath))
+Obs $n (BoardOf $old) $t0.AddSeconds(1); [void]$n.Pump($t0.AddSeconds(1))
+Check 'push: turning notifications on never announces what was already on the board' ($fk.Count -eq 0)
+
+# 1 / 3 / 5: WORKING -> NEEDS YOU, repeats, and a second stay in NEEDS YOU
+$s1w = PSess 's1' 'WORKING' $t0.AddSeconds(2) 'SEO implementation'
+Obs $n (BoardOf $old $s1w) $t0.AddSeconds(3); [void]$n.Pump($t0.AddSeconds(3))
+Check 'push: WORKING sends nothing' ($fk.Count -eq 0)
+$s1n = PSess 's1' 'NEEDS_YOU' $t0.AddSeconds(5) 'SEO implementation' 'PermissionRequest' 'Bash'
+Obs $n (BoardOf $old $s1n) $t0.AddSeconds(6); [void]$n.Pump($t0.AddSeconds(6))
+$m = Msg $fk 0
+Check '1. WORKING -> NEEDS YOU sends exactly one notification, named and explained' ($fk.Count -eq 1 -and $m.title -eq 'Claude needs your attention' -and $m.body -eq "SEO implementation $dash wants to use Bash" -and $m.s -eq 'NEEDS_YOU' -and $m.k -eq 'row-s1') ($fk.Sent[0][1])
+for ($i = 0; $i -lt 5; $i++) { $s1n.Updated = $t0.AddSeconds(7 + $i); Obs $n (BoardOf $old $s1n) $t0.AddSeconds(7 + $i); [void]$n.Pump($t0.AddSeconds(7 + $i)) }
+Check '3. the same NEEDS YOU seen again (reloads, polling, repeated hook events) sends no duplicate' ($fk.Count -eq 1)
+$s1w2 = PSess 's1' 'WORKING' $t0.AddSeconds(20) 'SEO implementation'
+Obs $n (BoardOf $old $s1w2) $t0.AddSeconds(21); [void]$n.Pump($t0.AddSeconds(21))
+$s1n2 = PSess 's1' 'NEEDS_YOU' $t0.AddSeconds(30) 'SEO implementation' 'Notification' 'permission_prompt'
+Obs $n (BoardOf $old $s1n2) $t0.AddSeconds(31); [void]$n.Pump($t0.AddSeconds(31))
+Check '5. NEEDS YOU -> WORKING -> NEEDS YOU sends a second notification' ($fk.Count -eq 2 -and (Msg $fk 1).body -eq "SEO implementation $dash waiting for permission" -and (Msg $fk 1).id -ne $m.id)
+# 2 / 4: DONE
+$s1d = PSess 's1' 'DONE' $t0.AddSeconds(40) 'SEO implementation'
+Obs $n (BoardOf $old $s1d) $t0.AddSeconds(41); [void]$n.Pump($t0.AddSeconds(41))
+Check '2. WORKING -> DONE sends exactly one notification' ($fk.Count -eq 3 -and (Msg $fk 2).title -eq 'Claude finished a task' -and (Msg $fk 2).body -eq 'SEO implementation')
+for ($i = 0; $i -lt 5; $i++) { Obs $n (BoardOf $old $s1d) $t0.AddSeconds(42 + $i); [void]$n.Pump($t0.AddSeconds(42 + $i)) }
+Check '4. the same DONE seen again sends no duplicate' ($fk.Count -eq 3)
+# 6: two tasks at once
+$s2 = PSess 's2' 'DONE' $t0.AddSeconds(50) 'Booking system audit'
+$s3 = PSess 's3' 'NEEDS_YOU' $t0.AddSeconds(50) 'Website redesign' 'PreToolUse' 'AskUserQuestion'
+Obs $n (BoardOf $old $s1d $s2 $s3) $t0.AddSeconds(51); [void]$n.Pump($t0.AddSeconds(51))
+$pair = @((Msg $fk 3), (Msg $fk 4)) | Sort-Object { $_.k }
+Check '6. two tasks changing together send two notifications, each naming its own task' ($fk.Count -eq 5 -and $pair[0].k -eq 'row-s2' -and $pair[0].body -eq 'Booking system audit' -and $pair[0].title -eq 'Claude finished a task' -and $pair[1].k -eq 'row-s3' -and $pair[1].body -eq "Website redesign $dash has a question for you" -and $pair[0].id -ne $pair[1].id) (($fk.Sent | ForEach-Object { $_[1] }) -join ' | ')
+
+# privacy of the payload
+$all = ($fk.Sent | ForEach-Object { $_[1] }) -join "`n"
+$keysOk = @($fk.Sent | Where-Object { ((($_[1] | ConvertFrom-Json).PSObject.Properties.Name) -join ',') -ne 'v,id,s,title,body,k' }).Count -eq 0
+Check 'push payload: only title, display name, reason, state and opaque tokens (no session ids, paths, prompts)' ($keysOk -and $all -notmatch 'SECRET|"s1"|"s2"|"s3"|C_Users|Users|\\\\') $all
+$topics = @($fk.Sent | ForEach-Object { $_[2] })
+Check 'Topic: every one is <= 32 URL-safe Base64 characters and equals the transition id' (@($topics | Where-Object { $_ -notmatch '^[A-Za-z0-9_-]{1,32}$' }).Count -eq 0 -and @(0..($fk.Count - 1) | Where-Object { (Msg $fk $_).id -ne $fk.Sent[$_][2] }).Count -eq 0) ($topics -join ',')
+
+# 7: restart
+$pub1 = $n.PublicKey
+$n2 = NewN $ppath $fk
+$before = $fk.Count
+Obs $n2 (BoardOf $old $s1d $s2 $s3) $t0.AddSeconds(60); [void]$n2.Pump($t0.AddSeconds(60))
+$sa = $n2.Find($epA)
+Check '7. restarting the app sends nothing again for statuses already notified' ($fk.Count -eq $before)
+Check 'persistence: VAPID key, subscription and preferences survive a restart' ($n2.PublicKey -eq $pub1 -and $n2.Count -eq 1 -and $sa -and $sa.Needs -and $sa.Done)
+# catch-up window: transitions that happened while the app was closed
+$c1 = PSess 'c1' 'DONE' $t0.AddMinutes(-3) 'Recent while closed'
+$c2 = PSess 'c2' 'NEEDS_YOU' $t0.AddMinutes(-15) 'Old while closed'
+$n3 = NewN $ppath $fk
+$before = $fk.Count
+Obs $n3 (BoardOf $old $s1d $s2 $s3 $c1 $c2) $t0; [void]$n3.Pump($t0)
+Check 'restart catch-up: a DONE from 3 min ago is sent, a NEEDS YOU from 15 min ago is not' ($fk.Count -eq $before + 1 -and (Msg $fk $before).body -eq 'Recent while closed')
+Obs $n3 (BoardOf $old $s1d $s2 $s3 $c1 $c2) $t0.AddSeconds(5); [void]$n3.Pump($t0.AddSeconds(5))
+Check 'restart catch-up: an old transition is recorded once, never sent later' ($fk.Count -eq $before + 1)
+
+# 8: preferences
+[void]$n3.SetPrefs($epA, $false, $true)
+$before = $fk.Count
+$p1 = PSess 'p1' 'NEEDS_YOU' $t0.AddSeconds(70) 'Prefs task'
+Obs $n3 (BoardOf $p1) $t0.AddSeconds(71); [void]$n3.Pump($t0.AddSeconds(71))
+Check '8. NEEDS YOU turned off: no NEEDS YOU notification' ($fk.Count -eq $before)
+$p1d = PSess 'p1' 'DONE' $t0.AddSeconds(80) 'Prefs task'
+Obs $n3 (BoardOf $p1d) $t0.AddSeconds(81)
+[void]$n3.SetPrefs($epA, $false, $false)
+[void]$n3.Pump($t0.AddSeconds(81))
+Check '8. DONE turned off while queued: dropped, not sent' ($fk.Count -eq $before -and $n3.Queued -eq 0)
+[void]$n3.SetPrefs($epA, $true, $true)
+$n4 = NewN $ppath $fk
+Check 'persistence: changed preferences survive a restart' ($n4.Find($epA).Needs -and $n4.Find($epA).Done)
+
+# retries, Topic stability, lifetime, restart with a pending item
+$r1 = PSess 'r1' 'DONE' $t0.AddSeconds(90) 'Retry task'
+$fk.Codes.Enqueue(0); $fk.Codes.Enqueue(503)
+$before = $fk.Count
+Obs $n4 (BoardOf $r1) $t0.AddSeconds(91); [void]$n4.Pump($t0.AddSeconds(91))
+[void]$n4.Pump($t0.AddSeconds(93))
+Check 'network failure: kept in the queue, not resent before its retry time' ($fk.Count -eq $before + 1 -and $n4.Queued -eq 1)
+$n5 = NewN $ppath $fk
+Check 'pending notifications survive a restart' ($n5.Queued -eq 1)
+[void]$n5.Pump($t0.AddSeconds(200))
+Check 'after a restart nothing is sent until the board has been read (staleness unknown)' ($fk.Count -eq $before + 1 -and $n5.Queued -eq 1)
+Obs $n5 (BoardOf $r1) $t0.AddSeconds(200); [void]$n5.Pump($t0.AddSeconds(200))   # 503 -> retry again later
+[void]$n5.Pump($t0.AddMinutes(20))   # past the 10-minute eligibility window, within the 1-hour lifetime
+$rt = @($fk.Sent | Select-Object -Skip $before | ForEach-Object { $_[2] } | Sort-Object -Unique)
+Check 'retries continue after a restart and past the 10-minute window, then succeed (queue empty)' ($fk.Count -eq $before + 3 -and $n5.Queued -eq 0)
+Check 'every retry of one transition uses the same Topic (and the same id)' ($rt.Count -eq 1 -and $rt[0] -match '^[A-Za-z0-9_-]{22}$' -and @($fk.Sent | Select-Object -Skip $before | Where-Object { ($_[1] | ConvertFrom-Json).id -ne $rt[0] }).Count -eq 0) ($rt -join ',')
+$l1 = PSess 'l1' 'DONE' $t0.AddSeconds(300) 'Lifetime task'
+$fk.Code = 0
+Obs $n5 (BoardOf $l1) $t0.AddSeconds(301); [void]$n5.Pump($t0.AddSeconds(301))
+$before = $fk.Count
+[void]$n5.Pump($t0.AddSeconds(301).AddMinutes(61))
+Check 'a notification that never got through expires after its lifetime (1 h): dropped, not sent late' ($fk.Count -eq $before -and $n5.Queued -eq 0)
+$fk.Code = 201
+
+# obsolete before sending (5 in the review list)
+$fk.Codes.Enqueue(0)
+$o1 = PSess 'o1' 'NEEDS_YOU' $t0.AddSeconds(400) 'Answered task'
+Obs $n5 (BoardOf $o1) $t0.AddSeconds(401); [void]$n5.Pump($t0.AddSeconds(401))
+$before = $fk.Count
+Obs $n5 (BoardOf (PSess 'o1' 'WORKING' $t0.AddSeconds(402) 'Answered task')) $t0.AddSeconds(403); [void]$n5.Pump($t0.AddSeconds(420))
+Check 'queued NEEDS YOU whose prompt was answered meanwhile: dropped, not sent' ($fk.Count -eq $before -and $n5.Queued -eq 0)
+$fk.Codes.Enqueue(0)
+$o2 = PSess 'o2' 'NEEDS_YOU' $t0.AddSeconds(430) 'Ended task'
+Obs $n5 (BoardOf $o2) $t0.AddSeconds(431); [void]$n5.Pump($t0.AddSeconds(431)); $before = $fk.Count
+Obs $n5 (BoardOf) $t0.AddSeconds(432); [void]$n5.Pump($t0.AddSeconds(450))
+Check 'queued NEEDS YOU whose session ended (file removed): dropped' ($fk.Count -eq $before -and $n5.Queued -eq 0)
+$fk.Codes.Enqueue(0)
+$o3 = PSess 'o3' 'DONE' $t0.AddSeconds(460) 'Dismissed task'
+Obs $n5 (BoardOf $o3) $t0.AddSeconds(461); [void]$n5.Pump($t0.AddSeconds(461)); $before = $fk.Count
+Obs $n5 (BoardOf) $t0.AddSeconds(462); [void]$n5.Pump($t0.AddSeconds(480))
+Check 'queued DONE whose worker left the board (only a dismissal removes DONE): still sent, it did finish' ($fk.Count -eq $before + 1 -and $n5.Queued -eq 0)
+$fk.Codes.Enqueue(0)
+$o4 = PSess 'o4' 'DONE' $t0.AddSeconds(490) 'Restarted task'
+Obs $n5 (BoardOf $o4) $t0.AddSeconds(491); [void]$n5.Pump($t0.AddSeconds(491)); $before = $fk.Count
+Obs $n5 (BoardOf (PSess 'o4' 'WORKING' $t0.AddSeconds(492) 'Restarted task')) $t0.AddSeconds(493); [void]$n5.Pump($t0.AddSeconds(510))
+Check 'queued DONE superseded by a new prompt in that session: dropped' ($fk.Count -eq $before -and $n5.Queued -eq 0)
+
+# 4xx other than expiry: dropped, reported, subscription kept
+$fk.Codes.Enqueue(403)
+Obs $n5 (BoardOf (PSess 'x1' 'DONE' $t0.AddSeconds(520) 'Rejected task')) $t0.AddSeconds(521); [void]$n5.Pump($t0.AddSeconds(521))
+Check 'push service rejects (403): dropped, reason shown for that phone, phone kept' ($n5.Queued -eq 0 -and $n5.Count -eq 1 -and $n5.Find($epA).Last -match 'rejected by the push service \(HTTP 403')
+Check 'status text says "accepted by the push service", never "delivered"' ((Get-Content (Join-Path $src 'push.cs') -Raw) -notmatch '(?i)"[^"\r\n]*\bdelivered[^"\r\n]*"' -and (Get-Content (Join-Path $src 'phone.js') -Raw) -notmatch '(?i)delivered')
+
+# 10: expired subscription
+[void]$n5.Subscribe($epB, $uaPub, $uaAuth, $true, $true)
+$fk.Codes.Enqueue(410); $fk.Codes.Enqueue(201)
+Obs $n5 (BoardOf (PSess 'e1' 'DONE' $t0.AddSeconds(530) 'Expiry task')) $t0.AddSeconds(531); [void]$n5.Pump($t0.AddSeconds(531)); [void]$n5.Pump($t0.AddSeconds(540))
+$gone = $null -eq $n5.Find($epA) -or $null -eq $n5.Find($epB)
+Check '10. expired subscription (410): that phone is removed with its queue, the other phone still gets it, nothing throws' ($gone -and $n5.Count -eq 1 -and $n5.Queued -eq 0)
+$n6 = NewN $ppath $fk
+Check '10. the removal is persisted' ($n6.Count -eq 1)
+
+# 9: a failing delivery never touches task state (real indicator, temporary state folder)
+$proot = New-Root
+Put $proot 'f1' 'WORKING' 'Toah_Nipi_Portal' 5
+$pf = Form $proot
+$fk9 = New-Object TPush; $fk9.Throw = $true
+$pf.Push.Transport = FakeFn $fk9
+[void]$pf.Push.Subscribe($epA, $uaPub, $uaAuth, $true, $true)
+Put $proot 'f1' 'NEEDS_YOU' 'Toah_Nipi_Portal' 1
+$pf.ReloadNow()
+$fileBefore = Get-Content (SessFile $proot 'f1') -Raw
+[void]$pf.Push.Pump([DateTime]::UtcNow); [void]$pf.Push.Pump([DateTime]::UtcNow.AddSeconds(10))
+$pf.ReloadNow()
+Check '9. a failing delivery (exception) leaves the state file and the board untouched, and is retried' ($fk9.Count -eq 2 -and (Get-Content (SessFile $proot 'f1') -Raw) -eq $fileBefore -and (Ids $pf) -eq 'f1' -and $pf.Workers[0].State -eq 'NEEDS_YOU' -and $pf.Push.Queued -eq 1) "sent=$($fk9.Count) queued=$($pf.Push.Queued)"
+Check 'indicator: the notifier gets the desktop display name (aliases, numbering)' ((($fk9.Sent[0][1]) | ConvertFrom-Json).body -eq 'Portal')
+$pf.Dispose()
+
+# reasons: only from what hook.ps1 stored
+$rs = @(
+    @('Notification', 'permission_prompt', 'waiting for permission'), @('Notification', 'agent_needs_input', 'waiting for your input'),
+    @('Notification', 'elicitation_dialog', 'waiting for your input'), @('Notification', 'something_new', ''),
+    @('PermissionRequest', 'Bash', 'wants to use Bash'), @('PreToolUse', 'AskUserQuestion', 'has a question for you'), @('PermissionRequest', '', ''))
+Check 'NEEDS YOU reason: mapped from the stored notification type / tool name only' (@($rs | Where-Object { $PN::Reason($_[0], $_[1]) -ne $_[2] }).Count -eq 0)
+
+# subscription validation
+$badEp = 'http://fcm.googleapis.com/fcm/send/x', 'https://evil.example/fcm', 'https://fcm.googleapis.com.evil.example/x', 'https://u@fcm.googleapis.com/x', 'https://fcm.googleapis.com:8443/x', '', ('https://fcm.googleapis.com/' + ('a' * 700))
+$goodEp = 'https://fcm.googleapis.com/fcm/send/x', 'https://updates.push.services.mozilla.com/wpush/v2/x', 'https://web.push.apple.com/x', 'https://wns2-par02p.notify.windows.com/w/?token=x'
+Check 'endpoint must be https on a known push service (no SSRF to other hosts)' (@($badEp | Where-Object { $PN::ValidEndpoint($_) }).Count -eq 0 -and @($goodEp | Where-Object { -not $PN::ValidEndpoint($_) }).Count -eq 0)
+$offCurve = 'BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-QYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4'   # one byte of Y changed: not on the curve
+Check 'phone keys must be a P-256 point and a 16-byte secret' ($PN::ValidKeys($uaPub, $uaAuth) -and -not $PN::ValidKeys($offCurve, $uaAuth) -and -not $PN::ValidKeys($uaPub, 'AAAA') -and -not $PN::ValidKeys('not base64!', $uaAuth))
+$nm = NewN (Join-Path $pdir 'max.dat') $fk
+$okSubs = 0; for ($i = 1; $i -le 10; $i++) { if ([string]::IsNullOrEmpty($nm.Subscribe("https://fcm.googleapis.com/fcm/send/max-$i", $uaPub, $uaAuth, $true, $true))) { $okSubs++ } }
+$eleventh = $nm.Subscribe('https://fcm.googleapis.com/fcm/send/max-11', $uaPub, $uaAuth, $true, $true)
+Check 'at most 10 phones' ($okSubs -eq 10 -and $eleventh -eq 'full' -and $nm.Count -eq 10) "ok=$okSubs 11th=$eleventh count=$($nm.Count)"
+
+# storage
+$rawDat = [IO.File]::ReadAllBytes($ppath); $rawText = [Text.Encoding]::UTF8.GetString($rawDat)
+Check 'push.dat is encrypted (DPAPI): no endpoint, key or task name readable in the file' ($rawText -notmatch 'fcm|googleapis|phone-|SEO|Booking|Key|Secret')
+$bad = Join-Path $pdir 'bad.dat'; [IO.File]::WriteAllText($bad, 'not encrypted')
+$nb = NewN $bad $fk
+Check 'an unreadable push.dat (other user / damaged) is set aside, never deleted; the app starts clean' ($nb.Count -eq 0 -and -not (Test-Path $bad) -and @(Get-ChildItem $pdir -Filter 'bad.dat.*.unreadable').Count -eq 1 -and $nb.Error -match 'enabled again')
+
+# crypto
+$B64 = { param($s) $PN::B64(($s -replace '\s', '')) }
+$asPub = & $B64 'BP4z9KsN6nGRTbVYI_c7VJSPQTBtkgcy27mlmlMoZIIgDll6e3vCYLocInmYWAmS6TlzAC8wEqKK6PBru3jl7A8'
+$asKey = $PN::Point($asPub); $asKey.D = & $B64 'yfWPiYE-n46HLnH0KqZOF1fJJU3MYrct3AELtAQ-oRw'
+$enc = [ClaudeStatus.WebPushCrypto]::Encrypt((& $B64 $uaPub), (& $B64 $uaAuth), [Text.Encoding]::UTF8.GetBytes('When I grow up, I want to be a watermelon'), $asKey, (& $B64 'DGv6ra1nlYgDCS1FRnbzlw'))
+Check 'RFC 8291 encryption: byte-exact match with the RFC''s worked example' ($PN::B64u($enc) -eq 'DGv6ra1nlYgDCS1FRnbzlwAAEABBBP4z9KsN6nGRTbVYI_c7VJSPQTBtkgcy27mlmlMoZIIgDll6e3vCYLocInmYWAmS6TlzAC8wEqKK6PBru3jl7A_yl95bQpu6cVPTpK4Mqgkf1CXztLVBSt2Ks3oZwbuwXPXLWyouBWLVWGNWQexSgSxsj_Qulcy4a-fN') ($PN::B64u($enc))
+$vk = New-Object System.Security.Cryptography.ECDsaCng([System.Security.Cryptography.ECCurve+NamedCurves]::nistP256)
+$vp = $vk.ExportParameters($true); $vpub = [byte[]](@(4) + $vp.Q.X + $vp.Q.Y)
+$jwt = [ClaudeStatus.WebPushCrypto]::VapidJwt('https://fcm.googleapis.com', $vp.D, $vpub, $PN::Contact, [DateTime]::UtcNow.AddHours(12))
+$jp = $jwt.Split('.')
+$claims = [Text.Encoding]::UTF8.GetString($PN::B64($jp[1])) | ConvertFrom-Json
+$verify = [System.Security.Cryptography.ECDsa]::Create($PN::Point($vpub))
+$sigOk = $verify.VerifyData([Text.Encoding]::ASCII.GetBytes($jp[0] + '.' + $jp[1]), $PN::B64($jp[2]), [System.Security.Cryptography.HashAlgorithmName]::SHA256)
+Check 'VAPID token: ES256 signature verifies; aud = push service origin, exp < 24 h, sub = the contact' ($sigOk -and $claims.aud -eq 'https://fcm.googleapis.com' -and $claims.exp -lt [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() + 86400 -and $claims.sub -eq $PN::Contact -and $PN::B64($jp[2]).Length -eq 64)
+
+# the dashboard endpoint
+$pp3 = [THttp]::FreePort()
+$proot3 = New-PhoneRoot $pp3
+$pfk = New-Object TPush
+$pn3 = NewN (Join-Path $proot3 'state\push.dat') $pfk
+$psrv = New-Object ClaudeStatus.PhoneServer($proot3, $pp3, (Dismisser (Join-Path $proot3 'state\sessions')), [TFake]::Names(@()))
+$psrv.Push = $pn3
+[void]$psrv.Start()
+$psrv.Publish((BoardOf), $false, '')
+function PushHeaders([int]$port) { $h = DismissHeaders $port; $h['X-Claude-Status'] = 'push'; return $h }
+function PushReq([hashtable]$body, [hashtable]$override = @{}) {
+    $h = PushHeaders $pp3; foreach ($x in $override.Keys) { $h[$x] = $override[$x] }
+    $r = Req $pp3 'POST' '/api/push' $h ($body | ConvertTo-Json -Compress)
+    $r.J = try { $r.Body | ConvertFrom-Json } catch { $null }
+    return $r
+}
+$r = PushReq @{ op = 'key' }
+$served = ((Req $pp3 'GET' '/').Raw + (Req $pp3 'GET' '/phone.js').Raw + (Req $pp3 'GET' '/sw.js').Raw + $r.Raw)
+$state3 = (New-Object System.Web.Script.Serialization.JavaScriptSerializer).Deserialize([Text.Encoding]::UTF8.GetString([System.Security.Cryptography.ProtectedData]::Unprotect([IO.File]::ReadAllBytes((Join-Path $proot3 'state\push.dat')), [Text.Encoding]::ASCII.GetBytes('ClaudeStatus.Push.v1'), 'CurrentUser')), [ClaudeStatus.PushState])
+Check 'dashboard gets only the public VAPID key (65-byte point); the private key appears in no page, script or response' ($r.Code -eq 200 -and $PN::B64($r.J.key).Length -eq 65 -and $r.J.key -eq $state3.Pub -and $state3.Key.Length -ge 40 -and $served -notmatch [regex]::Escape($state3.Key) -and $served -notmatch [regex]::Escape($state3.Secret)) $r.Body
+$h0 = (PushReq @{ op = 'key' } @{ 'X-Claude-Status' = $null }).Code
+$h1 = (PushReq @{ op = 'key' } @{ 'X-Claude-Status' = 'dismiss' }).Code
+$h2 = (PushReq @{ op = 'key' } @{ Origin = 'https://evil.example' }).Code
+$h3 = (PushReq @{ op = 'key' } @{ 'Sec-Fetch-Site' = 'cross-site' }).Code
+$h4 = (PushReq @{ op = 'key' } @{ Host = 'evil.example' }).Code
+$h5 = (Req $pp3 'GET' '/api/push').Code
+Check '/api/push keeps the existing protections: action header, Origin, fetch metadata, Host; GET not served (404, like the other actions)' ($h0 -eq 403 -and $h1 -eq 403 -and $h2 -eq 403 -and $h3 -eq 403 -and $h4 -eq 421 -and $h5 -eq 404) "$h0 $h1 $h2 $h3 $h4 $h5"
+$r = PushReq @{ op = 'subscribe'; endpoint = 'https://evil.example/x'; p256dh = $uaPub; auth = $uaAuth; needs = $true; done = $true }
+$r2 = PushReq @{ op = 'subscribe'; endpoint = $epA; p256dh = $offCurve; auth = $uaAuth; needs = $true; done = $true }
+Check '/api/push refuses other hosts and invalid keys' ($r.Code -eq 400 -and $r2.Code -eq 400 -and $pn3.Count -eq 0 -and $pfk.Count -eq 0) "$($r.Code) $($r2.Code)"
+$r = PushReq @{ op = 'subscribe'; endpoint = $epA; p256dh = $uaPub; auth = $uaAuth; needs = $true; done = $false }
+$tm = Msg $pfk 0
+Check 'subscribe: registered with its preferences, a fixed test message sent, reported as "accepted" (not delivered)' ($r.Code -eq 200 -and $r.J.result -eq 'subscribed' -and $r.J.test -eq 'accepted' -and $r.J.last -match 'accepted by the push service \(HTTP 201\)' -and $pn3.Find($epA).Done -eq $false -and $tm.body -eq 'Test notification from your laptop.' -and $tm.s -eq 'TEST') $r.Body
+$r = PushReq @{ op = 'test'; endpoint = $epA; title = 'HACK'; body = 'HACK' }
+Check 'test again within 10 s: refused (429), nothing sent' ($r.Code -eq 429 -and $r.J.result -eq 'too_soon' -and $pfk.Count -eq 1)
+$r = PushReq @{ op = 'status'; endpoint = $epA }
+$r2 = PushReq @{ op = 'status'; endpoint = $epB }
+Check 'status: a known phone gets its preferences; an unknown one only "known: false"' ($r.J.known -eq $true -and $r.J.needs -eq $true -and $r.J.done -eq $false -and $r2.J.known -eq $false -and @($r2.J.PSObject.Properties).Count -eq 1)
+$r = PushReq @{ op = 'prefs'; endpoint = $epA; needs = $false; done = $true }
+$r2 = PushReq @{ op = 'prefs'; endpoint = $epB; needs = $false; done = $true }
+$r3 = PushReq @{ op = 'test'; endpoint = $epB }
+Check 'prefs saved for a known phone; unknown phones: 404 for prefs and test, nothing sent' ($r.Code -eq 200 -and -not $pn3.Find($epA).Needs -and $pn3.Find($epA).Done -and $r2.Code -eq 404 -and $r3.Code -eq 404 -and $pfk.Count -eq 1)
+Start-Sleep -Seconds 10
+$r = PushReq @{ op = 'test'; endpoint = $epA; title = 'HACK'; body = 'HACK' }
+Check 'no request can choose notification text: extra title/body fields are ignored' ($r.Code -eq 200 -and $pfk.Count -eq 2 -and $pfk.Sent[1][1] -notmatch 'HACK' -and $pfk.Sent[1][0] -eq $epA)
+$r = PushReq @{ op = 'unsubscribe'; endpoint = $epA }
+Check 'unsubscribe removes the phone' ($r.Code -eq 200 -and $pn3.Count -eq 0)
+$r = Req $pp3 'GET' '/sw.js'
+$r2 = Req $pp3 'GET' '/'
+Check 'service worker served from the root as JavaScript, no-store; page CSP allows only same-origin workers' ($r.Code -eq 200 -and $r.Raw -match 'Content-Type: text/javascript' -and $r.Raw -match 'Cache-Control: no-store' -and $r2.Raw -match "worker-src 'self'" -and $r2.Raw -match "default-src 'none'")
+$psrv.Stop()
+
+$sw = Get-Content (Join-Path $src 'sw.js') -Raw
+Check 'service worker: duplicate filter in IndexedDB for 24 h (best effort), no fetch handler, no network, no other storage' ($sw -match "indexedDB\.open\('claude-status-push'" -and $sw -match 'SEEN_MS = 24 \* 3600 \* 1000' -and $sw -notmatch "addEventListener\('fetch'|fetch\(|caches|localStorage|XMLHttpRequest|https?://|importScripts")
+$node = Get-Command node -ErrorAction SilentlyContinue
+if ($node) {
+    # sw.js in a minimal stand-in worker scope: real logic, fake IndexedDB that can be cleared, fake notifications
+    $harness = @'
+const fs = require('fs'); const src = fs.readFileSync(process.argv[2], 'utf8');
+const L = {}, shown = []; let store = new Map();
+const req = (fn) => { const r = {}; setTimeout(() => { r.result = fn(); r.onsuccess && r.onsuccess({ target: r }); }, 0); return r; };
+const db = { close() {}, transaction() {
+  const tx = {}; let pending = 0; const done = () => { if (--pending === 0) setTimeout(() => tx.oncomplete && tx.oncomplete(), 0); };
+  const os = {
+    get(k) { pending++; const r = req(() => store.get(k)); const s = r; setTimeout(done, 1); return s; },
+    put(v, k) { store.set(k, v); },
+    openCursor() { pending++; const keys = [...store.keys()]; let i = 0; const r = {}; const step = () => setTimeout(() => {
+      if (i >= keys.length) { r.onsuccess && r.onsuccess({ target: { result: null } }); done(); return; }
+      const k = keys[i++]; r.onsuccess && r.onsuccess({ target: { result: { value: store.get(k), delete() { store.delete(k); }, continue: step } } }); }, 0); step(); return r; } };
+  tx.objectStore = () => os; return tx; } };
+const self = { addEventListener: (t, f) => (L[t] = f), registration: { scope: 'https://x/', showNotification: (t, o) => { shown.push([t, o.body, o.tag]); return Promise.resolve(); } }, skipWaiting() {}, clients: {} };
+const indexedDB = { open() { const r = {}; setTimeout(() => { r.result = db; r.onsuccess(); }, 0); return r; } };
+new Function('self', 'indexedDB', src)(self, indexedDB);
+const push = (m) => new Promise((res) => L.push({ data: { json: () => m }, waitUntil: (p) => p.then(res) }));
+const m1 = { v: 1, id: 'AAAAAAAAAAAAAAAAAAAAAA', s: 'DONE', title: 'Claude finished a task', body: 'Website', k: 'BBBBBBBBBBBBBBBBBBBBBB' };
+(async () => {
+  await push(m1); await push(m1);                     // a resent copy of the same transition
+  await push({ ...m1, id: 'CCCCCCCCCCCCCCCCCCCCCC' }); // a new transition of the same worker
+  store = new Map(); await push(m1);                  // storage cleared: shown again (best effort, documented)
+  await new Promise((r) => { L.push({ data: { json: () => { throw new Error('x'); } }, waitUntil: r }); setTimeout(r, 20); });
+  process.stdout.write(JSON.stringify(shown));
+})();
+'@
+    $hf = Join-Path $tmp 'sw-harness.js'; [IO.File]::WriteAllText($hf, $harness)
+    $out = & $node.Source $hf (Join-Path $src 'sw.js') 2>&1 | Out-String
+    $shown = try { $out | ConvertFrom-Json } catch { $null }
+    Check 'service worker: shows a transition once, drops a resent copy, shows the next transition, ignores bad data' ($shown -and $shown.Count -eq 3 -and $shown[0][0] -eq 'Claude finished a task' -and $shown[0][1] -eq 'Website' -and $shown[0][2] -eq 'claude-BBBBBBBBBBBBBBBBBBBBBB') $out
+} else { Skip 'service worker duplicate filter' 'node not found' }
+
+# ======================================================================================
 Section 'Phone page in a real browser (headless Chrome emulating Android phones)'
 # ======================================================================================
 $chrome = @("$env:ProgramFiles\Google\Chrome\Application\chrome.exe", "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe",
@@ -1518,10 +1842,12 @@ $wantSl = 'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Fi
 Check 'status line set to statusline.ps1 (forward slashes for Git Bash), no chain file when there was no status line' ($s.statusLine.type -eq 'command' -and $s.statusLine.command -eq $wantSl -and -not (Test-Path (Join-Path $inst 'statusline-chain.json'))) $s.statusLine.command
 Check 'usage files installed; config gets showUsage=true' ((Test-Path (Join-Path $inst 'usage.cs')) -and (Test-Path (Join-Path $inst 'statusline.ps1')) -and $c.showUsage -eq $true)
 $cfgText = Get-Content (Join-Path $inst 'config.json') -Raw
+$pushDat = Join-Path $inst 'state\push.dat'; [IO.File]::WriteAllBytes($pushDat, [byte[]](7, 7, 7))   # stands in for a phone registration
 $out = & $winPs -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repo 'install.ps1') -ClaudeDir $cd -NoStart 2>&1
 Check 're-running the installer is a no-op for settings.json and config.json' ((Get-Content (Join-Path $inst 'config.json') -Raw) -eq $cfgText -and (($out | Out-String) -match 'already up to date'))
-Check 'phone dashboard files installed; config gets phoneDashboard=false, phonePort=48521' ((@('phone.cs', 'phone.html', 'phone.css', 'phone.js', 'phone-setup.ps1') | Where-Object { -not (Test-Path (Join-Path $inst $_)) }).Count -eq 0 -and $c.phoneDashboard -eq $false -and $c.phonePort -eq 48521)
-$out = & $winPs -NoProfile -Command "Add-Type -Path '$inst\indicator.cs', '$inst\phone.cs', '$inst\usage.cs' -ReferencedAssemblies System.Windows.Forms, System.Drawing, System.Web.Extensions; 'ok'" 2>&1
+Check 'upgrade (re-running the installer) keeps phone notification registrations (state\push.dat)' ((Test-Path $pushDat) -and (([IO.File]::ReadAllBytes($pushDat)) -join ',') -eq '7,7,7')
+Check 'phone dashboard files installed; config gets phoneDashboard=false, phonePort=48521' ((@('phone.cs', 'phone.html', 'phone.css', 'phone.js', 'phone-setup.ps1', 'push.cs', 'sw.js') | Where-Object { -not (Test-Path (Join-Path $inst $_)) }).Count -eq 0 -and $c.phoneDashboard -eq $false -and $c.phonePort -eq 48521)
+$out = & $winPs -NoProfile -Command "Add-Type -Path '$inst\indicator.cs', '$inst\phone.cs', '$inst\usage.cs', '$inst\push.cs' -ReferencedAssemblies System.Windows.Forms, System.Drawing, System.Web.Extensions, System.Core, System.Security, System.Numerics; 'ok'" 2>&1
 Check 'installed indicator compiles with Windows PowerShell 5.1' (($out | Out-String).Trim() -eq 'ok') ($out | Out-String)
 $auto = & $winPs -NoProfile -ExecutionPolicy Bypass -File (Join-Path $inst 'autostart.ps1') 2>&1
 Check 'autostart script runs (status query only; your Startup folder is not modified)' (($auto | Out-String) -match 'Autostart is currently')
@@ -1563,17 +1889,19 @@ Check 'uninstall restores your own status line exactly' ($s3.statusLine.command 
 # ======================================================================================
 Section 'Privacy / no-network audit (static)'
 # ======================================================================================
-$phoneSrc = 'phone.cs', 'phone.js', 'phone.html', 'phone.css', 'phone-setup.ps1'
+$phoneSrc = 'phone.cs', 'phone.js', 'phone.html', 'phone.css', 'phone-setup.ps1', 'push.cs', 'sw.js'
 $code = (Get-ChildItem $src -File | Where-Object { $phoneSrc -notcontains $_.Name } | ForEach-Object { Get-Content $_.FullName -Raw }) -join "`n"
 Check 'no network APIs in the desktop app or hook' ($code -notmatch 'WebClient|HttpClient|WebRequest|Invoke-WebRequest|Invoke-RestMethod|Net\.Sockets|TcpClient|TcpListener|UdpClient|https?://')
 $pcs = Get-Content (Join-Path $src 'phone.cs') -Raw
 Check 'phone server only listens on loopback and never connects out' ($pcs -match 'new TcpListener\(IPAddress\.Loopback' -and $pcs -notmatch 'IPAddress\.(Any|IPv6Any)|0\.0\.0\.0|new TcpClient|\.Connect\(|WebClient|HttpClient|WebRequest|Access-Control-Allow')
 $pjs = (Get-Content (Join-Path $src 'phone.js') -Raw) + (Get-Content (Join-Path $src 'phone.html') -Raw)
 $pjsNoSvgNs = $pjs.Replace("'http://www.w3.org/2000/svg'", "''")   # the SVG namespace name is an identifier, not a request
-Check 'phone page: no notifications, sounds, vibration, speech, service worker, other storage or outside URLs' ($pjsNoSvgNs -cnotmatch 'Notification|vibrate|Audio|speechSynthesis|serviceWorker|sessionStorage|indexedDB|document\.cookie|innerHTML|https?://')
+Check 'phone page: no sounds, vibration, speech, other storage or outside URLs; no page-made notifications (only push via sw.js)' ($pjsNoSvgNs -cnotmatch 'new Notification|vibrate|Audio|speechSynthesis|sessionStorage|indexedDB|document\.cookie|innerHTML|https?://' -and (@([regex]::Matches($pjs, "serviceWorker\.register\('([^']*)'") | ForEach-Object { $_.Groups[1].Value }) -join ',') -eq 'sw.js')
+$pushCs = Get-Content (Join-Path $src 'push.cs') -Raw
+Check 'push.cs: its only network call is the POST to a validated push endpoint; it never listens' ((@([regex]::Matches($pushCs, 'WebRequest\.Create\((\w+)\)') | ForEach-Object { $_.Groups[1].Value }) -join ',') -eq 'u' -and $pushCs -match 'var u = new Uri\(sub\.Endpoint\)' -and $pushCs -notmatch 'TcpListener|HttpListener|WebClient|HttpClient|Socket')
 $storage = @([regex]::Matches($pjs, 'localStorage\.\w+\([^)]*\)') | ForEach-Object { $_.Value })
-Check 'phone page stores only the List / Creatures choice, the Show usage / expanded choices and the Compact / Show context choices' ($storage.Count -eq 10 -and @($storage | Where-Object { $_ -notmatch '^localStorage\.(getItem|setItem)\((VIEW_KEY(, view)?|USAGE_KEY(, .*)?|USAGE_OPEN_KEY(, .*)?|COMPACT_KEY(, .*)?|CONTEXT_KEY(, .*)?)\)$' }).Count -eq 0 -and $pjs -match "COMPACT_KEY = 'claudeStatus\.compact', CONTEXT_KEY = 'claudeStatus\.context'" -and $pjs -match "VIEW_KEY = 'claudeStatus\.view'" -and $pjs -match "USAGE_KEY = 'claudeStatus\.usage', USAGE_OPEN_KEY = 'claudeStatus\.usageOpen'") ($storage -join '; ')
-Check 'phone page only calls its own relative API' ((([regex]::Matches($pjs, "'(api/[a-z-]*)") | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique) -join ',') -eq 'api/board,api/dismiss,api/focus,api/usage-refresh' -and $pjs -cnotmatch 'XMLHttpRequest|WebSocket|EventSource|sendBeacon|fetch\(\s*[''"](?!api/)')
+Check 'phone page stores only the List / Creatures, Show usage / expanded, Compact / Show context and notifications on-off / expanded choices' ($storage.Count -eq 14 -and @($storage | Where-Object { $_ -notmatch '^localStorage\.(getItem|setItem)\((VIEW_KEY(, view)?|USAGE_KEY(, .*)?|USAGE_OPEN_KEY(, .*)?|COMPACT_KEY(, .*)?|CONTEXT_KEY(, .*)?|NOTIFY_KEY(, v)?|NOTIFY_OPEN_KEY(, .*)?)\)$' }).Count -eq 0 -and $pjs -match "NOTIFY_OPEN_KEY = 'claudeStatus\.notifyOpen', NOTIFY_KEY = 'claudeStatus\.notify'" -and $pjs -match "COMPACT_KEY = 'claudeStatus\.compact', CONTEXT_KEY = 'claudeStatus\.context'" -and $pjs -match "VIEW_KEY = 'claudeStatus\.view'" -and $pjs -match "USAGE_KEY = 'claudeStatus\.usage', USAGE_OPEN_KEY = 'claudeStatus\.usageOpen'") ($storage -join '; ')
+Check 'phone page only calls its own relative API' ((([regex]::Matches($pjs, "'(api/[a-z-]*)") | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique) -join ',') -eq 'api/board,api/dismiss,api/focus,api/push,api/usage-refresh' -and $pjs -cnotmatch 'XMLHttpRequest|WebSocket|EventSource|sendBeacon|fetch\(\s*[''"](?!api/)')
 $usageSrc = (Get-Content (Join-Path $src 'usage.cs') -Raw) + (Get-Content (Join-Path $src 'statusline.ps1') -Raw)
 Check 'usage: never reads Claude credentials or tokens, never calls Anthropic' ($usageSrc -notmatch '(?i)\.credentials|accessToken|refreshToken|api/oauth|anthropic\.com|Authorization|Bearer')
 Check 'statusline.ps1 only uses rate_limits, context_window and session_id from the session data' ((Get-Content (Join-Path $src 'statusline.ps1') -Raw) -notmatch '\$in\.(cwd|transcript_path|model|cost|workspace|output_style|prompt_id|prompt_cache)')

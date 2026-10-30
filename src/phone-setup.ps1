@@ -11,22 +11,28 @@
     -Disable     Removes that `tailscale serve` entry (only if it points at Claude Status) and turns the
                  dashboard off. The desktop app keeps running.
     -NoServe     Only turns the dashboard on in config.json; doesn't touch Tailscale.
-    -HttpPort    The tailnet port to serve on (default 80).
+    -Https       Serves it over HTTPS instead (tailscale serve --bg --https=443 ...), which phone notifications
+                 need. Requires HTTPS Certificates to be enabled for your tailnet in the Tailscale admin console;
+                 the certificate puts this computer's tailnet name (<machine>.<tailnet>.ts.net) in public
+                 Certificate Transparency logs. Access stays tailnet-only. An existing HTTP entry is kept.
+    -HttpPort    The tailnet port to serve on (default 80, or 443 with -Https).
 
-    Never uses Tailscale Funnel: only devices signed in to your own tailnet can reach the dashboard.
+    Never uses Tailscale Funnel: only devices signed in to your own tailnet can reach the dashboard. It also
+    refuses to report success if Funnel is found switched on for the dashboard's port.
     The dashboard itself listens on 127.0.0.1 only; `tailscale serve` is the only way in from the phone.
 
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\.claude\status-indicator\phone-setup.ps1"
 #>
 [CmdletBinding()]
-param([switch]$Disable, [switch]$Status, [switch]$NoServe, [ValidateRange(1, 65535)][int]$HttpPort = 80)
+param([switch]$Disable, [switch]$Status, [switch]$NoServe, [switch]$Https, [ValidateRange(1, 65535)][int]$HttpPort = 80)
+if ($Https -and -not $PSBoundParameters.ContainsKey('HttpPort')) { $HttpPort = 443 }
 
 # Run under Windows PowerShell 5.1 so config.json is read/written the same way as by install.ps1.
 $winPs = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
 if ($PSVersionTable.PSEdition -eq 'Core' -and (Test-Path -LiteralPath $winPs)) {
     $a = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $PSCommandPath, '-HttpPort', $HttpPort)
-    if ($Disable) { $a += '-Disable' }; if ($Status) { $a += '-Status' }; if ($NoServe) { $a += '-NoServe' }
+    if ($Disable) { $a += '-Disable' }; if ($Status) { $a += '-Status' }; if ($NoServe) { $a += '-NoServe' }; if ($Https) { $a += '-Https' }
     & $winPs @a
     exit $LASTEXITCODE
 }
@@ -153,6 +159,19 @@ function Get-ServeEntries {
     return $list
 }
 
+# Ports where Tailscale Funnel (public internet access) is switched on, from `tailscale serve status --json`.
+function Get-FunnelPorts {
+    $ports = @()
+    if (-not $ts) { return $ports }
+    $r = Invoke-Tailscale @('serve', 'status', '--json')
+    if ($r.Code -ne 0 -or -not $r.Out) { return $ports }
+    try { $j = $r.Out | ConvertFrom-Json } catch { return $ports }
+    if ($j -and $j.PSObject.Properties['AllowFunnel'] -and $j.AllowFunnel) {
+        foreach ($f in $j.AllowFunnel.PSObject.Properties) { if ($f.Value -eq $true) { $ports += [int]($f.Name -replace '^.*:', '') } }
+    }
+    return $ports
+}
+
 function Test-Ours($e) { return @("http://127.0.0.1:$port", "http://127.0.0.1:$port/", "http://localhost:$port", "http://localhost:$port/") -contains $e.Proxy }
 
 function Show-Url($self, [int]$p, [bool]$https) {
@@ -177,6 +196,8 @@ if ($Status) {
     $ours = @(Get-ServeEntries | Where-Object { Test-Ours $_ })
     if ($ours.Count -eq 0) { Note 'serve       : no tailscale serve entry for the dashboard' }
     foreach ($e in $ours) { Note ("serve       : {0} port {1}{2} -> {3}" -f $(if ($e.Https) { 'HTTPS' } else { 'HTTP' }), $e.Port, $e.Path, $e.Proxy) }
+    $funnel = @(Get-FunnelPorts)
+    Note ("funnel      : {0}" -f $(if ($funnel.Count) { 'ON for port(s) ' + ($funnel -join ', ') + ' (public internet access!)' } else { 'off (tailnet only)' }))
     if ($ours.Count -gt 0 -and $self -and $self.Dns) { Show-Url $self $ours[0].Port $ours[0].Https }
     exit 0
 }
@@ -216,21 +237,27 @@ if (-not $self.Dns) { Fail "This computer has no MagicDNS name. Turn on MagicDNS
 
 $entries = @(Get-ServeEntries)
 $onPort = @($entries | Where-Object { $_.Port -eq $HttpPort })
-if ($onPort | Where-Object { Test-Ours $_ -and $_.Path -eq '/' -and -not $_.Https }) {
+$flag = if ($Https) { "--https=$HttpPort" } else { "--http=$HttpPort" }
+if ($onPort | Where-Object { Test-Ours $_ -and $_.Path -eq '/' -and $_.Https -eq [bool]$Https }) {
     Note "tailscale serve already forwards tailnet port $HttpPort to the dashboard"
 } elseif ($onPort.Count -gt 0) {
     Fail ("Tailscale serve already uses tailnet port $HttpPort for something else ({0}). Nothing was changed there. Pick another port, e.g.: phone-setup.ps1 -HttpPort 8080" -f (($onPort | ForEach-Object { "$($_.Path) -> $($_.Proxy)" }) -join ', '))
 } else {
-    $r = Invoke-Tailscale @('serve', '--bg', "--http=$HttpPort", $target)
+    $r = Invoke-Tailscale @('serve', '--bg', $flag, $target)
     if ($r.Code -ne 0) {
         Write-Host $r.Out
-        Fail ("tailscale serve failed. Run this yourself (an administrator prompt may be needed), then open the address below:`n    tailscale serve --bg --http=$HttpPort $target")
+        $hint = if ($Https) { "`nFor HTTPS, HTTPS Certificates must be enabled for your tailnet (Tailscale admin console, DNS page)." } else { '' }
+        Fail ("tailscale serve failed. Run this yourself (an administrator prompt may be needed), then open the address below:`n    tailscale serve --bg $flag $target$hint")
     }
     Note "tailscale serve: tailnet port $HttpPort -> $target (your tailnet only; not Funnel, not the internet)"
 }
 $null = New-Item -ItemType Directory -Force -Path (Split-Path $marker)
-[IO.File]::WriteAllText($marker, "tailscale serve --http=$HttpPort -> $target`n")
-Show-Url $self $HttpPort $false
+[IO.File]::WriteAllText($marker, "tailscale serve $flag -> $target`n")
+if (@(Get-FunnelPorts) -contains $HttpPort) {
+    Fail "Tailscale Funnel is ON for port $HttpPort, so the dashboard is reachable from the public internet. Turn it off with:  tailscale funnel $flag off"
+}
+Note "funnel: off for port $HttpPort (tailnet only)"
+Show-Url $self $HttpPort ([bool]$Https)
 Write-Host ''
 Write-Host 'To turn it off again:  phone-setup.ps1 -Disable'
 exit 0

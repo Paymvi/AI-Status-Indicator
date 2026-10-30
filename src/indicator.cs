@@ -729,6 +729,7 @@ namespace ClaudeStatus
         DateTime phoneRetryUtc = DateTime.MinValue;
         int phoneFailedPort;
         readonly UsageMonitor usage;
+        readonly PushNotifier push;
         UsageForm usageForm;
 
         protected override bool ShowWithoutActivation { get { return true; } }
@@ -836,9 +837,13 @@ namespace ClaudeStatus
             usage = new UsageMonitor(root, null);
             usage.Changed += OnUsageChanged;
 
+            // Phone push notifications (push.cs): inert until a phone turns them on from the dashboard.
+            push = new PushNotifier(Path.Combine(root, "state\\push.dat"));
+
             Reload();
             if (!testMode)
             {
+                push.Start();
                 usage.Start(this);
                 watcher.EnableRaisingEvents = true;
                 cfgWatcher.EnableRaisingEvents = true;
@@ -882,6 +887,7 @@ namespace ClaudeStatus
         public string PhoneStatus { get { return PhoneStatusText; } }
         public void StopPhone() { if (phone != null) { phone.Stop(); phone = null; } }
         public UsageMonitor Usage { get { return usage; } }
+        public PushNotifier Push { get { return push; } }
         public bool UsageShown { get { return ShowUsage; } }
         public Rectangle UsageBounds { get { return UsageRect; } }
         // Replaces the window lookup + activation inside FocusCore, so tests see which worker a click or a
@@ -947,6 +953,8 @@ namespace ClaudeStatus
             ApplyPhone();
             PublishPhone();
             PublishUsage();
+            // Only reads the board: which state each worker is in is decided above, as before (see push.cs).
+            push.Observe(ordered, DateTime.UtcNow, phone != null ? (Func<string, string>)phone.KeyFor : null);
             current = ordered.Count > 0 ? ordered[0] : null;
 
             string st = current == null ? "IDLE" : current.State;
@@ -1016,6 +1024,7 @@ namespace ClaudeStatus
             {
                 var p = new PhoneServer(root, port, PhoneDismiss, PhoneFocus, null);
                 p.UsageRefresh = PhoneUsageRefresh;
+                p.Push = push;
                 if (p.Start()) { phone = p; phoneError = ""; phoneFailedPort = 0; return; }
                 phoneError = p.Error;
             }
@@ -1710,6 +1719,7 @@ namespace ClaudeStatus
         {
             SavePosition();
             StopPhone();
+            push.Stop();
             usage.Dispose();
             watcher.EnableRaisingEvents = false;
             cfgWatcher.EnableRaisingEvents = false;

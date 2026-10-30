@@ -47,6 +47,27 @@
       <button type="button" id="usage-refresh" class="usage-btn">Refresh</button>
     </div>
   </section>
+  <section id="notify" class="usage notify" aria-label="Notifications on this phone">
+    <button type="button" id="notify-sum" class="usage-sum" aria-expanded="false" aria-controls="notify-detail">
+      <span class="usage-title">NOTIFICATIONS</span>
+      <span id="notify-mini" class="usage-mini"><span class="muted">Checking…</span></span>
+      <span class="chev" aria-hidden="true"></span>
+    </button>
+    <div id="notify-detail" class="usage-detail" hidden>
+      <p class="usage-scope">This phone · NEEDS YOU and DONE, even with this page closed</p>
+      <p id="notify-state" class="usage-state"></p>
+      <p id="notify-msg" class="usage-msg" hidden></p>
+      <div id="notify-prefs" class="notify-row" hidden>
+        <button type="button" id="notify-needs" class="tog" aria-pressed="true">NEEDS YOU</button>
+        <button type="button" id="notify-done" class="tog" aria-pressed="true">DONE</button>
+      </div>
+      <div class="notify-row">
+        <button type="button" id="notify-enable" class="usage-btn" hidden>Enable</button>
+        <button type="button" id="notify-test" class="usage-btn" hidden>Send test</button>
+        <button type="button" id="notify-off" class="usage-btn" hidden>Turn off</button>
+      </div>
+    </div>
+  </section>
   <div id="banner" class="banner" hidden>
     <strong id="banner-title"></strong>
     <span id="banner-when"></span>
