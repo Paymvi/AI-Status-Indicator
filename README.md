@@ -316,7 +316,9 @@ The phone can get a real push notification when a worker enters **NEEDS YOU** (*
 
 **How it works.** Standard Web Push: the laptop sends each message to your browser's push service (Google's FCM for Chrome on Android), which wakes the dashboard's service worker (`sw.js`) to show it. The message is encrypted to your phone (RFC 8291), so the push service sees only its size and timing, not the text. No Firebase project, account, app or paid service. The laptop needs internet access; the phone doesn't need Tailscale connected to *receive* one (only to open the dashboard).
 
-**What leaves the laptop:** per notification, one HTTPS request to your phone's push service containing the encrypted title, worker display name, short reason, state and two random tokens. Never prompts, Claude output, paths, session IDs or code.
+**What leaves the laptop:** per notification, one HTTPS request to your phone's push service containing the encrypted title, worker display name, short reason, state, two random tokens and a small picture of that worker's creature. Never prompts, Claude output, paths, session IDs or code.
+
+**The picture.** Each notification shows the creature that worker has on the dashboard, in the pose of its status (waving with a "!" for NEEDS YOU, happy for DONE). It travels inside the encrypted message, so it shows even when the phone can't reach the laptop. A worker without a creature, and **Send test**, show the default worker (the party-hat creature that is also the page's icon). The browser still shows its own name or small logo on the notification; only the browser and the operating system control that. The Windows notifications on the laptop (`toastOn…`) use the same picture when the phone dashboard is on, and the default worker when it's off, because creatures are only assigned for the dashboard; there Windows names the sender.
 
 **Needs HTTPS.** Browsers only allow push on secure pages, so the dashboard has to be served at its `https://` address: enable **HTTPS Certificates** for your tailnet in the Tailscale admin console (DNS page), then run `phone-setup.ps1 -Https`. The certificate puts this laptop's tailnet name (`<machine>.<tailnet>.ts.net`) in public Certificate Transparency logs; access stays tailnet-only (`serve`, never Funnel — `phone-setup.ps1` refuses to report success if Funnel is on).
 
@@ -717,6 +719,7 @@ tests/
   live-tests.ps1         window/focus tests, started hidden by run-tests.ps1 -Live
   common.ps1             shared test helpers
   phone-browser.mjs      phone page checks in headless Chrome/Edge (run-tests.ps1 -Browser)
+  worker-icons.mjs       draws src\'s favicon and notification images from phone.js's art (--check: are they current?)
 ```
 
 Runtime files (`state/`, `position.txt`, `debug.log`) are created only in the install folder and are git-ignored.

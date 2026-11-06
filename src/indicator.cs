@@ -10,6 +10,7 @@ using System.Drawing.Drawing2D;
 using System.Globalization;
 using System.IO;
 using System.Media;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
@@ -681,6 +682,19 @@ namespace ClaudeStatus
         [DllImport("user32.dll")] static extern IntPtr SendMessage(IntPtr h, int msg, IntPtr w, IntPtr l);
         [DllImport("user32.dll")] static extern bool SetProcessDPIAware();
         [DllImport("user32.dll")] static extern bool DestroyIcon(IntPtr h);
+        [DllImport("shell32.dll", CharSet = CharSet.Unicode)] static extern bool Shell_NotifyIcon(int message, ref NotifyIconData data);
+        const int NIM_MODIFY = 1, NIF_INFO = 0x10, NIIF_USER = 4, NIIF_LARGE_ICON = 0x20;
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        struct NotifyIconData
+        {
+            public int cbSize; public IntPtr hWnd; public int uID, uFlags, uCallbackMessage; public IntPtr hIcon;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)] public string szTip;
+            public int dwState, dwStateMask;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 256)] public string szInfo;
+            public int uTimeoutOrVersion;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 64)] public string szInfoTitle;
+            public int dwInfoFlags; public Guid guidItem; public IntPtr hBalloonIcon;
+        }
         const int WS_EX_TOPMOST = 0x8, WS_EX_TOOLWINDOW = 0x80, WS_EX_NOACTIVATE = 0x08000000;
         const int WM_NCLBUTTONDOWN = 0xA1, HTCAPTION = 2;
 
@@ -725,6 +739,7 @@ namespace ClaudeStatus
         SettingsForm settingsForm;
         EventHandler displayChanged;
         PhoneServer phone;
+        readonly Queue<IntPtr> balloonIcons = new Queue<IntPtr>();   // pictures of recent balloons (see WorkerBalloon)
         string phoneError = "";
         DateTime phoneRetryUtc = DateTime.MinValue;
         int phoneFailedPort;
@@ -839,6 +854,7 @@ namespace ClaudeStatus
 
             // Phone push notifications (push.cs): inert until a phone turns them on from the dashboard.
             push = new PushNotifier(Path.Combine(root, "state\\push.dat"));
+            push.Icon = (look, state) => WorkerArt.Png(root, look, state);
 
             Reload();
             if (!testMode)
@@ -930,12 +946,13 @@ namespace ClaudeStatus
             numbering.Apply(list);
             Board.Sort(list, CfgStr("workerSort", "urgency"));
 
+            var announce = new List<SessionInfo>();
             if (initialized)
                 foreach (var si in list)
                 {
                     SessionInfo prev;
                     bool had = sessions.TryGetValue(si.Id, out prev);
-                    if (!had || prev.State != si.State) Announce(si);
+                    if (!had || prev.State != si.State) announce.Add(si);
                     // The user just sent this session a prompt, so the window they typed in is (very likely) its
                     // window. It is only kept if it verifiably belongs to this session's host process.
                     if (si.Event == "UserPromptSubmit" && si.ClaudePid > 0 && (!had || prev.Updated != si.Updated)
@@ -952,9 +969,10 @@ namespace ClaudeStatus
             PruneAnchors();
             ApplyPhone();
             PublishPhone();
+            foreach (var si in announce) Announce(si);   // after PublishPhone: a brand-new worker has its creature by now
             PublishUsage();
             // Only reads the board: which state each worker is in is decided above, as before (see push.cs).
-            push.Observe(ordered, DateTime.UtcNow, phone != null ? (Func<string, string>)phone.KeyFor : null);
+            push.Observe(ordered, DateTime.UtcNow, phone != null ? (Func<string, string>)phone.KeyFor : null, phone != null ? (Func<string, int>)phone.LookOf : null);
             current = ordered.Count > 0 ? ordered[0] : null;
 
             string st = current == null ? "IDLE" : current.State;
@@ -980,23 +998,46 @@ namespace ClaudeStatus
             {
                 case Board.Done:
                     if (CfgBool("soundOnDone", true)) SystemSounds.Asterisk.Play();
-                    if (CfgBool("toastOnDone", false)) Toast("Claude is done", where, ToolTipIcon.Info);
+                    if (CfgBool("toastOnDone", false)) Toast("Claude is done", where, ToolTipIcon.Info, si);
                     break;
                 case Board.NeedsYou:
                     if (CfgBool("soundOnNeedsYou", true)) SystemSounds.Exclamation.Play();
-                    if (CfgBool("toastOnNeedsYou", true)) Toast("Claude needs you", where + " is waiting for your input or approval", ToolTipIcon.Warning);
+                    if (CfgBool("toastOnNeedsYou", true)) Toast("Claude needs you", where + " is waiting for your input or approval", ToolTipIcon.Warning, si);
                     break;
                 case Board.Error:
                     if (CfgBool("soundOnError", true)) SystemSounds.Hand.Play();
-                    if (CfgBool("toastOnError", true)) Toast("Claude stopped with an error", where + (si.Detail != "" ? ": " + si.Detail : ""), ToolTipIcon.Error);
+                    if (CfgBool("toastOnError", true)) Toast("Claude stopped with an error", where + (si.Detail != "" ? ": " + si.Detail : ""), ToolTipIcon.Error, si);
                     break;
             }
         }
 
-        void Toast(string title, string text, ToolTipIcon icon)
+        void Toast(string title, string text, ToolTipIcon icon, SessionInfo si)
         {
             if (testMode) return;
+            try { if (WorkerBalloon(title, text, si)) return; } catch { }
             try { tray.ShowBalloonTip(5000, title, text, icon); } catch { }
+        }
+
+        // The same balloon with the worker's creature as its picture. NotifyIcon has no way to set one, so this asks
+        // the shell directly, naming the tray icon by NotifyIcon's private window and id; if those ever change, the
+        // exception sends Toast back to the plain balloon. Windows reads the picture when the toast appears, possibly
+        // behind other toasts, so each balloon's own handle outlives the call (destroying it at once loses the toast);
+        // and it refuses any size but the system icon size.
+        bool WorkerBalloon(string title, string text, SessionInfo si)
+        {
+            const BindingFlags Private = BindingFlags.NonPublic | BindingFlags.Instance;
+            var window = (NativeWindow)typeof(NotifyIcon).GetField("window", Private).GetValue(tray);
+            using (var bmp = WorkerArt.Draw(root, phone != null ? phone.LookOf(si.Id) : -1, si.State, SystemInformation.IconSize.Width))
+            {
+                IntPtr h = bmp.GetHicon();
+                var d = new NotifyIconData { hWnd = window.Handle, uID = (int)typeof(NotifyIcon).GetField("id", Private).GetValue(tray), uFlags = NIF_INFO,
+                    uTimeoutOrVersion = 5000, szInfoTitle = title, szInfo = text, dwInfoFlags = NIIF_USER | NIIF_LARGE_ICON, hBalloonIcon = h };
+                d.cbSize = Marshal.SizeOf(d);
+                if (!Shell_NotifyIcon(NIM_MODIFY, ref d)) { DestroyIcon(h); return false; }
+                balloonIcons.Enqueue(h);
+                if (balloonIcons.Count > 16) DestroyIcon(balloonIcons.Dequeue());
+                return true;
+            }
         }
 
         // Dismissing only deletes Claude Status's own state file for a DONE worker; Claude Code is not touched.

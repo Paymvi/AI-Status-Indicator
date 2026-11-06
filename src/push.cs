@@ -11,8 +11,9 @@
 //
 // What leaves the laptop: one HTTPS POST per notification to that phone's push service (for Chrome on Android,
 // Google's FCM). The body is encrypted to the phone, so the push service can't read it. It holds the title,
-// the worker's display name, a short reason, the state and two opaque tokens; never prompts, transcripts,
-// paths, session IDs or code. Keys, subscriptions, preferences, ledger and queue live in one file,
+// the worker's display name, a short reason, the state, two opaque tokens and the worker's creature picture
+// (inside the message because a phone off the tailnet can't reach the laptop to load one); never prompts,
+// transcripts, paths, session IDs or code. Keys, subscriptions, preferences, ledger and queue live in one file,
 // state\push.dat, encrypted with Windows DPAPI for the current Windows user.
 using System;
 using System.Collections.Generic;
@@ -38,6 +39,7 @@ namespace ClaudeStatus
         public string Tid = "", Endpoint = "", Session = "", State = "", Title = "", Body = "", Row = "";
         public long Since, Created, NextTry;   // Since = state_since ticks; Created / NextTry = Unix ms
         public int Tries;
+        public int Look = -1;   // the worker's creature when it was queued; -1 = none (also items saved before this field)
     }
 
     // The whole of state\push.dat (before encryption).
@@ -53,6 +55,7 @@ namespace ClaudeStatus
     public sealed class PushNotifier
     {
         public const int EligibleMinutes = 10, LifetimeMinutes = 60, LedgerHours = 24, MaxSubs = 10, TtlSeconds = 3600, TestEverySeconds = 10;
+        public const int MaxPayload = 3900;   // push services take 4096 bytes, encryption included
         public const int Unknown = -1, TooSoon = -2;   // Test() results besides HTTP status codes (0 = unreachable)
         // RFC 8292 contact (optional there). Non-identifying; FCM's acceptance is checked on the first test send.
         public const string Contact = "mailto:claude-status@localhost";
@@ -75,6 +78,8 @@ namespace ClaudeStatus
         // Sends one message: (subscription, payload JSON, Topic) -> the push service's HTTP status, 0 if unreachable.
         // Tests replace it; the default encrypts and POSTs (Send).
         public Func<PushSub, string, string, int> Transport;
+        // (look, state) -> that creature's Base64 PNG, or null. Without one the service worker uses the default worker.
+        public Func<int, string, string> Icon;
         public string Error { get; private set; }
         public string LastReply { get; private set; }   // short reason text from the push service's last non-2xx answer
 
@@ -100,7 +105,10 @@ namespace ClaudeStatus
         public static string Occurrence(SessionInfo s) { return s.State + "|" + s.StateSince.Ticks; }
 
         // rowKey: session id -> the phone board's token for that row (so a tap can show it), or null.
-        public void Observe(List<SessionInfo> board, DateTime nowUtc, Func<string, string> rowKey)
+        public void Observe(List<SessionInfo> board, DateTime nowUtc, Func<string, string> rowKey) { Observe(board, nowUtc, rowKey, null); }
+
+        // lookOf: session id -> its creature on the phone board, or null.
+        public void Observe(List<SessionInfo> board, DateTime nowUtc, Func<string, string> rowKey, Func<string, int> lookOf)
         {
             lock (gate)
             {
@@ -121,10 +129,12 @@ namespace ClaudeStatus
                     if ((nowUtc - s.StateSince).TotalMinutes > EligibleMinutes) continue;
                     string row = "";
                     if (rowKey != null) try { row = rowKey(s.Id) ?? ""; } catch { }
+                    int look = -1;
+                    if (lookOf != null) try { look = lookOf(s.Id); } catch { }
                     foreach (var sub in st.Subs)
                         if (Wants(sub, s.State))
                             st.Queue.Add(new PushItem { Tid = tid, Endpoint = sub.Endpoint, Session = s.Id, State = s.State, Since = s.StateSince.Ticks,
-                                Title = Title(s.State), Body = Body(s), Row = row, Created = now, NextTry = now });
+                                Title = Title(s.State), Body = Body(s), Row = row, Look = look, Created = now, NextTry = now });
                 }
                 if (changed) Save();
                 kick = true; Monitor.PulseAll(gate);
@@ -262,10 +272,17 @@ namespace ClaudeStatus
 
         static string Stamp(long ms) { return Epoch.AddMilliseconds(ms).ToLocalTime().ToString("HH:mm") + " "; }
 
-        public static string Payload(PushItem it)
+        string Payload(PushItem it)
         {
-            return new JavaScriptSerializer().Serialize(new Dictionary<string, object>
-                { { "v", 1 }, { "id", it.Tid }, { "s", it.State }, { "title", it.Title }, { "body", it.Body }, { "k", it.Row } });
+            var ser = new JavaScriptSerializer();
+            var m = new Dictionary<string, object>
+                { { "v", 1 }, { "id", it.Tid }, { "s", it.State }, { "title", it.Title }, { "body", it.Body }, { "k", it.Row } };
+            string plain = ser.Serialize(m), icon = null;
+            if (Icon != null) try { icon = Icon(it.Look, it.State); } catch { }
+            if (icon == null) return plain;
+            m["i"] = icon;
+            string full = ser.Serialize(m);
+            return Encoding.UTF8.GetByteCount(full) <= MaxPayload ? full : plain;   // the words matter more than the picture
         }
 
         // ---------- subscriptions (called from the phone server's threads) ----------

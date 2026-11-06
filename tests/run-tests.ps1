@@ -577,7 +577,7 @@ public static class TRace {
 # The server calls these on its own threads, so they must be real .NET delegates (not script blocks).
 function Dismisser([string]$dir) { [Delegate]::CreateDelegate([Func[string, string, ClaudeStatus.DismissResult]], $dir, [ClaudeStatus.Dismissal].GetMethod('DismissDone')) }
 $epoch = New-Object DateTime(1970, 1, 1, 0, 0, 0, [DateTimeKind]::Utc)
-$phoneFiles = 'phone.html', 'phone.css', 'phone.js', 'sw.js'
+$phoneFiles = 'phone.html', 'phone.css', 'phone.js', 'sw.js', 'workers.png', 'favicon.ico', 'worker-192.png', 'apple-touch-icon.png'
 function New-PhoneRoot([int]$port, [hashtable]$extra = @{}) {
     $o = @{ phoneDashboard = $true; phonePort = $port }; foreach ($k in $extra.Keys) { $o[$k] = $extra[$k] }
     $r = New-Root $o
@@ -1388,6 +1388,37 @@ function NewN([string]$path, $fake) { $n = New-Object ClaudeStatus.PushNotifier(
 function Obs($n, $board, [DateTime]$at) { $n.Observe($board, $at, [Func[string, string]] { param($id) 'row-' + $id }) }
 function Msg($fake, [int]$i) { $fake.Sent[$i][1] | ConvertFrom-Json }
 
+# Worker pictures: each message carries the creature the board shows for that worker, in the pose of its status.
+$pdirI = Join-Path $tmp 'push-icons'; $null = New-Item -ItemType Directory -Force $pdirI
+$WA = [ClaudeStatus.WorkerArt]
+$fkI = New-Object TPush
+$nI = NewN (Join-Path $pdirI 'push.dat') $fkI
+$nI.Icon = [Func[int, string, string]] { param($l, $s) $WA::Png($src, $l, $s) }
+$lookFn = [Func[string, int]] { param($id) if ($id -eq 'a') { 5 } elseif ($id -eq 'b') { 40 } else { -1 } }
+$rowFn = [Func[string, string]] { param($id) 'row-' + $id }
+$null = $nI.Subscribe($epA, $uaPub, $uaAuth, $true, $true)
+$tI = [DateTime]::UtcNow
+$nI.Observe((BoardOf (PSess 'a' 'DONE' $tI 'Alpha') (PSess 'b' 'NEEDS_YOU' $tI 'Beta') (PSess 'c' 'DONE' $tI 'Gamma')), $tI, $rowFn, $lookFn); [void]$nI.Pump($tI)
+$byName = @{}; for ($i = 0; $i -lt $fkI.Count; $i++) { $m = Msg $fkI $i; $byName[$m.body] = $m }
+Check 'push pictures: three workers updating together each get their own creature and pose; no creature = the default worker' ($fkI.Count -eq 3 -and
+    $byName['Alpha'].i -eq $WA::Png($src, 5, 'DONE') -and $byName['Beta'].i -eq $WA::Png($src, 40, 'NEEDS_YOU') -and $byName['Gamma'].i -eq $WA::Png($src, 0, 'DONE') -and
+    @($byName.Values | ForEach-Object { $_.i } | Sort-Object -Unique).Count -eq 3)
+$px = { param($l, $s, $x, $y) $b = $WA::Draw($src, $l, $s, 128); try { $b.GetPixel($x * 8 + 4, $y * 8 + 4) } finally { $b.Dispose() } }
+Check 'push pictures: the look number picks phone.js''s body colour; corners stay transparent; NEEDS YOU shows its "!"' ((& $px 0 'DONE' 8 7).ToArgb() -eq [Drawing.Color]::FromArgb(0xe8, 0x79, 0x3a).ToArgb() -and
+    (& $px 14 'DONE' 8 7).ToArgb() -eq [Drawing.Color]::FromArgb(0xd9, 0x77, 0x57).ToArgb() -and (& $px 0 'DONE' 0 15).A -eq 0 -and (& $px 0 'WORKING' 0 1).A -eq 0 -and (& $px 0 'NEEDS_YOU' 0 1).ToArgb() -eq [Drawing.Color]::FromArgb(0xf8, 0x51, 0x49).ToArgb())
+$biggest = 0; foreach ($s in 'WORKING', 'NEEDS_YOU', 'DONE', 'ERROR') { foreach ($l in 0..([ClaudeStatus.PhoneServer]::Looks - 1)) { $biggest = [Math]::Max($biggest, $WA::Png($src, $l, $s).Length) } }
+Check 'push pictures: every creature in every pose leaves room for the message within the push size limit' ($biggest -gt 0 -and $biggest + 600 -lt [ClaudeStatus.PushNotifier]::MaxPayload) "$biggest"
+$noSheet = Join-Path $pdirI 'no-sheet'
+$fkJ = New-Object TPush; $nJ = NewN (Join-Path $pdirI 'j.dat') $fkJ
+$nJ.Icon = [Func[int, string, string]] { param($l, $s) $WA::Png($noSheet, $l, $s) }
+$null = $nJ.Subscribe($epA, $uaPub, $uaAuth, $true, $true)
+$fkK = New-Object TPush; $nK = NewN (Join-Path $pdirI 'k.dat') $fkK
+$nK.Icon = [Func[int, string, string]] { param($l, $s) $WA::Png($src, $l, $s) }
+$null = $nK.Subscribe($epA, $uaPub, $uaAuth, $true, $true)
+$nJ.Observe((BoardOf (PSess 'a' 'DONE' $tI 'Alpha')), $tI, $rowFn, $lookFn); [void]$nJ.Pump($tI)
+$nK.Observe((BoardOf (PSess 'a' 'DONE' $tI ('x' * 2500))), $tI, $rowFn, $lookFn); [void]$nK.Pump($tI)
+Check 'push pictures: an unreadable sheet or a message too long for its picture still sends the notification, without one' ($fkJ.Count -eq 1 -and -not (Msg $fkJ 0).i -and (Msg $fkJ 0).body -eq 'Alpha' -and $fkK.Count -eq 1 -and -not (Msg $fkK 0).i) ($fkJ.Sent[0][1] + ' ' + $fkK.Count)
+
 $pdir = Join-Path $tmp 'push1'; $null = New-Item -ItemType Directory -Force $pdir
 $ppath = Join-Path $pdir 'push.dat'
 $fk = New-Object TPush
@@ -1634,6 +1665,8 @@ $r = PushReq @{ op = 'unsubscribe'; endpoint = $epA }
 Check 'unsubscribe removes the phone' ($r.Code -eq 200 -and $pn3.Count -eq 0)
 $r = Req $pp3 'GET' '/sw.js'
 $r2 = Req $pp3 'GET' '/'
+Check 'page declares the default worker as its icons, and all of them are served as images' ($r2.Body -match 'rel="icon" href="favicon\.ico"' -and $r2.Body -match 'rel="icon" href="worker-192\.png"' -and $r2.Body -match 'rel="apple-touch-icon" href="apple-touch-icon\.png"' -and
+    (Req $pp3 'GET' '/favicon.ico').Raw -match '(?s)^HTTP/1.1 200.*Content-Type: image/x-icon' -and (Req $pp3 'GET' '/worker-192.png').Raw -match '(?s)^HTTP/1.1 200.*Content-Type: image/png' -and (Req $pp3 'GET' '/apple-touch-icon.png').Raw -match '(?s)^HTTP/1.1 200.*Content-Type: image/png')
 Check 'service worker served from the root as JavaScript, no-store; page CSP allows only same-origin workers' ($r.Code -eq 200 -and $r.Raw -match 'Content-Type: text/javascript' -and $r.Raw -match 'Cache-Control: no-store' -and $r2.Raw -match "worker-src 'self'" -and $r2.Raw -match "default-src 'none'")
 $psrv.Stop()
 
@@ -1641,6 +1674,8 @@ $sw = Get-Content (Join-Path $src 'sw.js') -Raw
 Check 'service worker: duplicate filter in IndexedDB for 24 h (best effort), no fetch handler, no network, no other storage' ($sw -match "indexedDB\.open\('claude-status-push'" -and $sw -match 'SEEN_MS = 24 \* 3600 \* 1000' -and $sw -notmatch "addEventListener\('fetch'|fetch\(|caches|localStorage|XMLHttpRequest|https?://|importScripts")
 $node = Get-Command node -ErrorAction SilentlyContinue
 if ($node) {
+    $out = & $node.Source (Join-Path $PSScriptRoot 'worker-icons.mjs') --check 2>&1 | Out-String
+    Check 'favicon, touch icon and notification sheet still match the creature art in phone.js' ($LASTEXITCODE -eq 0) $out
     # sw.js in a minimal stand-in worker scope: real logic, fake IndexedDB that can be cleared, fake notifications
     $harness = @'
 const fs = require('fs'); const src = fs.readFileSync(process.argv[2], 'utf8');
@@ -1655,7 +1690,7 @@ const db = { close() {}, transaction() {
       if (i >= keys.length) { r.onsuccess && r.onsuccess({ target: { result: null } }); done(); return; }
       const k = keys[i++]; r.onsuccess && r.onsuccess({ target: { result: { value: store.get(k), delete() { store.delete(k); }, continue: step } } }); }, 0); step(); return r; } };
   tx.objectStore = () => os; return tx; } };
-const self = { addEventListener: (t, f) => (L[t] = f), registration: { scope: 'https://x/', showNotification: (t, o) => { shown.push([t, o.body, o.tag]); return Promise.resolve(); } }, skipWaiting() {}, clients: {} };
+const self = { addEventListener: (t, f) => (L[t] = f), registration: { scope: 'https://x/', showNotification: (t, o) => { shown.push([t, o.body, o.tag, o.icon, o.badge]); return Promise.resolve(); } }, skipWaiting() {}, clients: {} };
 const indexedDB = { open() { const r = {}; setTimeout(() => { r.result = db; r.onsuccess(); }, 0); return r; } };
 new Function('self', 'indexedDB', src)(self, indexedDB);
 const push = (m) => new Promise((res) => L.push({ data: { json: () => m }, waitUntil: (p) => p.then(res) }));
@@ -1665,13 +1700,18 @@ const m1 = { v: 1, id: 'AAAAAAAAAAAAAAAAAAAAAA', s: 'DONE', title: 'Claude finis
   await push({ ...m1, id: 'CCCCCCCCCCCCCCCCCCCCCC' }); // a new transition of the same worker
   store = new Map(); await push(m1);                  // storage cleared: shown again (best effort, documented)
   await new Promise((r) => { L.push({ data: { json: () => { throw new Error('x'); } }, waitUntil: r }); setTimeout(r, 20); });
+  // two workers at once: each notification keeps the picture from its own message
+  await Promise.all([push({ ...m1, id: 'DDDDDDDDDDDDDDDDDDDDDD', i: 'QUJD' }), push({ ...m1, id: 'EEEEEEEEEEEEEEEEEEEEEE', i: 'REVG' })]);
+  await push({ ...m1, id: 'FFFFFFFFFFFFFFFFFFFFFF', i: 'not"base64' });
   process.stdout.write(JSON.stringify(shown));
 })();
 '@
     $hf = Join-Path $tmp 'sw-harness.js'; [IO.File]::WriteAllText($hf, $harness)
     $out = & $node.Source $hf (Join-Path $src 'sw.js') 2>&1 | Out-String
     $shown = try { $out | ConvertFrom-Json } catch { $null }
-    Check 'service worker: shows a transition once, drops a resent copy, shows the next transition, ignores bad data' ($shown -and $shown.Count -eq 3 -and $shown[0][0] -eq 'Claude finished a task' -and $shown[0][1] -eq 'Website' -and $shown[0][2] -eq 'claude-BBBBBBBBBBBBBBBBBBBBBB') $out
+    Check 'service worker: each message shows its own picture (icon and badge); none or a malformed one = the default worker' ($shown -and $shown.Count -eq 6 -and $shown[0][3] -eq 'worker-192.png' -and
+        $shown[3][3] -eq 'data:image/png;base64,QUJD' -and $shown[3][4] -eq 'data:image/png;base64,QUJD' -and $shown[4][3] -eq 'data:image/png;base64,REVG' -and $shown[5][3] -eq 'worker-192.png') $out
+    Check 'service worker: shows a transition once, drops a resent copy, shows the next transition, ignores bad data' ($shown -and $shown.Count -eq 6 -and $shown[0][0] -eq 'Claude finished a task' -and $shown[0][1] -eq 'Website' -and $shown[0][2] -eq 'claude-BBBBBBBBBBBBBBBBBBBBBB') $out
 } else { Skip 'service worker duplicate filter' 'node not found' }
 
 # ======================================================================================
@@ -1858,7 +1898,7 @@ $pushDat = Join-Path $inst 'state\push.dat'; [IO.File]::WriteAllBytes($pushDat, 
 $out = & $winPs -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repo 'install.ps1') -ClaudeDir $cd -NoStart 2>&1
 Check 're-running the installer is a no-op for settings.json and config.json' ((Get-Content (Join-Path $inst 'config.json') -Raw) -eq $cfgText -and (($out | Out-String) -match 'already up to date'))
 Check 'upgrade (re-running the installer) keeps phone notification registrations (state\push.dat)' ((Test-Path $pushDat) -and (([IO.File]::ReadAllBytes($pushDat)) -join ',') -eq '7,7,7')
-Check 'phone dashboard files installed; config gets phoneDashboard=false, phonePort=48521' ((@('phone.cs', 'phone.html', 'phone.css', 'phone.js', 'phone-setup.ps1', 'push.cs', 'sw.js') | Where-Object { -not (Test-Path (Join-Path $inst $_)) }).Count -eq 0 -and $c.phoneDashboard -eq $false -and $c.phonePort -eq 48521)
+Check 'phone dashboard files installed; config gets phoneDashboard=false, phonePort=48521' ((@('phone.cs', 'phone.html', 'phone.css', 'phone.js', 'phone-setup.ps1', 'push.cs', 'sw.js', 'workers.png', 'favicon.ico', 'worker-192.png', 'apple-touch-icon.png') | Where-Object { -not (Test-Path (Join-Path $inst $_)) }).Count -eq 0 -and $c.phoneDashboard -eq $false -and $c.phonePort -eq 48521)
 $out = & $winPs -NoProfile -Command "Add-Type -Path '$inst\indicator.cs', '$inst\phone.cs', '$inst\usage.cs', '$inst\push.cs' -ReferencedAssemblies System.Windows.Forms, System.Drawing, System.Web.Extensions, System.Core, System.Security, System.Numerics; 'ok'" 2>&1
 Check 'installed indicator compiles with Windows PowerShell 5.1' (($out | Out-String).Trim() -eq 'ok') ($out | Out-String)
 $auto = & $winPs -NoProfile -ExecutionPolicy Bypass -File (Join-Path $inst 'autostart.ps1') 2>&1

@@ -6,6 +6,7 @@
 // bound to a network interface. It serves the board the indicator itself shows (published after every
 // reload, so aliases, numbering, ordering, cleanup and dismissal are the desktop's own) and nothing else:
 //   GET  /  /phone.css  /phone.js        the page (fixed list; request paths never reach the file system)
+//   GET  /favicon.ico  /worker-192.png  /apple-touch-icon.png   the default worker, as the page's icons
 //   GET  /api/board[?v=N&wait=1]          the Worker Board; with wait=1 it answers when it changes (<= 20 s)
 //   POST /api/dismiss  {"k":..,"d":..}    dismiss one specific DONE occurrence
 //   POST /api/focus    {"k":..}           bring that worker's window forward on the laptop (the desktop's
@@ -22,6 +23,9 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
@@ -128,6 +132,46 @@ namespace ClaudeStatus
         }
     }
 
+    // Notification pictures: a worker's creature in the pose of its status, cropped from workers.png (every look
+    // in every pose; tests\worker-icons.mjs draws it from phone.js's art). Each call opens its own copy, so the
+    // push thread and the UI thread share nothing and one worker's picture can't end up on another's message.
+    public static class WorkerArt
+    {
+        public const int DefaultLook = 0, PushSize = 128;   // 128 px: ~2 KB of Base64 at most, within a push message
+
+        // Throws if the sheet can't be read. A look outside the sheet (no character) is the default worker.
+        public static Bitmap Draw(string root, int look, string state, int size)
+        {
+            if (look < 0 || look >= PhoneServer.Looks) look = DefaultLook;
+            int pose = state == Board.NeedsYou ? 1 : state == Board.Done ? 2 : state == Board.Error ? 3 : 0;
+            var cell = new Rectangle(look % PhoneServer.Hats * 16, (pose * PhoneServer.Bodies + look / PhoneServer.Hats) * 16, 16, 16);
+            var bmp = new Bitmap(size, size, PixelFormat.Format32bppArgb);
+            using (var sheet = new Bitmap(Path.Combine(root, "workers.png")))
+            using (var g = Graphics.FromImage(bmp))
+            {
+                g.InterpolationMode = InterpolationMode.NearestNeighbor;
+                g.PixelOffsetMode = PixelOffsetMode.Half;
+                g.DrawImage(sheet, new Rectangle(0, 0, size, size), cell, GraphicsUnit.Pixel);
+            }
+            return bmp;
+        }
+
+        // Base64 PNG, or null if the sheet can't be read.
+        public static string Png(string root, int look, string state)
+        {
+            try
+            {
+                using (var bmp = Draw(root, look, state, PushSize))
+                using (var ms = new MemoryStream())
+                {
+                    bmp.Save(ms, ImageFormat.Png);
+                    return Convert.ToBase64String(ms.ToArray());
+                }
+            }
+            catch { return null; }
+        }
+    }
+
     public class PhoneRow
     {
         public string Key = "", Occ = "", Name = "", State = "", Err = "";
@@ -153,6 +197,9 @@ namespace ClaudeStatus
             { "/phone.css", new[] { "phone.css", "text/css; charset=utf-8" } },
             { "/phone.js", new[] { "phone.js", "text/javascript; charset=utf-8" } },
             { "/sw.js", new[] { "sw.js", "text/javascript; charset=utf-8" } },
+            { "/favicon.ico", new[] { "favicon.ico", "image/x-icon" } },
+            { "/worker-192.png", new[] { "worker-192.png", "image/png" } },
+            { "/apple-touch-icon.png", new[] { "apple-touch-icon.png", "image/png" } },
         };
         const string Csp = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
@@ -163,7 +210,7 @@ namespace ClaudeStatus
         readonly Func<string[]> tailnetLookup;
         readonly byte[] secret = new byte[32];
         readonly object gate = new object(), hostGate = new object(), focusGate = new object();
-        readonly Dictionary<string, int> looks = new Dictionary<string, int>();   // session -> look (Publish only)
+        readonly Dictionary<string, int> looks = new Dictionary<string, int>();   // session -> look (UI thread only: Publish, LookOf)
         readonly Dictionary<string, byte[]> files = new Dictionary<string, byte[]>();
 
         List<PhoneRow> rows = new List<PhoneRow>();
@@ -329,6 +376,9 @@ namespace ClaudeStatus
                 if (IsOrange(pick)) orange++; else other++;
             }
         }
+
+        // That worker's creature, as the board shows it; -1 if it has none yet. UI thread only.
+        public int LookOf(string sessionId) { int l; return looks.TryGetValue(sessionId, out l) ? l : -1; }
 
         // The board token of that worker's row (what a tapped notification opens).
         public string KeyFor(string sessionId) { return Token("k|" + sessionId); }

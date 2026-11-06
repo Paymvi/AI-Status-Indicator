@@ -1,6 +1,7 @@
 // Claude Status - phone notifications (service worker). The laptop sends each NEEDS YOU / DONE transition to
 // this phone's push service (see push.cs); the browser wakes this worker to show it, even with the dashboard
-// closed. It only shows what arrives; it never fetches anything and handles no page requests.
+// closed. It only shows what arrives; it never fetches anything and handles no page requests. The worker's
+// picture arrives inside the message, so it shows even when the phone can't reach the laptop.
 'use strict';
 
 var SEEN_MS = 24 * 3600 * 1000;
@@ -46,11 +47,15 @@ self.addEventListener('push', function (e) {
   try { m = e.data ? e.data.json() : null; } catch (x) { }
   if (!m || m.v !== 1 || typeof m.id !== 'string' || typeof m.title !== 'string') return;
   var k = typeof m.k === 'string' && /^[A-Za-z0-9_-]{22}$/.test(m.k) ? m.k : '';
+  // Each message carries its own picture: nothing is shared between notifications. No picture: the default worker.
+  var icon = typeof m.i === 'string' && /^[A-Za-z0-9+/]+={0,2}$/.test(m.i) ? 'data:image/png;base64,' + m.i : 'worker-192.png';
   e.waitUntil(firstTime(m.id).then(function (fresh) {
     if (!fresh) return;
     // One notification per worker: a newer one for the same worker replaces the older, and still alerts.
     return self.registration.showNotification(m.title, {
       body: typeof m.body === 'string' ? m.body : '',
+      icon: icon,
+      badge: icon,   // Android's status bar: drawn as a one-colour silhouette
       tag: 'claude-' + (k || m.id),
       renotify: true,
       data: { k: k }
