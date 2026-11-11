@@ -201,9 +201,6 @@ $t1 = Sess 't1' 'WORKING' 'X' 60 10; $t2 = Sess 't2' 'WORKING' 'X' 60 20
 $l = L $t1 $t2; $B::Sort($l, 'urgency')
 Check 'ties broken by first seen' ((& $order $l) -eq 't2,t1')
 $cw = Sess 'cw' 'WORKING' 'Booking' 10 3 0; $cn = Sess 'cn' 'NEEDS_YOU' 'Portal' 300 5 300; $cd = Sess 'cd' 'DONE' 'Website' 100 9 100
-Check 'Compact (urgency) surfaces NEEDS YOU' (($B::Surface((L $cw $cn $cd), 'urgency')).Id -eq 'cn')
-Check 'Compact (most recent) surfaces the latest' (($B::Surface((L $cw $cn $cd), 'recent')).Id -eq 'cw')
-Check 'Compact with no sessions surfaces nothing' ($null -eq $B::Surface((L), 'urgency'))
 
 # Numbering
 $num = New-Object ClaudeStatus.WorkerNumbering
@@ -278,7 +275,7 @@ $chain = [ClaudeStatus.WorkerWindows]::Chain(10, [Func[int, int]] { param($p) $p
 Check 'ancestor walk survives cycles' (@($chain).Count -le 2)
 
 # ======================================================================================
-Section 'Indicator window (Worker Board + Compact) against temporary state folders'
+Section 'Indicator window (Status view) against temporary state folders'
 # ======================================================================================
 $root = New-Root
 $f = Form $root
@@ -287,7 +284,7 @@ Check 'empty board: one "No Claude workers" row, compact height (incl. the usage
 Check 'empty: tray says IDLE (with the app name)' ($f.TrayText -eq 'Claude Status: IDLE')
 $f.Dispose()
 $f = Form (New-Root -NoConfig); Check 'missing config.json -> Worker Board' $f.IsBoard; $f.Dispose()
-$f = Form (New-Root @{ startupView = 'compact' }); Check 'startupView=compact -> Compact' (-not $f.IsBoard); Check 'Compact keeps its original 124x38 size' ($f.ClientSize.Width -eq 124 -and $f.ClientSize.Height -eq 38); $f.Dispose()
+$f = Form (New-Root @{ startupView = 'compact' }); Check 'old startupView=compact (Compact was removed) -> Status' ($f.IsBoard -and $f.ClientSize.Width -gt 200); $f.Dispose()
 
 $root = New-Root
 $me = StartOf $PID
@@ -309,10 +306,10 @@ $f = Form $root
 $f.Home = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea.Location   # room to grow
 Check 'mixed board in urgency order' ((Ids $f) -eq 'ny,er,b2,b1,web,v1') (Ids $f)
 Check 'names: Portal, Booking Software #1/#2, Website, Guest Form (from a v1 file)' ((($f.Workers | ForEach-Object { $_.DisplayName }) -join '|') -eq 'Portal|Analytics|Booking Software #2|Booking Software #1|Website|Guest Form')
-Check 'Compact/tray surface the most urgent worker' ($f.Surfaced.Id -eq 'ny' -and $f.TrayText -eq 'Claude Status: NEEDS YOU (Portal)')
+Check 'tray surfaces the most urgent worker' ($f.Surfaced.Id -eq 'ny' -and $f.TrayText -eq 'Claude Status: NEEDS YOU (Portal)')
 $f.SetSetting('workerSort', 'recent')
 Check 'switching to Most recent re-sorts immediately' ((Ids $f) -eq 'b2,ny,er,b1,web,v1') (Ids $f)
-Check 'Compact follows Most recent' ($f.Surfaced.Id -eq 'b2')
+Check 'tray follows Most recent' ($f.Surfaced.Id -eq 'b2')
 $saved = Get-Content (Join-Path $root 'config.json') -Raw | ConvertFrom-Json
 Check 'setting persisted; other settings and aliases preserved' ($saved.workerSort -eq 'recent' -and $saved.soundOnDone -eq $true -and $saved.staleHours -eq 24 -and $saved.projectAliases.Toah_Nipi_Portal -eq 'Portal')
 $h0 = $f.ClientSize.Height
@@ -385,18 +382,19 @@ $null = $sf.Handle; $sf.PerformLayout()
 $ctrls = @(); $stack = New-Object System.Collections.Stack; $stack.Push($sf)
 while ($stack.Count) { $c = $stack.Pop(); $ctrls += $c; foreach ($k in $c.Controls) { $stack.Push($k) } }
 $radio = { param($t) $ctrls | Where-Object { $_ -is [System.Windows.Forms.RadioButton] -and $_.Text -like "$t*" } | Select-Object -First 1 }
-Check 'settings window starts with Urgency / summary off / Worker Board selected' ((& $radio 'Urgency').Checked -and -not (& $radio 'Most recent').Checked -and (& $radio 'Worker Board').Checked -and -not ($ctrls | Where-Object { $_ -is [System.Windows.Forms.CheckBox] -and $_.Text -eq 'Show worker summary' }).Checked)
+Check 'settings window starts with Urgency / summary off / Status selected' ((& $radio 'Urgency').Checked -and -not (& $radio 'Most recent').Checked -and (& $radio 'Status').Checked -and -not ($ctrls | Where-Object { $_ -is [System.Windows.Forms.CheckBox] -and $_.Text -eq 'Show worker summary' }).Checked)
 (& $radio 'Most recent').Checked = $true
 ($ctrls | Where-Object { $_ -is [System.Windows.Forms.CheckBox] -and $_.Text -eq 'Show worker summary' }).Checked = $true
-(& $radio 'Compact').Checked = $true
-Check 'settings window: ordering / summary / startup view apply immediately' ($changes['workerSort'] -eq 'recent' -and $changes['showWorkerSummary'] -eq $true -and $changes['startupView'] -eq 'compact')
+(& $radio 'Queue').Checked = $true
+Check 'settings window: ordering / summary / startup view (Status / Queue) apply immediately' ($changes['workerSort'] -eq 'recent' -and $changes['showWorkerSummary'] -eq $true -and $changes['startupView'] -eq 'queue')
+Check 'settings window has no Compact option any more' (-not ($ctrls | Where-Object { $_ -is [System.Windows.Forms.RadioButton] -and $_.Text -like 'Compact*' }))
 Check 'settings window stays small' ($sf.Width -lt 0.4 * [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea.Width -and $sf.Height -lt 0.6 * [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea.Height) "$($sf.Size)"
 $sf.Dispose()
 $f = Form (New-Root)
 $f.GetType().GetMethod('BuildMenu', [Reflection.BindingFlags]'NonPublic,Instance').Invoke($f, @())
 $menu = $f.GetType().GetField('menu', [Reflection.BindingFlags]'NonPublic,Instance').GetValue($f)
 $view = $menu.Items | Where-Object { $_.Text -eq 'View' }
-Check 'right-click menu: View > Worker Board (checked) / Compact' ($view -and $view.DropDownItems[0].Text -eq 'Worker Board' -and $view.DropDownItems[0].Checked -and $view.DropDownItems[1].Text -eq 'Compact' -and -not $view.DropDownItems[1].Checked)
+Check 'right-click menu: View > Status (checked) / Queue' ($view -and $view.DropDownItems[0].Text -eq 'Status' -and $view.DropDownItems[0].Checked -and $view.DropDownItems[1].Text -eq 'Queue' -and -not $view.DropDownItems[1].Checked)
 $texts = @($menu.Items | ForEach-Object { $_.Text })
 Check 'menu keeps Settings, Show window, Reset position, Exit; no row actions' (($texts -like 'Settings*') -and ($texts -contains 'Show window') -and ($texts -contains 'Reset position') -and ($texts -contains 'Exit') -and -not ($texts -match 'Kill|Stop|Restart|Dismiss'))
 $trayTexts = @($f.TrayMenu.Items | ForEach-Object { $_.Text })
@@ -406,19 +404,7 @@ Check 'Worker Board header: minimize sits between settings and close' ($hb.Count
 Check 'tooltip: Minimize to tray' ($f.TooltipFor('minimize') -like 'Minimize to tray*')
 $f.Dispose()
 
-# Compact view still behaves as before
-$root = New-Root @{ startupView = 'compact' }
-Put $root 'p' 'WORKING' 'Toah_Nipi_Portal' 5 1 $PID $me
-$f = Form $root
-Check 'Compact single session shows its friendly name' ($f.Surfaced.DisplayName -eq 'Portal' -and -not $f.IsBoard)
-Put $root 'q' 'DONE' 'Website' 5 2
-$f.ReloadNow()
-Check 'Compact with two sessions keeps WORKING ahead of DONE (urgency)' ($f.Surfaced.Id -eq 'p')
-$bmp = New-Object System.Drawing.Bitmap($f.ClientSize.Width, $f.ClientSize.Height); $gg = [System.Drawing.Graphics]::FromImage($bmp); $f.PaintTo($gg); $gg.Dispose()
-$bmp.Save((Join-Path $RenderDir 'compact-100.png')); $bmp.Dispose()
-Check 'Compact hit areas: close / minimize / settings / view toggle / drag' ($f.HitAt((New-Object System.Drawing.Point(115, 8))) -eq 'close' -and $f.HitAt((New-Object System.Drawing.Point(99, 8))) -eq 'minimize' -and $f.HitAt((New-Object System.Drawing.Point(83, 8))) -eq 'gear' -and $f.HitAt((New-Object System.Drawing.Point(67, 8))) -eq 'toggle' -and $f.HitAt((New-Object System.Drawing.Point(30, 28))) -eq 'drag')
-Check 'tooltips: Settings / Switch to Worker Board' ($f.TooltipFor('gear') -eq 'Settings' -and $f.TooltipFor('toggle') -eq 'Switch to Worker Board')
-$f.Dispose()
+& { . (Join-Path $PSScriptRoot 'scheduler-tests.ps1') }   # own scope: its variables don't touch the rest
 
 # ======================================================================================
 Section 'Layout at 100% / 125% / 150% / 200% DPI (1, 6 and 90 workers)'
@@ -1286,7 +1272,7 @@ Check 'Show usage off is remembered after a restart (config.json)' (-not $f.Usag
 $f.SetSetting('showUsage', $true)
 Check 'Show usage on again: back to the same height' ($f.UsageShown -and $f.ClientSize.Height -eq $h0)
 $f.Dispose()
-$f = Form (New-Root @{ startupView = 'compact' }); Check 'Compact view stays the original pill (no usage strip)' (-not $f.UsageShown -and $f.ClientSize.Height -eq 38); $f.Dispose()
+$f = Form (New-Root @{ startupView = 'queue' }); Check 'Queue view has no usage strip of its own' (-not $f.UsageShown); $f.Dispose()
 $changes = @{}
 $sf = New-Object ClaudeStatus.SettingsForm('urgency', $false, 'workerBoard', $false, $true, [Action[string, object]] { param($k, $v) $changes[$k] = $v }, [Action] { })
 $null = $sf.Handle
@@ -1899,8 +1885,12 @@ $out = & $winPs -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repo 'insta
 Check 're-running the installer is a no-op for settings.json and config.json' ((Get-Content (Join-Path $inst 'config.json') -Raw) -eq $cfgText -and (($out | Out-String) -match 'already up to date'))
 Check 'upgrade (re-running the installer) keeps phone notification registrations (state\push.dat)' ((Test-Path $pushDat) -and (([IO.File]::ReadAllBytes($pushDat)) -join ',') -eq '7,7,7')
 Check 'phone dashboard files installed; config gets phoneDashboard=false, phonePort=48521' ((@('phone.cs', 'phone.html', 'phone.css', 'phone.js', 'phone-setup.ps1', 'push.cs', 'sw.js', 'workers.png', 'favicon.ico', 'worker-192.png', 'apple-touch-icon.png') | Where-Object { -not (Test-Path (Join-Path $inst $_)) }).Count -eq 0 -and $c.phoneDashboard -eq $false -and $c.phonePort -eq 48521)
-$out = & $winPs -NoProfile -Command "Add-Type -Path '$inst\indicator.cs', '$inst\phone.cs', '$inst\usage.cs', '$inst\push.cs' -ReferencedAssemblies System.Windows.Forms, System.Drawing, System.Web.Extensions, System.Core, System.Security, System.Numerics; 'ok'" 2>&1
+$out = & $winPs -NoProfile -Command "Add-Type -Path '$inst\indicator.cs', '$inst\phone.cs', '$inst\usage.cs', '$inst\push.cs', '$inst\scheduler.cs', '$inst\queue.cs' -ReferencedAssemblies System.Windows.Forms, System.Drawing, System.Web.Extensions, System.Core, System.Security, System.Numerics; 'ok'" 2>&1
 Check 'installed indicator compiles with Windows PowerShell 5.1' (($out | Out-String).Trim() -eq 'ok') ($out | Out-String)
+Check 'scheduler files installed; config gets the queue defaults' ((Test-Path (Join-Path $inst 'scheduler.cs')) -and (Test-Path (Join-Path $inst 'queue.cs')) -and $c.toastOnQueue -eq $true -and $c.queueHistoryDays -eq 30 -and $c.queueAllowApiBilling -eq $false)
+$mc = Get-Content (Join-Path $inst 'config.json') -Raw | ConvertFrom-Json; $mc.startupView = 'compact'; [IO.File]::WriteAllText((Join-Path $inst 'config.json'), ($mc | ConvertTo-Json -Depth 5))
+$null = & $winPs -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repo 'install.ps1') -ClaudeDir $cd -NoStart 2>&1
+Check 'updating from a version with Compact: startupView compact becomes workerBoard (Status)' ((Get-Content (Join-Path $inst 'config.json') -Raw | ConvertFrom-Json).startupView -eq 'workerBoard')
 $auto = & $winPs -NoProfile -ExecutionPolicy Bypass -File (Join-Path $inst 'autostart.ps1') 2>&1
 Check 'autostart script runs (status query only; your Startup folder is not modified)' (($auto | Out-String) -match 'Autostart is currently')
 

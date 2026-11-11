@@ -68,7 +68,7 @@ if (-not (Get-Command claude -ErrorAction SilentlyContinue)) {
 $src = Join-Path $PSScriptRoot 'src'
 $appFiles = @('hook.ps1', 'indicator.cs', 'indicator.ps1', 'start-indicator.vbs', 'stop-indicator.ps1', 'autostart.ps1', 'uninstall.ps1',
               'phone.cs', 'phone.html', 'phone.css', 'phone.js', 'phone-setup.ps1', 'usage.cs', 'statusline.ps1',
-              'push.cs', 'sw.js', 'workers.png', 'favicon.ico', 'worker-192.png', 'apple-touch-icon.png')
+              'push.cs', 'sw.js', 'workers.png', 'favicon.ico', 'worker-192.png', 'apple-touch-icon.png', 'scheduler.cs', 'queue.cs')
 foreach ($f in $appFiles + 'config.json') {
     if (-not (Test-Path -LiteralPath (Join-Path $src $f))) { Fail "Missing source file src\$f. Run install.ps1 from the root of the Claude Status repository." }
 }
@@ -201,7 +201,10 @@ if (-not (Test-Path -LiteralPath $cfgDest)) {
         foreach ($p in $defCfg.PSObject.Properties) {
             if (-not $userCfg.PSObject.Properties[$p.Name]) { $userCfg | Add-Member -NotePropertyName $p.Name -NotePropertyValue $p.Value; $added += $p.Name }
         }
-        if ($added.Count -gt 0) { Write-JsonFile $cfgDest $userCfg; Write-Host "  config.json kept; added new options: $($added -join ', ')" }
+        # The Compact view was replaced by the Queue view: its users start in Status (the regular board).
+        $migrated = $false
+        if ($userCfg.startupView -eq 'compact') { $userCfg.startupView = 'workerBoard'; $migrated = $true; Write-Host '  startupView: Compact was removed; you start in Status (the regular board)' }
+        if ($added.Count -gt 0 -or $migrated) { Write-JsonFile $cfgDest $userCfg; if ($added.Count -gt 0) { Write-Host "  config.json kept; added new options: $($added -join ', ')" } }
         else { Write-Host '  config.json kept (your existing settings)' }
     } catch {
         Write-Warning "Existing config.json could not be read; left it unchanged."

@@ -126,13 +126,16 @@ $t = New-Object Windows.Forms.Timer -Property @{ Interval = 120000 }; $t.add_Tic
     Check 'Worker Board is a native topmost, non-activating window' (($ex -band 0x8) -ne 0 -and ($ex -band 0x08000000) -ne 0)
     $live.GetType().GetMethod('SetView', [Reflection.BindingFlags]'NonPublic,Instance').Invoke($live, @($false)); [System.Windows.Forms.Application]::DoEvents()
     $ex = [TNative]::GetWindowLong($live.Handle, -20)
-    $g = $live.CreateGraphics(); $expectW = [int][Math]::Round(124 * $g.DpiX / 96); $g.Dispose()
-    Check 'Compact is a native topmost, non-activating window; switching kept the sessions' (($ex -band 0x8) -ne 0 -and $live.ClientSize.Width -eq $expectW -and $live.Workers.Count -eq 1)
-    Check 'switching views did not take focus' ([TNative]::GetForegroundWindow() -eq $fgBefore)
+    $expectW = $live.ClientSize.Width
+    $wa = [System.Windows.Forms.Screen]::FromRectangle($live.Bounds).WorkingArea
+    Check 'Queue is a normal window you can type in (not topmost, can be activated), on the monitor; switching kept the sessions' (($ex -band 0x8) -eq 0 -and ($ex -band 0x08000000) -eq 0 -and $wa.Contains($live.Bounds) -and $live.Workers.Count -eq 1 -and $live.IsQueue)
+    $null = $WW::Activate($a.Window); Start-Sleep -Milliseconds 200; $fgBefore = [TNative]::GetForegroundWindow()
     $live.GetType().GetMethod('BuildMenu', [Reflection.BindingFlags]'NonPublic,Instance').Invoke($live, @())
     $menu = $live.GetType().GetField('menu', [Reflection.BindingFlags]'NonPublic,Instance').GetValue($live)
     ($menu.Items | Where-Object { $_.Text -eq 'View' }).DropDownItems[0].PerformClick(); [System.Windows.Forms.Application]::DoEvents()
-    Check 'View > Worker Board in the right-click menu switches back immediately' ($live.IsBoard -and $live.ClientSize.Width -gt $expectW)
+    $ex = [TNative]::GetWindowLong($live.Handle, -20)
+    Check 'View > Status in the right-click menu switches back immediately: topmost, non-activating, small again' ($live.IsBoard -and $live.ClientSize.Width -lt $expectW -and ($ex -band 0x8) -ne 0 -and ($ex -band 0x08000000) -ne 0)
+    Check 'switching back to Status did not take focus' ([TNative]::GetForegroundWindow() -eq $fgBefore)
 
     Section 'Minimize to tray (running indicator)'
     $boundsBefore = $live.Bounds

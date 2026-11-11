@@ -1,6 +1,7 @@
 // Claude Status Indicator - tiny always-on-top window. Compiled at launch by indicator.ps1 via Add-Type
 // (uses only .NET Framework, which ships with Windows). Watches state\sessions\*.json written by hook.ps1.
-// Two views: Worker Board ("Claude Workers", one row per session) and Compact (the original single-state pill).
+// Two views: Status (the Worker Board, "Claude Workers", one row per session) and Queue (queue.cs: scheduled prompts,
+// run by scheduler.cs). Switching views never pauses the scheduler or a running task.
 // Written for the C# 5 compiler that Windows PowerShell 5.1's Add-Type uses (no C# 6+ syntax).
 using System;
 using System.Collections.Generic;
@@ -106,15 +107,6 @@ namespace ClaudeStatus
                 if (c == 0) c = string.CompareOrdinal(a.Id, b.Id);
                 return c;
             });
-        }
-
-        // The single session Compact view shows: the first one under the chosen ordering.
-        public static SessionInfo Surface(List<SessionInfo> list, string mode)
-        {
-            if (list == null || list.Count == 0) return null;
-            var copy = new List<SessionInfo>(list);
-            Sort(copy, mode);
-            return copy[0];
         }
 
         // WORKING timer: 04:32, then 1h 05m, then 2d 3h.
@@ -610,6 +602,9 @@ namespace ClaudeStatus
             : this(sort, summary, startup, phoneOn, true, set, editAliases) { }
 
         public SettingsForm(string sort, bool summary, string startup, bool phoneOn, bool usageOn, Action<string, object> set, Action editAliases)
+            : this(sort, summary, startup, phoneOn, usageOn, false, null, set, editAliases) { }
+
+        public SettingsForm(string sort, bool summary, string startup, bool phoneOn, bool usageOn, bool autostartOn, Action<bool> setAutostart, Action<string, object> set, Action editAliases)
         {
             Text = "Claude Status Settings";
             FormBorderStyle = FormBorderStyle.FixedToolWindow;
@@ -639,12 +634,17 @@ namespace ClaudeStatus
             flow.Controls.Add(use);
 
             flow.Controls.Add(Heading("Startup view"));
-            bool compact = string.Equals(startup, "compact", StringComparison.OrdinalIgnoreCase);
-            var wb = Radio("Worker Board", !compact);
-            var cp = Radio("Compact", compact);
+            bool queue = string.Equals(startup, "queue", StringComparison.OrdinalIgnoreCase);
+            var wb = Radio("Status  (the worker board)", !queue);
+            var cp = Radio("Queue  (scheduled prompts)", queue);
             wb.CheckedChanged += (s, e) => { if (wb.Checked) set("startupView", "workerBoard"); };
-            cp.CheckedChanged += (s, e) => { if (cp.Checked) set("startupView", "compact"); };
+            cp.CheckedChanged += (s, e) => { if (cp.Checked) set("startupView", "queue"); };
             flow.Controls.Add(Group(wb, cp));
+
+            // Scheduled tasks only run while Claude Status runs, so starting it with Windows keeps them going.
+            var auto = new CheckBox { Text = "Start Claude Status when I sign in to Windows", Checked = autostartOn, AutoSize = true, Margin = new Padding(3, 8, 3, 3), Enabled = setAutostart != null };
+            auto.CheckedChanged += (s, e) => { if (setAutostart != null) setAutostart(auto.Checked); };
+            flow.Controls.Add(auto);
 
             var ph = new CheckBox { Text = "Phone dashboard (private, via Tailscale)", Checked = phoneOn, AutoSize = true, Margin = new Padding(3, 10, 3, 3) };
             ph.CheckedChanged += (s, e) => set("phoneDashboard", ph.Checked);
@@ -709,7 +709,7 @@ namespace ClaudeStatus
         static readonly Color Grey = Color.FromArgb(128, 128, 128);
 
         // Unscaled layout (px at 100%).
-        const int CompactW = 124, CompactH = 38;
+        const int QueueW = 820, QueueH = 560, QueueMinW = 560, QueueMinH = 380, Edge = 5;
         const int BoardW = 276, HeadH = 26, SumH = 14, UsageH = 20, RowH = 22, PadTop = 3, PadBot = 5, MinRows = 4;
         const TextFormatFlags LeftText = TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding | TextFormatFlags.SingleLine | TextFormatFlags.PreserveGraphicsClipping;
         const TextFormatFlags CenterText = TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding | TextFormatFlags.SingleLine;
@@ -732,7 +732,7 @@ namespace ClaudeStatus
         Dictionary<string, Anchor> anchors = new Dictionary<string, Anchor>();
         Dictionary<string, ContextReading> contextKept = new Dictionary<string, ContextReading>();
         SessionInfo current;
-        bool initialized, board, mouseInside, dragging, thumbDrag;
+        bool initialized, board = true, mouseInside, dragging, thumbDrag;   // board: Status view (true) or Queue
         string trayState, hover = "", pressed = "", tipText = "";
         Point home;
         int scroll, thumbStartY, thumbStartScroll;
@@ -746,11 +746,35 @@ namespace ClaudeStatus
         readonly UsageMonitor usage;
         readonly PushNotifier push;
         UsageForm usageForm;
+        readonly QueueEngine queue;
+        readonly System.Windows.Forms.Timer queueTimer;
+        readonly string queuePosPath;
+        QueueView queueView;
+        Rectangle queueBounds;
+        PowerModeChangedEventHandler powerChanged;
+        EventHandler timeChanged;
+        bool queueChangePending, quitConfirmed;
 
         protected override bool ShowWithoutActivation { get { return true; } }
+        // Status never takes focus; the Queue view is a normal window you type in (and isn't always on top).
         protected override CreateParams CreateParams
         {
-            get { var cp = base.CreateParams; cp.ExStyle |= WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE; return cp; }
+            get { var cp = base.CreateParams; cp.ExStyle |= WS_EX_TOOLWINDOW | (board ? WS_EX_TOPMOST | WS_EX_NOACTIVATE : 0); return cp; }
+        }
+        [DllImport("user32.dll")] static extern int GetWindowLong(IntPtr h, int i);
+        [DllImport("user32.dll")] static extern int SetWindowLong(IntPtr h, int i, int v);
+
+        // Queue view: the thin border around it resizes the window.
+        protected override void WndProc(ref Message m)
+        {
+            base.WndProc(ref m);
+            if (m.Msg != 0x84 || board || (int)m.Result != 1) return;   // WM_NCHITTEST answered HTCLIENT
+            long lp = (long)m.LParam;
+            var p = PointToClient(new Point((short)(lp & 0xFFFF), (short)((lp >> 16) & 0xFFFF)));
+            int e = S(Edge);
+            bool l = p.X < e, r = p.X >= ClientSize.Width - e, t = p.Y < e, b = p.Y >= ClientSize.Height - e;
+            int hit = t && l ? 13 : t && r ? 14 : b && l ? 16 : b && r ? 17 : l ? 10 : r ? 11 : t ? 12 : b ? 15 : 0;
+            if (hit != 0) m.Result = (IntPtr)hit;
         }
 
         public static void Run(string root)
@@ -799,8 +823,8 @@ namespace ClaudeStatus
             statusFont = new Font("Segoe UI", 11f * scale, GraphicsUnit.Pixel);
             closeFont = new Font("Segoe UI", 15f * scale, GraphicsUnit.Pixel);
 
-            board = !string.Equals(CfgStr("startupView", "workerBoard"), "compact", StringComparison.OrdinalIgnoreCase);
-            Size = board ? new Size(S(BoardW), BoardHeight(1)) : new Size(S(CompactW), S(CompactH));
+            board = true;
+            Size = new Size(S(BoardW), BoardHeight(1));
             home = LoadPosition();
             Location = home;
 
@@ -833,7 +857,7 @@ namespace ClaudeStatus
             cfgWatcher.Changed += ch; cfgWatcher.Created += ch;
             cfgWatcher.Renamed += (s, e) => { cfgDebounce.Stop(); cfgDebounce.Start(); };
             cfgDebounce = new System.Windows.Forms.Timer { Interval = 250 };
-            cfgDebounce.Tick += (s, e) => { cfgDebounce.Stop(); bool ok; cfg = LoadConfig(cfgPath, out ok); cfgOk = ok; Reload(); };
+            cfgDebounce.Tick += (s, e) => { cfgDebounce.Stop(); bool ok; cfg = LoadConfig(cfgPath, out ok); cfgOk = ok; ApplyQueueConfig(); Reload(); };
 
             // Context-window readings (phone only) republish the phone board without re-reading any session.
             ctxWatcher = new FileSystemWatcher(contextDir, "*.json") { SynchronizingObject = this, IncludeSubdirectories = false,
@@ -856,9 +880,30 @@ namespace ClaudeStatus
             push = new PushNotifier(Path.Combine(root, "state\\push.dat"));
             push.Icon = (look, state) => WorkerArt.Png(root, look, state);
 
+            // The prompt scheduler (scheduler.cs) runs whichever view is shown, also minimized to the tray.
+            queuePosPath = Path.Combine(root, "queue-window.txt");
+            queueBounds = LoadQueueBounds();
+            queue = new QueueEngine(root);
+            ApplyQueueConfig();
+            queue.UsageBlockedUntil = UsageBlockedUntil;
+            queue.Notify += QueueNotify;
+            queue.Changed += QueueChanged;
+            queueTimer = new System.Windows.Forms.Timer { Interval = 10000 };
+            queueTimer.Tick += (s, e) => QueueTick();
+
             Reload();
+            // Settings from the removed Compact view open in Status (the regular board).
+            if (string.Equals(CfgStr("startupView", ""), "compact", StringComparison.OrdinalIgnoreCase)) SetCfg("startupView", "workerBoard");
+            if (string.Equals(CfgStr("startupView", ""), "queue", StringComparison.OrdinalIgnoreCase)) SetView(false);
             if (!testMode)
             {
+                queue.Start();
+                queue.Tick();
+                queueTimer.Start();
+                powerChanged = (s, e) => { if (e.Mode == PowerModes.Resume) try { BeginInvoke((MethodInvoker)(() => { queue.NoteWake(); QueueTick(); })); } catch { } };
+                SystemEvents.PowerModeChanged += powerChanged;
+                timeChanged = (s, e) => { try { BeginInvoke((MethodInvoker)(() => { queue.NoteWake(); QueueTick(); })); } catch { } };
+                SystemEvents.TimeChanged += timeChanged;
                 push.Start();
                 usage.Start(this);
                 watcher.EnableRaisingEvents = true;
@@ -875,6 +920,10 @@ namespace ClaudeStatus
 
         // ---------- public surface used by the tests ----------
         public bool IsBoard { get { return board; } }
+        public bool IsQueue { get { return !board; } }
+        public QueueEngine Queue { get { return queue; } }
+        public QueueView QueueViewControl { get { return queueView; } }
+        public void ShowQueue(bool on) { SetView(!on); }
         public List<SessionInfo> Workers { get { return new List<SessionInfo>(ordered); } }
         public SessionInfo Surfaced { get { return current; } }
         public string TrayText { get { return tray.Text; } }
@@ -886,7 +935,7 @@ namespace ClaudeStatus
         public int ScrollOffset { get { return scroll; } set { scroll = value; ClampScroll(); } }
         public int MaxScroll { get { return Math.Max(0, ContentHeight() - ViewHeight()); } }
         public Rectangle ListViewport { get { return new Rectangle(0, TopH, ClientSize.Width, ViewHeight()); } }
-        public Rectangle[] HeaderButtons { get { return board ? new[] { BoardToggleRect, BoardGearRect, BoardMinRect, BoardCloseRect } : new[] { CompactToggleRect, CompactGearRect, CompactMinRect, CloseRect }; } }
+        public Rectangle[] HeaderButtons { get { return new[] { BoardToggleRect, BoardGearRect, BoardMinRect, BoardCloseRect }; } }
         public ContextMenuStrip TrayMenu { get { return trayMenu; } }
         public void MinimizeNow() { MinimizeToTray(); }
         public void RestoreNow() { RestoreFromTray(); }
@@ -942,6 +991,7 @@ namespace ClaudeStatus
 
             var aliases = CfgDict("projectAliases");
             foreach (var si in next.Values) si.Name = Board.FriendlyName(si.Project, aliases);
+            NameScheduled(next.Values);
             var list = new List<SessionInfo>(next.Values);
             numbering.Apply(list);
             Board.Sort(list, CfgStr("workerSort", "urgency"));
@@ -1244,9 +1294,10 @@ namespace ClaudeStatus
         void UpdateLayout()
         {
             if (dragging) return;
-            Size want = board ? new Size(S(BoardW), BoardHeight(RowCount)) : new Size(S(CompactW), S(CompactH));
+            if (!board) { Rectangle q = FitQueue(queueBounds); if (Bounds != q) Bounds = q; return; }
+            Size want = new Size(S(BoardW), BoardHeight(RowCount));
             Rectangle wa = Screen.FromRectangle(new Rectangle(home, want)).WorkingArea;
-            int minH = board ? BoardHeight(MinRows) : want.Height;
+            int minH = BoardHeight(MinRows);
             Rectangle r = Board.Place(home, want, wa, minH);
             if (Bounds != r) Bounds = r;   // SetWindowPos with SWP_NOACTIVATE: never takes focus
             ClampScroll();
@@ -1254,14 +1305,191 @@ namespace ClaudeStatus
 
         void ClampScroll() { scroll = Math.Max(0, Math.Min(scroll, MaxScroll)); }
 
+        // Status <-> Queue. Each view keeps its own bounds (Status: its saved spot and auto height; Queue: its own
+        // saved size and position), both kept on a monitor. Only the window changes: the scheduler, a running task
+        // and the board's sessions are untouched.
         void SetView(bool toBoard)
         {
             if (board == toBoard) return;
+            if (!board) SaveQueueBounds();
             board = toBoard;
-            scroll = 0; hover = "";
+            scroll = 0; hover = ""; pressed = "";
+            tip.SetToolTip(this, null); tipText = "";
+            if (!board)
+            {
+                if (queueView == null) { queueView = new QueueView(queue, scale) { Dock = DockStyle.Fill }; Controls.Add(queueView); }
+                Padding = new Padding(S(Edge), S(HeadH), S(Edge), S(Edge));
+                queueView.Visible = true;
+                queueView.RefreshView();
+            }
+            else if (queueView != null) { queueView.Visible = false; Padding = Padding.Empty; }
+            if (IsHandleCreated)
+            {
+                int ex = GetWindowLong(Handle, -20);
+                ex = board ? ex | WS_EX_NOACTIVATE : ex & ~WS_EX_NOACTIVATE;
+                SetWindowLong(Handle, -20, ex);
+            }
+            TopMost = board;
+            MinimumSize = board ? Size.Empty : new Size(S(QueueMinW), S(QueueMinH));
             UpdateLayout();
             AdjustTick();
             Invalidate();
+            if (!board && Visible && !testMode) Activate();
+        }
+
+        // Default Queue bounds: next to the Status window, on its monitor.
+        Rectangle FitQueue(Rectangle r)
+        {
+            if (r.Width <= 0) r = new Rectangle(home.X, home.Y, S(QueueW), S(QueueH));
+            Rectangle wa = Screen.FromRectangle(r).WorkingArea;
+            int w = Math.Min(Math.Max(r.Width, S(QueueMinW)), wa.Width), h = Math.Min(Math.Max(r.Height, S(QueueMinH)), wa.Height);
+            int x = Math.Max(wa.Left, Math.Min(r.X, wa.Right - w)), y = Math.Max(wa.Top, Math.Min(r.Y, wa.Bottom - h));
+            return new Rectangle(x, y, w, h);
+        }
+
+        Rectangle LoadQueueBounds()
+        {
+            if (testMode) return Rectangle.Empty;
+            try
+            {
+                var p = File.ReadAllText(queuePosPath).Trim().Split(',');
+                var r = new Rectangle(int.Parse(p[0]), int.Parse(p[1]), int.Parse(p[2]), int.Parse(p[3]));
+                foreach (var scr in Screen.AllScreens) if (scr.WorkingArea.IntersectsWith(r)) return r;
+            }
+            catch { }
+            return Rectangle.Empty;
+        }
+
+        void SaveQueueBounds()
+        {
+            if (board) return;
+            queueBounds = Bounds;
+            if (testMode) return;
+            try { File.WriteAllText(queuePosPath, Left + "," + Top + "," + Width + "," + Height); } catch { }
+        }
+
+        protected override void OnResizeEnd(EventArgs e) { base.OnResizeEnd(e); if (!board) { SaveQueueBounds(); Invalidate(); } }
+        protected override void OnResize(EventArgs e) { base.OnResize(e); if (!board) Invalidate(); }
+
+        // ---------- scheduler (scheduler.cs) ----------
+        void ApplyQueueConfig()
+        {
+            if (queue == null) return;
+            object v;
+            var list = cfg.TryGetValue("queueClaudeCommand", out v) ? v as System.Collections.ArrayList : null;
+            string[] cmd = null;
+            if (list != null && list.Count > 0) { cmd = new string[list.Count]; for (int i = 0; i < list.Count; i++) cmd[i] = Convert.ToString(list[i]); }
+            queue.ClaudeCommand = cmd;
+            queue.AllowApiBilling = CfgBool("queueAllowApiBilling", false);
+            queue.KeepAwake = CfgBool("queueKeepAwake", true);
+            queue.HistoryDays = (int)CfgNum("queueHistoryDays", 30);
+        }
+
+        void QueueTick()
+        {
+            try { queue.Tick(); } catch { }
+            int want = queue.HasRun ? 2000 : 10000;
+            if (queueTimer.Interval != want) queueTimer.Interval = want;
+        }
+
+        // Coalesces bursts of scheduler changes into one repaint of the board names (and the Queue view itself).
+        void QueueChanged()
+        {
+            if (queueChangePending || !IsHandleCreated) return;
+            queueChangePending = true;
+            BeginInvoke((MethodInvoker)(() =>
+            {
+                queueChangePending = false;
+                if (IsDisposed) return;
+                bool changed = false;
+                foreach (var si in ordered) { string before = si.Name; NameScheduled(new[] { si }); if (si.Name != before) changed = true; }
+                if (changed) Invalidate();
+            }));
+        }
+
+        // A scheduled run fires the same Claude Code hooks as any session, so it already is one worker row; it is
+        // only named after its task (never added twice). Only while the row shows that task's run.
+        void NameScheduled(IEnumerable<SessionInfo> list)
+        {
+            if (queue == null) return;
+            var aliases = CfgDict("projectAliases");
+            foreach (var si in list)
+            {
+                var t = ScheduledTaskOf(si);
+                si.Name = t != null ? "⏱ " + t.Title : Board.FriendlyName(si.Project, aliases);
+            }
+        }
+
+        QueueTask ScheduledTaskOf(SessionInfo si)
+        {
+            var t = queue != null ? queue.TaskForSession(si.Id) : null;
+            if (t == null || t.Last == null) return null;
+            var a = t.Last;
+            if (t.State == QState.Running && a.SessionId == si.Id) return t;
+            return a.SessionId == si.Id && si.StateSince >= a.StartedUtc.AddSeconds(-5) && (a.EndedUtc == DateTime.MinValue || si.StateSince <= a.EndedUtc.AddMinutes(1)) ? t : null;
+        }
+
+        // Account-wide limit Claude Code reported as fully used (100%) whose reset is still ahead, if any.
+        DateTime UsageBlockedUntil()
+        {
+            DateTime until = DateTime.MinValue, now = DateTime.UtcNow;
+            var s = usage != null ? usage.Snapshot : null;
+            if (s == null) return until;
+            foreach (var l in s.Limits)
+                if (l.Percent >= 100 && l.ResetsUtc > now && l.ResetsUtc > until && !l.Key.ToLowerInvariant().Contains("spend")) until = l.ResetsUtc;
+            return until;
+        }
+
+        void QueueNotify(QueueTask t)
+        {
+            if (!CfgBool("toastOnQueue", true)) return;
+            string title, state; ToolTipIcon icon;
+            switch (t.State)
+            {
+                case QState.Completed: title = "Scheduled task finished"; state = Board.Done; icon = ToolTipIcon.Info; break;
+                case QState.Failed: title = "Scheduled task failed"; state = Board.Error; icon = ToolTipIcon.Error; break;
+                case QState.WaitingUsage: title = "Scheduled task waiting for usage"; state = Board.NeedsYou; icon = ToolTipIcon.Warning; break;
+                case QState.Blocked: title = "Scheduled task blocked"; state = Board.NeedsYou; icon = ToolTipIcon.Warning; break;
+                default: title = "Scheduled task needs you"; state = Board.NeedsYou; icon = ToolTipIcon.Warning; break;
+            }
+            string text = t.Title + ": " + (t.State == QState.Completed ? (t.Summary != "" ? t.Summary : "Claude reported it's done (not verified).") : t.Reason);
+            if (text.Length > 250) text = text.Substring(0, 249) + "…";
+            if (t.State == QState.NeedsAttention && CfgBool("soundOnNeedsYou", true) && !testMode) SystemSounds.Exclamation.Play();
+            Toast(title, text, icon, new SessionInfo { Id = t.SessionId, State = state });
+        }
+
+        static bool AutostartOn() { try { return File.Exists(AutostartLink); } catch { return false; } }
+        static string AutostartLink { get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Startup), "Claude Status Indicator.lnk"); } }
+
+        // Uses the existing autostart.ps1 (a shortcut in the Startup folder; nothing else is changed).
+        void SetAutostart(bool on)
+        {
+            string script = Path.Combine(root, "autostart.ps1");
+            if (!File.Exists(script)) return;
+            try
+            {
+                var psi = new ProcessStartInfo("powershell.exe", "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"" + script + "\" " + (on ? "-Enable" : "-Disable")) { UseShellExecute = false, CreateNoWindow = true };
+                using (var p = Process.Start(psi)) p.WaitForExit(15000);
+            }
+            catch { }
+        }
+
+        // Fully quitting stops the scheduler, so say what happens to waiting and running tasks.
+        protected override void OnFormClosing(FormClosingEventArgs e)
+        {
+            base.OnFormClosing(e);
+            if (e.Cancel || testMode || quitConfirmed || e.CloseReason == CloseReason.WindowsShutDown || e.CloseReason == CloseReason.TaskManagerClosing) return;
+            int waiting = 0; QueueTask running = null;
+            foreach (var t in queue.Data.Tasks) { if (QState.Pending(t.State)) waiting++; if (t.State == QState.Running) running = t; }
+            if (waiting == 0 && running == null) return;
+            string msg = "Scheduled tasks only run while Claude Status is running.\r\n\r\n";
+            if (waiting > 0) msg += waiting + " waiting task(s) will wait until you start Claude Status again. Overdue ones then start one at a time (you get a minute to skip them).\r\n\r\n";
+            if (running != null) msg += "\"" + running.Title + "\" keeps running in the background; its result is picked up the next time Claude Status starts.\r\n\r\n";
+            msg += "Quit anyway?\r\n(No = keep it running in the tray instead)";
+            var r = MessageBox.Show(msg, "Claude Status", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2);
+            if (r == DialogResult.Yes) { quitConfirmed = true; return; }
+            e.Cancel = true;
+            if (r == DialogResult.No) MinimizeToTray();
         }
 
         void AdjustTick()
@@ -1272,10 +1500,6 @@ namespace ClaudeStatus
             if (tick.Interval != want) tick.Interval = want;
         }
 
-        Rectangle CloseRect { get { return new Rectangle(ClientSize.Width - S(17), S(1), S(16), S(16)); } }
-        Rectangle CompactMinRect { get { return new Rectangle(ClientSize.Width - S(33), S(1), S(16), S(16)); } }
-        Rectangle CompactGearRect { get { return new Rectangle(ClientSize.Width - S(49), S(1), S(16), S(16)); } }
-        Rectangle CompactToggleRect { get { return new Rectangle(ClientSize.Width - S(65), S(1), S(16), S(16)); } }
         Rectangle BoardCloseRect { get { return new Rectangle(ClientSize.Width - S(23), S(4), S(18), S(18)); } }
         Rectangle BoardMinRect { get { return new Rectangle(ClientSize.Width - S(42), S(4), S(18), S(18)); } }
         Rectangle BoardGearRect { get { return new Rectangle(ClientSize.Width - S(61), S(4), S(18), S(18)); } }
@@ -1329,36 +1553,26 @@ namespace ClaudeStatus
         void Render(Graphics g)
         {
             g.Clear(Bg);
-            if (board) RenderBoard(g); else RenderCompact(g);
+            if (board) RenderBoard(g); else RenderQueueHeader(g);
         }
 
-        void RenderCompact(Graphics g)
+        // The Queue view's own header (the rest of the window is QueueView's controls).
+        void RenderQueueHeader(Graphics g)
         {
-            string st = current == null ? "IDLE" : current.State;
-            Color c = ColorFor(st);
-            using (var pen = new Pen(Color.FromArgb(150, c), Math.Max(1, S(1))))
-                g.DrawRectangle(pen, 0, 0, ClientSize.Width - 1, ClientSize.Height - 1);
-
-            string head = "Claude";
-            if (sessions.Count > 1) head += "  (" + sessions.Count + " sessions)";
-            else if (current != null && current.DisplayName != "") head += " · " + current.DisplayName;
-            int headRight = (mouseInside ? CompactToggleRect.Left : CloseRect.Left) - S(2);
-            TextRenderer.DrawText(g, head, smallFont, new Rectangle(S(7), S(2), headRight - S(7), S(15)), Muted,
-                TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding);
-            TextRenderer.DrawText(g, "×", smallFont, CloseRect, hover == "close" ? Color.White : Grey, CenterText);
-            if (mouseInside)
-            {
-                DrawListIcon(g, CompactToggleRect, hover == "toggle" ? Color.White : Grey);
-                DrawGear(g, CompactGearRect, hover == "gear" ? Color.White : Grey);
-                DrawMinimize(g, CompactMinRect, hover == "minimize" ? Color.White : Grey);
-            }
-
-            g.SmoothingMode = SmoothingMode.AntiAlias;
-            int dot = S(9);
-            using (var b = new SolidBrush(c)) g.FillEllipse(b, S(8), S(24) - dot / 2, dot, dot);
-            g.SmoothingMode = SmoothingMode.None;
-            TextRenderer.DrawText(g, Board.Label(st), bigFont, new Rectangle(S(22), S(16), ClientSize.Width - S(24), S(18)), c,
-                TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+            int w = ClientSize.Width, h = ClientSize.Height;
+            using (var pen = new Pen(Color.FromArgb(120, Grey), Math.Max(1, S(1)))) g.DrawRectangle(pen, 0, 0, w - 1, h - 1);
+            string head = "CLAUDE QUEUE";
+            TextRenderer.DrawText(g, head, titleFont, new Rectangle(S(10), 0, BoardToggleRect.Left - S(12), S(HeadH)), Muted, LeftText);
+            int hw = TextRenderer.MeasureText(g, head, titleFont, Size.Empty, TextFormatFlags.NoPadding | TextFormatFlags.SingleLine).Width;
+            string sub = "scheduled prompts · runs while Claude Status is open or in the tray";
+            TextRenderer.DrawText(g, sub, smallFont, new Rectangle(S(18) + hw, 0, Math.Max(0, BoardToggleRect.Left - S(24) - hw), S(HeadH)), Grey, LeftText);
+            ButtonBg(g, BoardToggleRect, "toggle"); DrawStatusIcon(g, BoardToggleRect, hover == "toggle" ? Color.White : Grey);
+            ButtonBg(g, BoardGearRect, "gear"); DrawGear(g, BoardGearRect, hover == "gear" ? Color.White : Grey);
+            ButtonBg(g, BoardMinRect, "minimize"); DrawMinimize(g, BoardMinRect, hover == "minimize" ? Color.White : Grey);
+            ButtonBg(g, BoardCloseRect, "close");
+            TextRenderer.DrawText(g, "×", closeFont, BoardCloseRect, hover == "close" ? Color.White : Grey, CenterText);
+            // resize grip
+            using (var pen = new Pen(Grey)) for (int k = 1; k <= 3; k++) g.DrawLine(pen, w - S(3), h - S(3) - k * S(3), w - S(3) - k * S(3), h - S(3));
         }
 
         void RenderBoard(Graphics g)
@@ -1370,7 +1584,7 @@ namespace ClaudeStatus
 
             // header: title + [view toggle] [settings] [minimize] [x]
             TextRenderer.DrawText(g, "CLAUDE WORKERS", titleFont, new Rectangle(S(10), 0, BoardToggleRect.Left - S(12), S(HeadH)), Muted, LeftText);
-            ButtonBg(g, BoardToggleRect, "toggle"); DrawCompactIcon(g, BoardToggleRect, hover == "toggle" ? Color.White : Grey);
+            ButtonBg(g, BoardToggleRect, "toggle"); DrawQueueIcon(g, BoardToggleRect, hover == "toggle" ? Color.White : Grey);
             ButtonBg(g, BoardGearRect, "gear"); DrawGear(g, BoardGearRect, hover == "gear" ? Color.White : Grey);
             ButtonBg(g, BoardMinRect, "minimize"); DrawMinimize(g, BoardMinRect, hover == "minimize" ? Color.White : Grey);
             ButtonBg(g, BoardCloseRect, "close");
@@ -1499,7 +1713,18 @@ namespace ClaudeStatus
             using (var b = new SolidBrush(HoverBg)) g.FillRectangle(b, r);
         }
 
-        // "Worker Board" icon: a small list (dot + line, three times).
+        // "Queue" icon: a small list with a clock dot (scheduled items).
+        void DrawQueueIcon(Graphics g, Rectangle r, Color c)
+        {
+            DrawListIcon(g, new Rectangle(r.Left - S(2), r.Top, r.Width, r.Height), c);
+            int cx = r.Right - S(4), cy = r.Bottom - S(5), rad = S(3);
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            using (var b = new SolidBrush(hover == "toggle" ? HoverBg : Bg)) g.FillEllipse(b, cx - rad - 1, cy - rad - 1, rad * 2 + 2, rad * 2 + 2);
+            using (var pen = new Pen(c, Math.Max(1f, scale))) { g.DrawEllipse(pen, cx - rad, cy - rad, rad * 2, rad * 2); g.DrawLine(pen, cx, cy, cx, cy - rad + 1); g.DrawLine(pen, cx, cy, cx + rad - 1, cy); }
+            g.SmoothingMode = SmoothingMode.None;
+        }
+
+        // A small list (dot + line, three times).
         void DrawListIcon(Graphics g, Rectangle r, Color c)
         {
             int cx = r.Left + r.Width / 2, cy = r.Top + r.Height / 2;
@@ -1513,8 +1738,8 @@ namespace ClaudeStatus
                 }
         }
 
-        // "Compact" icon: a little pill with a status dot.
-        void DrawCompactIcon(Graphics g, Rectangle r, Color c)
+        // "Status" icon: a little pill with a status dot.
+        void DrawStatusIcon(Graphics g, Rectangle r, Color c)
         {
             int cx = r.Left + r.Width / 2, cy = r.Top + r.Height / 2;
             var box = new Rectangle(cx - S(6), cy - S(4), S(12), S(8));
@@ -1568,18 +1793,11 @@ namespace ClaudeStatus
         // Hit keys: close, minimize, gear, toggle, drag, thumb, track, row:<session id>, x:<session id>.
         string HitTest(Point p)
         {
-            if (!board)
-            {
-                if (CloseRect.Contains(p)) return "close";
-                if (CompactMinRect.Contains(p)) return "minimize";
-                if (CompactGearRect.Contains(p)) return "gear";
-                if (CompactToggleRect.Contains(p)) return "toggle";
-                return "drag";
-            }
             if (BoardCloseRect.Contains(p)) return "close";
             if (BoardMinRect.Contains(p)) return "minimize";
             if (BoardGearRect.Contains(p)) return "gear";
             if (BoardToggleRect.Contains(p)) return "toggle";
+            if (!board) return p.Y < S(HeadH) ? "drag" : "";
             if (ShowUsage && UsageRect.Contains(p)) return "usage";
             if (p.Y < TopH) return "drag";
             if (Scrolls && p.X >= TrackRect.Left - S(3) && p.Y < ClientSize.Height - 1)
@@ -1605,15 +1823,17 @@ namespace ClaudeStatus
         {
             switch (key)
             {
-                case "toggle": return board ? "Switch to Compact view" : "Switch to Worker Board";
+                case "toggle": return board ? "Switch to Queue (schedule prompts for Claude)" : "Switch to Status";
                 case "gear": return "Settings";
-                case "minimize": return "Minimize to tray (keeps running; click the tray icon to reopen)";
-                case "close": return "Exit Claude Status";
+                case "minimize": return "Minimize to tray (keeps running, scheduled tasks too; click the tray icon to reopen)";
+                case "close": return "Exit Claude Status (scheduled tasks wait until it runs again)";
                 case "usage": return UsageTip();
             }
             var si = FromKey(key);
             if (si == null) return "";
             if (key.StartsWith("x:")) return "Dismiss (only removes this row; Claude is not affected)";
+            var task = ScheduledTaskOf(si);
+            if (task != null) return "Scheduled task: " + task.Title + "  (" + si.Project + ")\n" + Board.StatusText(si, DateTime.UtcNow, false) + "\nClick to open it in the Queue";
             string t = si.DisplayName;
             if (si.Project != "" && !string.Equals(si.Project, si.Name, StringComparison.OrdinalIgnoreCase)) t += "  (" + si.Project + ")";
             t += "\n" + Board.StatusText(si, DateTime.UtcNow, false);
@@ -1631,6 +1851,7 @@ namespace ClaudeStatus
                 case "close": Close(); return;
                 case "minimize": MinimizeToTray(); return;
                 case "toggle": SetView(!board); return;
+                case "": return;
                 case "gear": OpenSettings(); return;
                 case "thumb": thumbDrag = true; thumbStartY = e.Y; thumbStartScroll = scroll; Capture = true; return;
                 case "track": scroll += (e.Y < ThumbRect.Top ? -1 : 1) * Math.Max(S(RowH), ViewHeight() - S(RowH)); ClampScroll(); Invalidate(); return;
@@ -1639,6 +1860,7 @@ namespace ClaudeStatus
                     ReleaseCapture();
                     SendMessage(Handle, WM_NCLBUTTONDOWN, (IntPtr)HTCAPTION, IntPtr.Zero); // native drag; returns when released
                     dragging = false;
+                    if (!board) { SaveQueueBounds(); return; }
                     home = Location;
                     SavePosition();
                     UpdateLayout();
@@ -1657,7 +1879,13 @@ namespace ClaudeStatus
             var si = FromKey(was);
             if (si == null) return;
             if (was.StartsWith("x:")) DismissDone(si);
-            else FocusWorker(si);
+            else
+            {
+                // A scheduled run has no window of its own: its row opens the task in the Queue.
+                var task = ScheduledTaskOf(si);
+                if (task != null) { SetView(false); if (queueView != null) queueView.SelectTask(task.Id); }
+                else FocusWorker(si);
+            }
         }
 
         protected override void OnMouseMove(MouseEventArgs e)
@@ -1673,7 +1901,7 @@ namespace ClaudeStatus
             mouseInside = true;
             string h = HitTest(e.Location);
             if (h != hover || entered) { hover = h; Invalidate(); }
-            Cursor = h == "drag" ? Cursors.SizeAll : h == "thumb" || h == "track" ? Cursors.Default : Cursors.Hand;
+            Cursor = h == "drag" ? Cursors.SizeAll : h == "thumb" || h == "track" || h == "" ? Cursors.Default : Cursors.Hand;
             string t2 = TipFor(h);
             if (t2 != tipText) { tipText = t2; tip.Hide(this); tip.SetToolTip(this, t2 == "" ? null : t2); }
         }
@@ -1706,15 +1934,17 @@ namespace ClaudeStatus
             }
             menu.Items.Add(new ToolStripSeparator());
             var view = new ToolStripMenuItem("View");
-            view.DropDownItems.Add(new ToolStripMenuItem("Worker Board", null, (s, e) => { SetView(true); Show(); }) { Checked = board });
-            view.DropDownItems.Add(new ToolStripMenuItem("Compact", null, (s, e) => { SetView(false); Show(); }) { Checked = !board });
+            view.DropDownItems.Add(new ToolStripMenuItem("Status", null, (s, e) => { SetView(true); Show(); }) { Checked = board });
+            view.DropDownItems.Add(new ToolStripMenuItem("Queue", null, (s, e) => { Show(); SetView(false); }) { Checked = !board });
             menu.Items.Add(view);
             menu.Items.Add("Settings…", null, (s, e) => OpenSettings());
             menu.Items.Add("Claude usage…", null, (s, e) => OpenUsage());
+            int waiting = 0; foreach (var t in queue.Data.Tasks) if (QState.Pending(t.State) || t.State == QState.Running) waiting++;
+            menu.Items.Add(new ToolStripMenuItem("Queue: " + (queue.HasRun ? "running a task" : waiting > 0 ? waiting + " waiting" : "nothing scheduled") + (queue.Data.Paused ? " (paused)" : "")) { Enabled = false });
             menu.Items.Add(new ToolStripMenuItem(PhoneStatusText) { Enabled = false });
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add("Show window", null, (s, e) => { Show(); BringToFrontNoActivate(); });
-            menu.Items.Add("Reset position", null, (s, e) => { home = DefaultPosition(); SavePosition(); UpdateLayout(); Show(); });
+            menu.Items.Add("Reset position", null, (s, e) => { home = DefaultPosition(); SavePosition(); queueBounds = Rectangle.Empty; UpdateLayout(); Show(); });
             menu.Items.Add("Exit", null, (s, e) => Close());
         }
 
@@ -1722,7 +1952,7 @@ namespace ClaudeStatus
         {
             if (settingsForm != null && !settingsForm.IsDisposed) { settingsForm.Activate(); return; }
             settingsForm = new SettingsForm(CfgStr("workerSort", "urgency"), CfgBool("showWorkerSummary", false), CfgStr("startupView", "workerBoard"),
-                CfgBool("phoneDashboard", false), CfgBool("showUsage", true), SetCfg, () => { try { Process.Start("notepad.exe", "\"" + cfgPath + "\""); } catch { } });
+                CfgBool("phoneDashboard", false), CfgBool("showUsage", true), AutostartOn(), SetAutostart, SetCfg, () => { try { Process.Start("notepad.exe", "\"" + cfgPath + "\""); } catch { } });
             settingsForm.Load += (s, e) =>
             {
                 Rectangle wa = Screen.FromControl(this).WorkingArea;
@@ -1733,7 +1963,7 @@ namespace ClaudeStatus
             settingsForm.Show(this);
         }
 
-        void BringToFrontNoActivate() { TopMost = false; TopMost = true; }
+        void BringToFrontNoActivate() { if (!board) { BringToFront(); return; } TopMost = false; TopMost = true; }
 
         // Hides the window only: the form, its timers, file watchers, phone dashboard and tray icon keep
         // running, so the board, tray color and toasts stay current. View, size and position are untouched.
@@ -1758,6 +1988,11 @@ namespace ClaudeStatus
 
         protected override void OnFormClosed(FormClosedEventArgs e)
         {
+            SaveQueueBounds();
+            queueTimer.Stop();
+            if (powerChanged != null) SystemEvents.PowerModeChanged -= powerChanged;
+            if (timeChanged != null) SystemEvents.TimeChanged -= timeChanged;
+            queue.Dispose();   // a running task keeps running and is picked up again next time
             SavePosition();
             StopPhone();
             push.Stop();
@@ -1775,7 +2010,7 @@ namespace ClaudeStatus
 
         protected override void Dispose(bool disposing)
         {
-            if (disposing) { StopPhone(); if (usage != null) usage.Dispose(); }
+            if (disposing) { StopPhone(); if (usage != null) usage.Dispose(); if (queue != null) queue.Dispose(); if (queueTimer != null) queueTimer.Dispose(); }
             base.Dispose(disposing);
         }
 
@@ -1784,7 +2019,6 @@ namespace ClaudeStatus
         {
             var wa = Screen.PrimaryScreen.WorkingArea;
             // Bottom-right, but left of where Windows toasts appear so they don't cover it.
-            if (!board) return new Point(wa.Right - S(CompactW) - S(400), wa.Bottom - S(CompactH) - S(12));
             return new Point(wa.Right - S(BoardW) - S(400), wa.Bottom - BoardHeight(5) - S(12));
         }
 
@@ -1796,7 +2030,7 @@ namespace ClaudeStatus
                 var p = File.ReadAllText(posPath).Trim().Split(',');
                 var pt = new Point(int.Parse(p[0]), int.Parse(p[1]));
                 foreach (var scr in Screen.AllScreens)
-                    if (scr.WorkingArea.IntersectsWith(new Rectangle(pt, new Size(S(CompactW), S(CompactH))))) return pt;
+                    if (scr.WorkingArea.IntersectsWith(new Rectangle(pt, new Size(S(BoardW), S(HeadH))))) return pt;
             }
             catch { }
             return DefaultPosition();

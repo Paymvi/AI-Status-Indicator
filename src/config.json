@@ -12,6 +12,10 @@
   "showUsage": true,
   "phoneDashboard": false,
   "phonePort": 48521,
+  "toastOnQueue": true,
+  "queueHistoryDays": 30,
+  "queueKeepAwake": true,
+  "queueAllowApiBilling": false,
   "projectAliases": {
     "Toah_Nipi_Booking_Software": "Booking Software",
     "Toah_Nipi_Website": "Website",
