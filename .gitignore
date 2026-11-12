@@ -35,3 +35,6 @@ $RECYCLE.BIN/
 .vscode/
 .idea/
 *.swp
+
+# Built VS Code bridge package (install.ps1 builds it again)
+dist/

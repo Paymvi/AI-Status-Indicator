@@ -86,6 +86,7 @@ function New-Engine([string]$root) {
 }
 function QTask($eng, [string]$title, [string]$project, [string]$prompt, [hashtable]$set = @{}) {
     $t = [ClaudeStatus.TaskEditor]::NewTask(); $t.Title = $title; $t.Project = $project; $t.Prompt = $prompt; $t.State = 'Scheduled'
+    $t.Runner = 'headless'   # these tests drive the claude -p runner; tests\vscode-tests.ps1 covers the VS Code one
     foreach ($k in $set.Keys) { $t.$k = $set[$k] }
     $e = $eng.Save($t, 0); if ($e) { throw "Save failed: $e" }
     return $t.Id
@@ -393,6 +394,127 @@ $f = Form $mr
 Check 'old startupView=compact: opens in Status and the setting is migrated to workerBoard' ($f.IsBoard -and (Get-Content (Join-Path $mr 'config.json') -Raw | ConvertFrom-Json).startupView -eq 'workerBoard')
 $f.Dispose()
 $f = Form (New-Root @{ startupView = 'queue' }); Check 'startupView=queue opens in Queue' $f.IsQueue; $f.Dispose()
+
+# ---------------------------------------------------------------------------------------------------------------
+Section 'VS Code runner rules (pure): window choice, arguments, transcript reading, task states'
+function VW([string]$id, [string[]]$folders, [double]$focused = 0, [string]$ws = '') { $w = New-Object ClaudeStatus.VsWindow; $w.Id = $id; foreach ($f in $folders) { $w.Folders.Add($f) }; $w.FocusedAt = $focused; $w.WorkspaceFile = $ws; $w }
+$wl = New-Object 'System.Collections.Generic.List[ClaudeStatus.VsWindow]'
+$wl.Add((VW 'a' @('C:\Work\App One'))); $wl.Add((VW 'b' @('C:\Work\App Two'))); $wl.Add((VW 'm' @('C:\Work\Lib', 'C:\Work\Docs') 0 'C:\Work\all.code-workspace'))
+$P = [ClaudeStatus.VsBridge]
+Check 'window choice: the window with exactly that folder (case, trailing slash and slash style ignored)' ($P::Pick($wl, 'c:/work/app one\').Id -eq 'a')
+Check 'window choice: a folder that is a root of exactly one multi-root window -> that window' ($P::Pick($wl, 'C:\Work\Docs').Id -eq 'm')
+Check 'window choice: a subfolder of an open folder is not "open" -> dedicated window (null)' ($null -eq $P::Pick($wl, 'C:\Work\App One\src'))
+Check 'window choice: same name in another place is not a match (full paths, not folder names)' ($null -eq $P::Pick($wl, 'D:\Other\App One'))
+$wl.Add((VW 'm2' @('C:\Work\Docs', 'C:\Work\Site')))
+Check 'window choice: two multi-root windows contain it -> ambiguous -> dedicated window, never a guess' ($null -eq $P::Pick($wl, 'C:\Work\Docs'))
+$wl.Add((VW 'a2' @('C:\Work\App One') 50))
+Check 'window choice: the same folder open twice -> the most recently focused window' ($P::Pick($wl, 'C:\Work\App One').Id -eq 'a2')
+$nfd = 'C:\Work\Proj' + [char]0x0065 + [char]0x0301 + 't'; $nfc = 'C:\Work\Proj' + [char]0x00E9 + 't'
+$wl.Add((VW 'u' @($nfd)))
+Check 'window choice: Unicode spelled differently (decomposed vs composed) still matches' ($P::Pick($wl, $nfc).Id -eq 'u')
+
+$E = [ClaudeStatus.QueueEngine]
+$vt = [ClaudeStatus.TaskEditor]::NewTask(); $vt.Title = 'Fix "tests"'; $vt.Project = $proj
+$err = $null
+$line = $E::VsArgs(@('C:\x\claude.exe'), $vt, 'C:\My Runs\1.settings.json', 'new', '0b6f7a2e-1111-2222-3333-444455556666', "-p looks like a flag`r`nline 2 `"q`" \", [ref]$err)
+Check 'VS Code arguments: options first, then "--" and the prompt quoted as one argument (a leading "-" stays text)' ($line -match '^--permission-mode acceptEdits --settings "C:\\My Runs\\1\.settings\.json" --session-id 0b6f7a2e-1111-2222-3333-444455556666 --name "Fix \\"tests\\"" -- "-p looks like a flag' -and $line.EndsWith('line 2 \"q\" \\"')) $line
+$line = $E::VsArgs(@('C:\x\claude.exe'), $vt, 'C:\s.json', 'resume', '0b6f7a2e-1111-2222-3333-444455556666', $null, [ref]$err)
+Check 'VS Code arguments for opening a conversation yourself: --resume <id>, no prompt and no "--"' ($line -match '--resume 0b6f7a2e-1111-2222-3333-444455556666$' -and $line -notmatch ' -- ') $line
+$line = $E::VsArgs(@('C:\x\claude.exe'), $vt, 'C:\s.json', 'new', '0b6f7a2e-1111-2222-3333-444455556666', ('x' * 40000), [ref]$err)
+Check 'a prompt too long for a Windows command line is refused with a clear reason (never truncated)' ($null -eq $line -and $err -match 'too long')
+
+$tr = Join-Path $tmp 'transcript.jsonl'
+$old = (Iso ([DateTime]::UtcNow.AddHours(-1))); $new = (Iso ([DateTime]::UtcNow))
+@(
+    '{"type":"user","timestamp":"' + $old + '","message":{"role":"user","content":"an older turn"}}'
+    '{"type":"assistant","timestamp":"' + $old + '","message":{"content":[{"type":"text","text":"old answer"}]}}'
+    '{"type":"user","timestamp":"' + $new + '","message":{"role":"user","content":"THE PROMPT"}}'
+    '{"type":"assistant","timestamp":"' + $new + '","message":{"content":[{"type":"text","text":"Running the tests."},{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"npm test"}}]}}'
+    '{"type":"user","timestamp":"' + $new + '","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]}}'
+    '{"type":"assistant","timestamp":"' + $new + '","message":{"content":[{"type":"tool_use","id":"t2","name":"Bash","input":{"command":"npm install left-pad"}}]}}'
+) | Set-Content -LiteralPath $tr -Encoding UTF8
+$act = [ClaudeStatus.Sessions]::ReadActivity($tr, [DateTime]::UtcNow.AddMinutes(-5), 'THE PROMPT')
+Check 'activity: only this run''s part of the conversation (older turns left out), prompt not repeated' ($act.Text -match 'Running the tests' -and $act.Text -notmatch 'old answer' -and $act.Text -notmatch 'THE PROMPT') $act.Text
+Check 'activity: the request Claude is waiting on is the newest tool call without a result' ($act.Pending -eq 'Bash: npm install left-pad') $act.Pending
+Check 'activity: Claude''s last message is kept as its report' ($act.LastReply -eq 'Running the tests.')
+
+$L = [ClaudeStatus.QLook]
+$k = [ClaudeStatus.TaskEditor]::NewTask(); $k.State = 'Running'; $ka = New-Object ClaudeStatus.RunAttempt; $ka.Runner = 'vscode'; $ka.Phase = 'terminal'; $k.Attempts.Add($ka)
+$s1 = $L::Kind($k); $ka.Phase = 'working'; $s2 = $L::Kind($k); $ka.Phase = 'needs_you'; $s3 = $L::Kind($k)
+Check 'states: terminal open = Starting, Claude started = Running, a question = Needs you (all distinct)' ($s1 -eq 'starting' -and $s2 -eq 'running' -and $s3 -eq 'needs_you') "$s1 $s2 $s3"
+$ka.Runner = ''; $ka.Phase = ''
+Check 'states: a task still running in the background (older version) shows as Running' ($L::Kind($k) -eq 'running')
+$n0 = [DateTime]::UtcNow
+Check 'times: relative wording next to the real time ("in 2 h 5 min", "12 min ago")' ($L::Rel($n0.AddMinutes(125.5), $n0) -eq 'in 2 h 5 min' -and $L::Rel($n0.AddMinutes(-12), $n0) -eq '12 min ago' -and $L::When($n0.AddMinutes(30), $n0) -match '\(in 30 min\)$')
+
+# legacy tasks, drafts, the manual "Open in VS Code" guard rails
+$lr = New-Root
+$le = New-Engine $lr
+$legacy = '{"Version":1,"Paused":false,"Tasks":[{"Id":"legacy1","Title":"Old task","Project":"' + ($proj -replace '\\', '\\') + '","Prompt":"x","State":"Scheduled","Schedule":"asap","Attempts":[]},' +
+    '{"Id":"legacy2","Title":"Old running","Project":"' + ($proj -replace '\\', '\\') + '","Prompt":"x","State":"Running","SessionId":"0b6f7a2e-1111-2222-3333-444455556666","Attempts":[{"N":1,"SessionId":"0b6f7a2e-1111-2222-3333-444455556666","Owner":"someone-else","OwnerPid":4,"Pid":4}]}]}'
+[IO.File]::WriteAllText($le.Store.FilePath, $legacy)
+$ld = $le.Store.Read()
+Check 'tasks saved by the previous version: waiting ones run in VS Code from now on; an old attempt stays a background run' ($ld.Find('legacy1').Runner -eq 'vscode' -and -not $ld.Find('legacy2').Last.InVsCode)
+$le.Dispose(); $le = New-Engine $lr; $le.ActiveSessionsOverride = $null
+$msg = $le.OpenInVsCode('legacy2')
+Check 'Open in VS Code on a task still running in the background: explains it must finish or be canceled (nothing is killed or restarted)' ($msg -match 'must never have two Claude processes' -and $msg -match 'Cancel run' -and $le.Data.Find('legacy2').State -eq 'Running')
+$le.Dispose()
+$de = New-Engine (New-Root)
+$dr = [ClaudeStatus.TaskEditor]::NewTask(); $dr.Title = 'Half-written'; $dr.State = 'Draft'
+Check 'an incomplete draft can be saved (nothing runs)' ($null -eq $de.Save($dr, 0) -and $de.Data.Find($dr.Id).State -eq 'Draft')
+$why = $de.Enqueue($dr.Id)
+Check '... but it can''t join the queue until it''s complete, and says what''s missing' ($why -match 'project folder' -and $de.Data.Find($dr.Id).State -eq 'Draft') "$why"
+$ns = [ClaudeStatus.TaskEditor]::NewTask(); $ns.Title = 'Never ran'; $ns.Project = $proj; $ns.Prompt = 'x'; $ns.State = 'Draft'; $null = $de.Save($ns, 0)
+Check 'Open in VS Code without a conversation: says so instead of a broken resume' ($de.OpenInVsCode($ns.Id) -match 'no conversation yet')
+$gone = [ClaudeStatus.TaskEditor]::NewTask(); $gone.Title = 'Lost conversation'; $gone.Project = $proj; $gone.Prompt = 'x'; $gone.State = 'Draft'; $null = $de.Save($gone, 0)
+$null = $de.Store.Mutate([Func[ClaudeStatus.QueueData, bool]] { param($d) $x = $d.Find($gone.Id); $x.SessionId = '0b6f7a2e-9999-2222-3333-444455556666'; $x.State = 'Failed'; $true }); $de.Tick()
+Check '... and when its conversation is missing, the actual reason and a recovery (Run again)' ($de.OpenInVsCode($gone.Id) -match "wasn't found on this computer.*Run again")
+$ran = [ClaudeStatus.TaskEditor]::NewTask(); $ran.Title = 'Ran but unsaved'; $ran.Project = $proj; $ran.Prompt = 'do the work'; $ran.State = 'Draft'; $null = $de.Save($ran, 0)
+$null = $de.Store.Mutate([Func[ClaudeStatus.QueueData, bool]] { param($d) $x = $d.Find($ran.Id); $x.SessionId = '0b6f7a2e-7777-2222-3333-444455556666'; $x.State = 'NeedsAttention'
+        $ra = New-Object ClaudeStatus.RunAttempt; $ra.N = 1; $ra.Runner = 'vscode'; $ra.SessionId = $x.SessionId; $ra.ClaudePid = 4242; $ra.Outcome = 'interrupted'; $x.Attempts.Add($ra); $true }); $de.Tick()
+$de.Retry($ran.Id, $true)
+$rt = $de.Data.Find($ran.Id)
+Check 'Continue on a VS Code run whose conversation Claude never saved: Needs attention, never the original prompt again' ($rt.State -eq 'NeedsAttention' -and $rt.Reason -match "didn't save" -and $rt.Attempts.Count -eq 1) "$($rt.State): $($rt.Reason)"
+$de.Dispose()
+$hr = New-Root; $hsid = '0b6f7a2e-5555-2222-3333-444455556666'
+Put $hr $hsid 'ERROR' 'x' 5
+$he = New-Engine $hr
+Check 'hook state is readable with no time limit (the stale-event and hands-off checks depend on it)' ($null -ne $he.HookOf($hsid, [DateTime]::MinValue) -and $null -eq $he.HookOf($hsid, [DateTime]::UtcNow.AddMinutes(1)))
+$he.Dispose()
+
+Section 'Queue view: sections, statuses and the action for each situation'
+$ur = New-Root
+$ue = New-Object ClaudeStatus.QueueEngine($ur)
+$ud = New-Object ClaudeStatus.QueueData
+function UT([string]$title, [string]$state, [hashtable]$set = @{}) { $t = [ClaudeStatus.TaskEditor]::NewTask(); $t.Title = $title; $t.Project = $proj; $t.Prompt = "line 1`r`nline 2"; $t.State = $state; foreach ($k in $set.Keys) { $t.$k = $set[$k] }; $ud.Tasks.Add($t); $t }
+$nowU = [DateTime]::UtcNow
+$uNeeds = UT 'Asks something' 'Running' @{ SessionId = '0b6f7a2e-1111-2222-3333-444455556661' }
+$a = New-Object ClaudeStatus.RunAttempt; $a.N = 1; $a.Runner = 'vscode'; $a.Phase = 'needs_you'; $a.Attention = 'Claude is asking: Bash: npm install'; $a.Terminal = 'T'; $a.StartedUtc = $nowU.AddMinutes(-5); $a.SessionId = $uNeeds.SessionId; $uNeeds.Attempts.Add($a)
+$uRun = UT 'Working away' 'Running'; $a = New-Object ClaudeStatus.RunAttempt; $a.N = 1; $a.Runner = 'vscode'; $a.Phase = 'working'; $a.StartedUtc = $nowU.AddMinutes(-2); $uRun.Attempts.Add($a)
+$uAt = UT 'Tonight' 'Scheduled' @{ Schedule = 'at'; RunAtUtc = $nowU.AddHours(3) }
+$uFail = UT 'Broke' 'NeedsAttention' @{ Outcome = 'vscode'; Reason = 'Couldn''t start it in VS Code: the Claude Status Bridge extension isn''t installed.' }
+$uDraft = UT 'Idea' 'Draft'
+$uDone = UT 'Shipped' 'Completed' @{ SessionId = '0b6f7a2e-1111-2222-3333-444455556662'; FinishedUtc = $nowU.AddHours(-1); Summary = 'All green.' }
+[IO.File]::WriteAllText($ue.Store.FilePath, [ClaudeStatus.QueueStore]::Ser().Serialize($ud)); $ue.Dispose()
+$uf = Form $ur
+$uf.ShowQueue($true)
+$qv = $uf.QueueViewControl
+$rows = $qv.RowTexts
+Check 'sections in order: NEEDS YOU, RUNNING, UPCOMING, DRAFTS, then HISTORY (collapsed)' (($rows | Where-Object { $_ -notmatch '^  ' } | ForEach-Object { ($_ -split '  ')[0] }) -join ',' -eq 'NEEDS YOU,RUNNING,UPCOMING,DRAFTS,HISTORY' -and -not ($rows -match 'Shipped')) ($rows -join ' | ')
+Check 'a running task that asks something is listed under NEEDS YOU, the failed launch too' ($rows[1] -match 'Asks something · Needs you' -and ($rows -match 'Broke · Needs attention'))
+Check 'summary: what needs you, what runs, and what''s next with its real time' ($qv.SummaryText -match '2 need you' -and $qv.SummaryText -match '1 running' -and $qv.SummaryText -match 'Next: "Tonight"' -and $qv.SummaryText -match '\(in 2 h|\(in 3 h') $qv.SummaryText
+$qv.SelectTask($uNeeds.Id)
+Check 'needs you: shows Claude''s actual request and where to answer; primary action Open in VS Code' ($qv.DetailText -match 'Claude is asking: Bash: npm install' -and $qv.DetailText -match 'Respond in VS Code' -and $qv.ActionTexts[0] -eq 'Open in VS Code') ($qv.ActionTexts -join ',')
+$qv.SelectTask($uFail.Id)
+Check 'VS Code unavailable: Install / Retry in VS Code / Run in background instead (an explicit choice, no silent fallback)' (($qv.ActionTexts -join ',') -match 'Install VS Code bridge,Retry in VS Code,Run in background instead') ($qv.ActionTexts -join ',')
+$qv.SelectTask($uAt.Id)
+Check 'upcoming: Run now first, and the actual start time next to the relative one' ($qv.ActionTexts[0] -eq 'Run now' -and $qv.DetailText -match 'starts .*\(in ')
+$qv.SelectTask($uDraft.Id)
+Check 'draft: Add to queue first' ($qv.ActionTexts[0] -eq 'Add to queue')
+$qv.SelectTask($uDone.Id)
+Check 'history opens when a finished task is selected; completed: Open in VS Code, Follow up' ($qv.RowTexts -match 'Shipped' -and $qv.ActionTexts[0] -eq 'Open in VS Code' -and $qv.ActionTexts -contains 'Follow up…')
+Check 'every task view ends with More (the less common actions), never a wall of buttons' (@($qv.ActionTexts).Count -le 4 -and $qv.ActionTexts[-1] -match '^More')
+$uf.Dispose()
 
 if ($null -ne $oldCfgDir) { $env:CLAUDE_CONFIG_DIR = $oldCfgDir } else { Remove-Item Env:CLAUDE_CONFIG_DIR -ErrorAction SilentlyContinue }
 Remove-Item Env:MOCK_LOG_DIR, Env:MOCK_RESET_SEC -ErrorAction SilentlyContinue

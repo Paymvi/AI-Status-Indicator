@@ -17,7 +17,7 @@
     powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\.claude\status-indicator\uninstall.ps1"
 #>
 [CmdletBinding()]
-param([string]$ClaudeDir)
+param([string]$ClaudeDir, [switch]$KeepVSCodeBridge)
 
 $ErrorActionPreference = 'Stop'
 
@@ -30,6 +30,7 @@ $winPs = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
 if ($PSVersionTable.PSEdition -eq 'Core' -and (Test-Path -LiteralPath $winPs)) {
     $a = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $PSCommandPath)
     if ($ClaudeDir) { $a += @('-ClaudeDir', $ClaudeDir) }
+    if ($KeepVSCodeBridge) { $a += '-KeepVSCodeBridge' }
     & $winPs @a
     exit $LASTEXITCODE
 }
@@ -147,6 +148,15 @@ Write-Host "  stopped $($procs.Count) indicator process(es)"
 $phoneSetup = Join-Path $installDir 'phone-setup.ps1'
 if (Test-Path -LiteralPath $phoneSetup) {
     try { & $phoneSetup -Disable | ForEach-Object { "  $_" } } catch { Write-Warning "Couldn't check tailscale serve for the phone dashboard: $_" }
+}
+
+# ---------- 1c. VS Code bridge extension (only if VS Code has it) ----------
+$vsExt = Join-Path $env:USERPROFILE '.vscode\extensions'
+$bridgeScript = Join-Path $installDir 'vscode-bridge\install-bridge.ps1'
+if (-not $KeepVSCodeBridge -and (Test-Path -LiteralPath $bridgeScript) -and @(Get-ChildItem -LiteralPath $vsExt -Directory -Filter 'claude-status.claude-status-bridge-*' -ErrorAction SilentlyContinue).Count -gt 0) {
+    try { & $bridgeScript -Uninstall | Out-Null; Write-Host '  removed the Claude Status Bridge extension from VS Code' } catch { Write-Warning "Couldn't remove the VS Code bridge extension: $_" }
+} else {
+    Write-Host '  no VS Code bridge extension to remove'
 }
 
 # ---------- 2. Autostart shortcut (only if it points at this install) ----------

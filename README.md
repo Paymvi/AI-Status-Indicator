@@ -6,12 +6,12 @@
 STATUS (default)                                QUEUE (click ☰◷ to switch)
 ┌──────────────────────────────────────┐       ┌──────────────────────────────────────────────────┐
 │ CLAUDE WORKERS           ☰◷  ⚙  –  × │       │ CLAUDE QUEUE                          ▭  ⚙  –  × │
-├──────────────────────────────────────┤       │ [+ New task] [Pause queue]  Running 1 · 2 upcoming│
-│ ● Portal              NEEDS YOU · 2m │       │ RUNNING            │ Fix failing tests            │
-│ ● ⏱ Fix failing tests  WORKING · 04:32│       │ ● Fix failing tests│ RUNNING · since 3:00 AM      │
-│ ● Booking Software #2 WORKING · 01:08│       │ UPCOMING           │ Project / conversation / when│
-│ ● Website             DONE · 6m ago ×│       │ ● Nightly audit    │ [Cancel run…] …              │
-└──────────────────────────────────────┘       │ HISTORY            │ Output …                     │
+├──────────────────────────────────────┤       │ [+ New task] [⏸ Pause queue]  ! 1 needs you · …  │
+│ ● Portal              NEEDS YOU · 2m │       │ NEEDS YOU          │ Fix failing tests            │
+│ ● ⏱ Fix failing tests  WORKING · 04:32│       │ ! Fix failing tests│ ! NEEDS YOU · started 3:00 AM│
+│ ● Booking Software #2 WORKING · 01:08│       │ RUNNING            │ Claude is asking: Bash: npm …│
+│ ● Website             DONE · 6m ago ×│       │ ▶ Refactor pricing │ [Open in VS Code] [More ▾]   │
+└──────────────────────────────────────┘       │ UPCOMING · HISTORY▸│ Prompt | Activity and result │
                                                └──────────────────────────────────────────────────┘
 ```
 
@@ -79,7 +79,7 @@ CLAUDE WORKERS
 | Choose the view at startup | Settings (⚙) → *Startup view* |
 
 - **Status** is the Worker Board described above: small, always on top, never takes keyboard focus.
-- **Queue** is a larger, normal window (you type prompts in it, so it can take focus and isn't always on top). Drag its border to resize it.
+- **Queue** is a larger, normal window (you type prompts in it, so it can take focus and isn't always on top). It has a taskbar button and an Alt+Tab entry, so it can't get lost behind other windows. Drag its border to resize it.
 - Each view remembers its own place: switching back to Status puts the board exactly where it was; the Queue window keeps its own size and position (`queue-window.txt`). Both are kept on a connected monitor.
 - Switching views never pauses the scheduler or a running task, and never loses session state.
 - The old **Compact** pill was removed. If it was your startup view, Claude Status now opens in **Status** (the setting is migrated automatically).
@@ -112,100 +112,110 @@ What this can't do:
 
 - **Two Claude sessions in the same VS Code window** (or two tabs in one Windows Terminal window): the correct window comes to the front, but Windows offers no supported way to select a specific Claude tab or terminal tab inside it. The Claude Code extension has a `vscode://anthropic.claude-code/open?session=…` link, but VS Code delivers such links to whichever VS Code window was focused last and the extension *opens* (resumes) the session there, which could open it in the wrong window, so Claude Status deliberately doesn't use it.
 - Sessions recorded by the previous version of Claude Status (before upgrading) have no process identity yet; they become clickable after their next prompt.
-- Clicking a worker is the **only** thing that ever moves keyboard focus. State changes, sounds, notifications, view switching and resizing never take focus.
+- Only your own clicks move keyboard focus: a worker row, switching to the Queue, or bringing the Queue back from the tray icon or a notification. State changes, sounds, notifications appearing and resizing never take focus.
 
 ## Queue: scheduled prompts
 
-Queue prompts for Claude Code to work on while you sleep, work a shift or are away: at a set time, after another task finishes, or once your usage limit resets. Tasks run **one at a time**, on this computer, with your existing Claude Code sign-in.
+Queue prompts for Claude Code to run while you're away: at a set time, after another task completes successfully, or once your usage limit resets. Each task runs **in a terminal of its project's VS Code window**, so you can watch Claude work, answer its questions and keep the conversation going there. The Queue window is where you organize and monitor tasks; VS Code is where you talk to Claude. Tasks run **one at a time**, on this computer, with your existing Claude Code sign-in.
 
-### Schedule your first prompt
+### One-time setup: the VS Code bridge
 
-1. Click the ☰◷ icon in the Status header (or right-click → **View → Queue**).
-2. Click **+ New task**.
-3. **Title:** anything readable. **Project folder:** the folder Claude should work in (**Browse…**). **Prompt:** exactly what you'd type to Claude; line breaks and formatting are kept.
-4. **Conversation:** leave **New conversation** (the default), or pick one to continue (see below).
-5. **When:**
-   - **As soon as possible** (in queue order),
-   - **At** a date and time (your Windows time zone, shown next to it),
-   - **After this task finishes successfully** (pick another queued task), or
-   - **When usage is available again**, optionally with a reset time you know.
-6. Read **Permissions** (what the task may do unattended; see below). **Advanced options** let you change it.
-7. Click **Add to queue** and confirm the permission scope. (**Save as draft** keeps it without running it.)
+Scheduled tasks reach VS Code through a small companion extension, **Claude Status Bridge** (`src\vscode-bridge`). `install.ps1` installs it into VS Code for you (`code --install-extension`; skip with `-NoVSCodeBridge`). If it's missing, the Queue shows **Install VS Code bridge**. To do it by hand:
 
-Leave Claude Status running (minimized to the tray is fine). You get a Windows notification when a task completes, fails, hits a usage limit or needs you.
-
-### Review the result
-
-Select the task in the Queue. You see:
-
-- its state (**Scheduled, Queued, Running, Waiting for usage, Blocked, Needs attention, Completed, Failed, Canceled, Draft**) and why;
-- **Claude's report**: the first line of Claude's final message, then the full message and a readable log of the run (Claude's text, every tool call, blocked actions, the result line). Each run (attempt) can be picked from the list above the output;
-- **Completed** means *the run finished and Claude reported success*. That is Claude's own report: Claude Status doesn't verify the work, and an exit code is never treated as proof;
-- actions: **Continue conversation**, **Run again**, **Mark completed**, **Follow up…** (a new task in the same conversation), **Open in terminal**, **Copy resume command**, **Edit…**, **Duplicate**, **▲ / ▼** (reorder), **Run now**, **Skip**, **Back to draft**, **Cancel run…**, **Remove…**, **Open folder**.
-
-Tasks that need you are listed first, under **NEEDS ATTENTION**. The Status board shows a running task as one worker row named **⏱ Title** (from Claude Code's own hooks, so never twice).
-
-### How tasks run
-
-Each run is `claude -p` (Claude Code's documented headless mode) started directly in the project folder:
-
-```text
-claude -p --output-format stream-json --verbose --permission-mode acceptEdits
-       --permission-prompts none --settings <task's permission file> (--session-id | --resume) <uuid>
+```powershell
+powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\.claude\status-indicator\vscode-bridge\install-bridge.ps1"
 ```
 
-- The **prompt goes in on standard input**, never on a command line, so quotes, `&`, `%`, Unicode and line breaks arrive exactly as written. Paths with spaces or non-English characters are fine.
-- Claude's output streams **straight into a log file** (`state\queue\runs\<task>\<n>.jsonl`) that the app reads. So a task keeps running if you quit Claude Status, and its result is picked up next time.
-- Your **subscription sign-in** is used, as when you run `claude` yourself. `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` are removed from the task's environment, and if Claude Code still reports any API-key source (e.g. an `apiKeyHelper`), the run is stopped before its first request and marked *Needs attention*. (`"queueAllowApiBilling": true` allows API billing on purpose.) Credentials are never read or copied.
-- Project instructions (`CLAUDE.md`), your settings and your hooks apply as usual.
-- While a task runs, Windows is asked not to sleep (an ordinary request that ends with the run; no power settings are changed). Turn that off with `"queueKeepAwake": false`.
+Open VS Code windows pick it up within seconds. It uses only documented VS Code APIs (create, show and close a terminal; read the window's folders), talks to Claude Status only through files in `state\vscode\`, and makes no network connections. `uninstall.ps1` removes it again.
 
-### Permissions (unattended)
+**Why a terminal and not the Claude Code chat panel?** The Claude Code extension's documented entry point (`vscode://anthropic.claude-code/open?prompt=…&session=…`) only *pre-fills* a prompt (you'd have to click Send), and it opens in whichever VS Code window happens to be focused. It has no documented API for other tools. So it can't run a scheduled prompt unattended in the right window. Claude Status therefore runs the Claude Code CLI interactively in a VS Code terminal. It's the same conversation history: the extension and the CLI share it.
 
-Unattended tasks can't ask you anything, so each task has an explicit scope that **Claude Code enforces** (its own permission rules, from a `--settings` file):
+### Schedule a task
+
+1. Click the ☰◷ icon in the Status header (or right-click → **View → Queue**), then **+ New task** (Ctrl+N).
+2. **Project:** the folder Claude works in (**Browse…**).
+3. **Prompt:** exactly what you'd type to Claude. Line breaks and formatting are kept. A title is optional (it defaults to the first line).
+4. **Conversation:** a new one, an existing one in that project (picked from a list, or a pasted session ID), or the conversation of the task it runs after.
+5. **When:** as soon as possible, at a date and time (your local time), after another task completes successfully, or when usage is available again. Only the fields for your choice are shown.
+6. **Review:** a plain-language summary of what will happen and its permissions. Click **Schedule** (Ctrl+Enter). Enter never submits by accident. **Save as draft** keeps an unfinished task, and closing the editor with changes asks whether to keep them as a draft.
+
+**Advanced** holds where it runs (VS Code, or *Background*), permissions, model and what to do with a missed time.
+
+Leave Claude Status running (minimized to the tray is fine). You get a Windows notification when a task completes, fails, waits for usage or needs you. Click it to open that task.
+
+### The Queue window
+
+- **Top bar:** **+ New task**, **Pause / Resume queue**, and one line saying what needs you, what runs, what's upcoming, and what runs next with its real date and time (`Next: "Nightly audit" tomorrow 2:00 AM (in 9 h)`). A banner says when the queue is paused or the bridge is missing.
+- **List:** **NEEDS YOU** (questions, failures, blocked tasks), **RUNNING**, **UPCOMING**, **DRAFTS**, and **HISTORY** (collapsed; click to show). Each task has one status with an icon: *Starting, Running, Needs you, Needs attention, Blocked, Waiting for usage, Waiting, Scheduled, Ready, Draft, Completed, Failed, Canceled, Skipped*.
+- **Details:** the status and timing, what needs you (Claude's actual request when it states one), the primary action for the situation (**Open in VS Code**, **Run now**, **Add to queue**, **Retry in VS Code**, …) and **More ▾** for the rest (edit, reorder, skip, back to draft, duplicate, copy session ID, run in background, remove…). Below them: project, where it runs (terminal and window), conversation and session ID, schedule and permissions; then the full **Prompt** and **Activity and result** (Claude's conversation for that run).
+
+### Where tasks run, and how you respond
+
+At the scheduled time, Claude Status picks the VS Code window:
+
+- a window that has **exactly that folder** open (paths compared in full, ignoring case and Unicode form) is reused;
+- otherwise, the one multi-root window that contains the folder;
+- otherwise (not open, or ambiguous) it opens a **new window for that project**. It never replaces what another window shows.
+
+It asks that window for a terminal named **⏱ *task title*** that runs `claude` directly in the project folder, with no shell in between. The prompt is passed as one exact argument after `--`, so quotes, `&`, `%`, Unicode and line breaks arrive as written; prompts longer than about 28,000 characters (the Windows command-line limit) must run in the background. Exactly one window claims each task, and a task VS Code hasn't taken within 90 seconds is withdrawn and marked *Needs attention* (it can never start late). VS Code restarting never re-runs it.
+
+Progress comes from Claude Code's own hooks for that session, so the app can tell the stages apart:
+
+| Shown | Meaning |
+|---|---|
+| **Starting** | Terminal open, Claude hasn't started the prompt yet. After 2 minutes it says why that may be (Claude asking you to trust the folder, or to sign in). |
+| **Running** | Claude started the prompt and is working. |
+| **Needs you** | Claude asked a question or needs a permission. The task shows what it asks (when Claude's saved conversation says) and where to answer. |
+| **Completed** | Claude finished its turn (its *Stop* hook). That's Claude's own report, not independent verification. Opening or closing a terminal, or Claude exiting, never counts as success. |
+| **Needs attention** | It stopped early (terminal closed, Claude exited, an error). Nothing is retried on its own except usage limits and network problems. |
+
+**To respond:** click **Open in VS Code** on the task (its notification and its ⏱ row on the Status board open the task). It brings that project's window forward and shows the task's terminal; type your answer there. Clicking it never starts a second Claude: if the terminal is still open it's revealed, and otherwise the task's conversation is resumed (`claude --resume <id>`, nothing sent). After a task completes, Claude stays open in its terminal, so you can keep talking to it.
+
+While you use a task's conversation yourself, the queue leaves it alone. It won't retry or continue it until you close that terminal. Before the queue continues a conversation (a follow-up task, or a retry after a usage limit), it closes the finished run's own terminal first, and only if nobody used it since. It also waits for that Claude to exit. One conversation never has two Claude processes.
+
+**Running in the background instead.** **Advanced → Runs in: Background** (or **Run in background instead** when VS Code isn't available) uses the earlier mode: `claude -p` with no window, output kept in the Queue. It's always your explicit choice; Claude Status never falls back to it silently.
+
+**Tasks from earlier versions** run in VS Code from now on. A task that was already running in the background keeps running there. Opening its details never stops it. To move it to VS Code, let it finish or **Cancel run**; then **Open in VS Code** resumes the same conversation and session ID without resending the prompt.
+
+### Permissions
+
+Each task has an explicit scope that **Claude Code enforces** (its own permission rules, from a `--settings` file):
 
 | Default ("Edit files in the project + allowed commands") | |
 |---|---|
 | Allowed | Editing files in the project (`acceptEdits`), read-only commands, and the allowed command patterns: `npm test *`, `npm run build *`, `dotnet test *`, `pytest *`, `cargo test *`, `go test *`, `git status/diff/log *`, … (editable, one per line, applied to both Bash and PowerShell) |
 | Denied unless you tick them | `git commit`, `git push`, deleting files (`rm`, `Remove-Item`, `git clean`, `git reset --hard`, …) |
-| Denied | Everything else: network access, deployments, other tools, MCP servers, questions to you. `--permission-prompts none` turns anything that would prompt into a recorded denial |
+| Anything else | **VS Code:** Claude asks you in the task's terminal, and the task waits as *Needs you*. **Background:** denied automatically (`--permission-prompts none`), and the task is marked *Needs attention* with what was blocked. |
 
-- A run with blocked actions is marked **Needs attention** (never *Completed*) and lists what was blocked. Continue it yourself with **Open in terminal**, or **Mark completed**.
-- Other levels: *Only the allowed commands (no file edits)* (`dontAsk`) and *Read and plan only* (`plan`). There is no "bypass permissions" option.
+- Other levels: *Only the allowed commands (no file edits)* and *Read and plan only*. There is no "bypass permissions" option, and running in VS Code doesn't add one.
 - Deny rules win over allow rules, also over allow rules in your own settings.
 - This limits which tools and commands Claude may use; it isn't a sandbox. An allowed command such as a test script can still do whatever that script does.
+- `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` are removed from the task's environment, so it uses your subscription (`"queueAllowApiBilling": true` allows API billing on purpose).
 
 ### Conversations
 
 - **New conversation** (default): a fresh session whose ID is kept on the task, so follow-ups can continue it.
-- **Continue a conversation in this project:** pick one from the list (title, last used, where it ran, ID: read from Claude Code's local transcripts for that folder) or paste a session ID.
-- **Continue the conversation of the task it runs after:** chained tasks share one conversation.
-- It never resumes "whatever ran last" (no `--continue`). Before resuming, it checks that the conversation exists, belongs to the same project folder, and isn't open in another Claude Code session right now (`claude agents --json`). Otherwise the task is **Needs attention** with the reason.
-- **VS Code:** scheduled conversations are started by the CLI. The Claude Code docs say `claude -p` sessions are left out of the CLI's `/resume` picker, and they aren't guaranteed to appear in the VS Code extension's list. Use **Open in terminal** (runs `claude --resume <id>` in the project folder), or **Copy resume command** and run it in VS Code's terminal.
+- **Continue a conversation in this project** or **the conversation of the task it runs after:** it never resumes "whatever ran last". It checks first that the conversation exists, belongs to this folder, and isn't open in another Claude Code session (`claude agents --json`). Otherwise the task is *Needs attention* with the reason.
+- **Continue task** resumes the task's conversation with *"Continue the task from your previous turn… don't repeat completed steps"*. It never resends the original prompt. If Claude Code didn't save the conversation, the task says so instead of starting over. **Run again** (under More) is the explicit way to send the original prompt again.
 
 ### Usage limits
 
-- Claude Code reports exhausted limits in its output (`rate_limit_event` with status `rejected` and a reset time). The task then waits as **Waiting for usage** until one minute after that reset, and so do the other queued tasks. A limit that Claude Usage shows at 100% also holds new runs until its reset.
-- If no reset time is reported, it retries after 15 min, 30 min, 1 h, 2 h, then every 3 h (up to 12 tries), and says the time is estimated. **Change next try…** sets it yourself.
-- If the limit hits **in the middle of a task**, the conversation is kept and the retry **resumes it** with *"Continue the task from your previous turn… don't repeat completed steps"*, instead of resending the original prompt.
-- Claude Status never claims to know your remaining tokens: only reset times Claude Code reports, or that you enter.
-- Usage limits, sign-in problems (*Needs attention*: run `/login`), billing problems, network problems (retried 3 times with back-off, continuing the conversation), permission blocks and ordinary failures (*Failed*) are told apart.
+- When Claude stops with a usage limit (its `rate_limit` error), the task waits as **Waiting for usage**, until the reset time Claude Code reported (via Claude Usage) or, if none is known, after 15 min, 30 min, 1 h, 2 h, then every 3 h (up to 12 tries, marked as estimated). **Change next try…** sets it yourself.
+- The retry **continues the same conversation** instead of resending the original prompt. Other queued tasks also wait while a limit is known to be in effect.
+- Claude Status never claims to know your remaining usage: only reset times Claude Code reports, or that you enter.
 
 ### When Claude Status isn't running, sleep, restarts
 
-- **Schedules only run while Claude Status runs.** Minimizing to the tray keeps them running. Quitting asks first and tells you what will wait; turn on *Start with Windows* (Settings) for overnight use.
-- **Missed times** (app closed, computer asleep or off): when it runs again, overdue tasks wait **one minute** (so you can **Skip** them), then run one at a time. Per task, *Advanced → If the time is missed: Skip it* skips them instead. Waking from sleep and clock changes are treated the same way.
-- Times are stored as UTC with your time zone. A time that doesn't exist on a daylight-saving day moves to the first valid minute; one that happens twice means the first.
-- **Restart while a task runs:** Claude Status reattaches to the still-running Claude process (identified by process ID + start time) and finishes normally. If Claude ended without its final result while nobody watched, the outcome is uncertain: the task is **Needs attention** and is **never rerun automatically**. Choose *Continue conversation* yourself.
-- **One at a time, exactly once:** a task is claimed in the same locked write that starts it, so repeated timers, wake events or a second instance can't launch it twice.
-- **Manual work:** if Claude Code is busy in the same project folder in another session (`claude agents --json`), the task waits (*"Claude is busy in this project"*). If that command doesn't answer, the status hooks are used (they only know the folder name). **Pause queue** holds everything while you work by hand.
-- **Cancel run…** stops Claude and every process it started (a Windows job object), keeps the output so far and records *Canceled*. Edits it already made are **not** undone.
+- **Schedules only run while Claude Status runs.** Minimizing to the tray keeps them running. Quitting asks first; turn on *Start with Windows* (Settings) for overnight use.
+- **Missed times:** overdue tasks wait **one minute** (so you can skip them), then run one at a time. *Advanced → If the time is missed: Skip it* skips them instead. Waking from sleep and clock changes are treated the same way.
+- **Restart while a task runs:** a VS Code task keeps running in VS Code and is picked up again. A background task is reattached to its Claude process. If its outcome can't be known, it's *Needs attention* and **never rerun automatically**.
+- **One at a time, exactly once:** a task is claimed in the same locked write that starts it, and exactly one VS Code window can claim its terminal, so timers, wake events, a second app instance or a restart can't launch it twice.
+- **Manual work:** if Claude Code is busy in the same project in another session, the task waits. **Pause queue** holds everything while you work by hand.
+- **Cancel run…** stops Claude (for VS Code, the terminal stays so you can read it), keeps what it did, and records *Canceled*. Edits already made are **not** undone. Tasks waiting for it become *Blocked*.
 
 ### Storage and privacy
 
-Prompts, results and logs stay on this computer in `state\queue\` (`tasks.json`, plus `runs\<task>\` with each run's log, error output and permission file). Nothing is sent anywhere except what Claude Code itself sends to Anthropic when a task runs. Finished tasks and their logs are deleted after `"queueHistoryDays"` (30) days; **Clear history…** deletes them now. A `tasks.json` that can't be read is kept as `tasks.json.unreadable-<time>`, never silently replaced. The phone dashboard doesn't expose the Queue (it only sees the ⏱ worker name). `uninstall.ps1` deletes all of it.
-
-The Queue code is separate from the status display (`scheduler.cs`: tasks, store, rules, runner; `queue.cs`: the view), so submitting tasks from elsewhere (e.g. a phone) can be added later. Nothing here opens a network port.
+Prompts, results and logs stay on this computer in `state\queue\` (`tasks.json`, plus `runs\<task>\` with each run's permission file and, for background runs, its log). The VS Code bridge's request and status files are in `state\vscode\`. The activity shown for VS Code runs is read from Claude Code's own saved conversation (best effort: that format isn't documented). Nothing is sent anywhere except what Claude Code itself sends to Anthropic. Finished tasks are deleted after `"queueHistoryDays"` (30) days; **Clear all history…** (under More on a finished task) deletes them now. A `tasks.json` that can't be read is kept as `tasks.json.unreadable-<time>`, never silently replaced. The phone dashboard doesn't expose the Queue.
 
 ## Claude Usage
 
@@ -639,7 +649,7 @@ Run `install.ps1` again after pulling a newer version. It's safe to run repeated
 | **Settings** | ⚙, or right-click → **Settings…** |
 | **Reset position** | Right-click → **Reset position** |
 | **See all sessions** | The Worker Board, or right-click the indicator |
-| **Bring it back if hidden** | Left-click the tray icon, or right-click it → **Open** (same window, same view and position) |
+| **Bring it back if hidden** | Left-click the tray icon, or right-click it → **Open**: the same window comes to the front (the Queue is activated), un-minimized, and moved back onto a connected monitor if its spot is gone. The Queue also has a taskbar button |
 
 From PowerShell:
 
@@ -730,6 +740,7 @@ If the wizard says it can't find the file, use this instead: press **Win + R**, 
 | `queueKeepAwake` | `true` (default): ask Windows not to sleep while a task runs. |
 | `queueAllowApiBilling` | `false` (default): a scheduled run that would use an API key instead of your subscription is stopped. |
 | `queueClaudeCommand` | Optional: the command to run instead of `claude.exe` found on `PATH` (used by the tests' mock), e.g. `["C:\\path\\claude.exe"]`. |
+| `queueVSCodeCommand` | Optional: the VS Code program to open project windows with, instead of the `Code.exe` next to `code.cmd` (e.g. a portable copy), e.g. `["C:\\VSCode\\Code.exe"]`. |
 | `workerSort` | `"urgency"` (default: NEEDS YOU, ERROR, WORKING, DONE) or `"recent"` (most recently updated first). Used by both views. |
 | `showWorkerSummary` | `true` shows a one-line summary under the Worker Board heading. Default `false`. |
 | `showUsage` | `true` (default) shows the [Claude Usage](#claude-usage) strip on the Worker Board; `false` hides it (no space kept). Also in Settings. |
@@ -774,7 +785,7 @@ It does **not** delete your cloned repository, Claude Code, the `.claude` folder
 - Notifications and sounds only happen while the indicator is running.
 - **Clicking a worker** focuses its top-level window, not a specific VS Code editor tab or Windows Terminal tab. With several VS Code windows open, a session becomes clickable once you've sent it a prompt while Claude Status was running (see [Clicking a worker](#clicking-a-worker)). Sessions that have ended can't be focused.
 - A DONE worker stays on the Worker Board until you dismiss it, even after its session has closed.
-- **Queue:** tasks only run while Claude Status runs and the computer is awake (it doesn't wake the computer). Usage limits are only known when Claude Code reports them; the remaining allowance isn't. Scheduled conversations may not appear in VS Code's conversation list (open them with *Open in terminal*). Unattended permission rules limit tools and commands, not what an allowed script does. The conversation list reads Claude Code's undocumented transcript format (best effort; a session ID can always be pasted).
+- **Queue:** tasks only run while Claude Status runs and the computer is awake (it doesn't wake the computer). Usage limits are only known when Claude Code reports them; the remaining allowance isn't. Scheduled tasks run in a VS Code terminal, not the Claude Code chat panel: the extension has no documented way to submit a prompt unattended in a chosen window (see [Queue](#queue-scheduled-prompts)). The terminal's tab may show Claude's own title instead of *⏱ title*; **Open in VS Code** still finds it. A folder Claude hasn't been trusted in yet makes it ask you first: the task shows *Starting* until you answer in its terminal. *Completed* means Claude finished its turn (its Stop hook); if it ended that turn by asking you something in plain text, read the result. The activity view and "can this conversation be continued" read Claude Code's undocumented saved conversations (best effort); when Claude Code hasn't saved one, the task says so and never resends the prompt. Reloading a VS Code window closes its task terminals (they are never re-run). Permission rules limit tools and commands, not what an allowed script does.
 - **Claude Usage** only knows what Claude Code has reported on this computer. With no recent Claude Code activity it shows the last figures as *Stale*; usage on claude.ai or other devices appears once Claude Code reports again. The docs don't say whether the VS Code extension runs status line commands. If it doesn't, sessions there only update the `/usage` cache. The `/usage` cache is undocumented and may change with Claude Code updates.
 - **Phone context bars** need the status line, which the VS Code extension doesn't run: workers there show *Context unavailable*. In the CLI a reading arrives with each Claude reply, so it isn't updated mid-reply while a long tool call runs.
 - If a session ends abruptly without its Claude process exiting, its last WORKING / NEEDS YOU / ERROR state lingers until `staleHours` passes.
@@ -792,7 +803,10 @@ Its app (usually VS Code) has several windows and Claude Status hasn't yet seen 
 Create an empty file named `debug.on` in `%USERPROFILE%\.claude\status-indicator\`. Each hook call is then logged (time, event, state, session ID only) to `debug.log` in that folder. Delete `debug.on` when done.
 
 **The window disappeared off-screen.**
-Left-click the tray icon (it moves the window back onto the screen if needed), then right-click the window → **Reset position** if you want its default spot.
+Left-click the tray icon: it un-minimizes the window, moves it back onto a connected monitor if needed and brings it to the front. In the Queue view you can also use its taskbar button or Alt+Tab. Right-click the window → **Reset position** for the default spot.
+
+**A scheduled task says "Couldn't start it in VS Code" or "VS Code didn't take the task".**
+Check that the **Claude Status Bridge** extension is installed and enabled in VS Code (the Queue offers **Install VS Code bridge**), then **Retry in VS Code**. If VS Code has downloaded an update and is waiting to restart, it may refuse to open new windows until you restart it. **Run in background instead** runs the task without VS Code.
 
 **"Running scripts is disabled on this system".**
 Use the commands exactly as shown above; they include `-ExecutionPolicy Bypass`, which applies only to that one command.
@@ -804,8 +818,10 @@ install.ps1              installer / updater (run from the repo)
 src/
   hook.ps1               called by Claude Code hooks; writes state files
   indicator.cs           the window: Status (Worker Board) and the Queue view's frame (C#, WinForms)
-  scheduler.cs           the prompt scheduler: tasks, locked store, scheduling rules, claude -p runner, outcomes
+  scheduler.cs           the prompt scheduler: tasks, locked store, scheduling rules, VS Code + claude -p runners, outcomes
   queue.cs               the Queue view and the task editor
+  vscode.cs              the app side of the VS Code bridge: window registry, window choice, requests (files only)
+  vscode-bridge/         the Claude Status Bridge VS Code extension (extension.js) and install-bridge.ps1 (.vsix + install)
   phone.cs               optional phone dashboard server (127.0.0.1 only) + race-safe DONE dismissal
   phone.html/.css/.js    the phone page (List and Creatures views; the creature pixel art is drawn by phone.js)
   usage.cs               Claude Usage: reads the status line data and Claude Code's /usage cache; details window
@@ -826,6 +842,9 @@ tests/
   worker-icons.mjs       draws src\'s favicon and notification images from phone.js's art (--check: are they current?)
   scheduler-tests.ps1    scheduler tests (run by run-tests.ps1) against mock-claude.ps1
   mock-claude.ps1        stand-in for claude.exe speaking Claude Code's stream-json (no real Claude calls)
+  vscode-tests.ps1       VS Code runner tests in real VS Code windows (isolated profile) with mock-interactive-claude.cs
+  vscode-driver/         test-only VS Code extension that types into terminals like a person (never installed for you)
+  vscode-smoke.ps1       opt-in smoke test with real interactive Claude in VS Code (a little haiku usage)
 ```
 
 Runtime files (`state/`, `position.txt`, `debug.log`) are created only in the install folder and are git-ignored.
@@ -837,6 +856,8 @@ powershell -ExecutionPolicy Bypass -File .\tests\run-tests.ps1          # ~1 min
 powershell -ExecutionPolicy Bypass -File .\tests\run-tests.ps1 -Live    # + opens test windows and moves focus (~30 s; don't type meanwhile)
 powershell -ExecutionPolicy Bypass -File .\tests\run-tests.ps1 -E2E     # + one real `claude -p` prompt against a temporary install
 powershell -ExecutionPolicy Bypass -File .\tests\run-tests.ps1 -Browser # + phone page in headless Chrome at Android sizes (needs Node.js 22+)
+powershell -ExecutionPolicy Bypass -File .\tests\run-tests.ps1 -VSCode  # + real VS Code windows running scheduled tasks against a mock claude.exe (~5 min)
+powershell -ExecutionPolicy Bypass -File .\tests\vscode-smoke.ps1       # real Claude in VS Code (small haiku usage)
 ```
 
 The scheduler tests run the real engine against `mock-claude.ps1` (never real Claude): new and resumed conversations, dependency order and blocked predecessors, cycles, usage limits (reported reset, midway continuation without resending the prompt, backoff, global waiting), permission blocks, auth / network / crash / API-key cases, missed schedules, overdue grace, sleep/wake clock jumps, DST, restart reattach, crash → uncertain (never rerun), two instances + repeated ticks launching once, process-tree cancellation with partial output, exact multiline/Unicode prompt bytes on stdin, Windows paths with spaces and Unicode, persistence, view switching while a task runs, and the scheduled worker row. They also cover the hook lifecycle and privacy (run as real child processes with secret-laden inputs), aliases, numbering, both orderings, timers, v1 compatibility, DONE retention and dismissal, layout at 100–200 % DPI with 1/6/90 workers, worker → window identification (terminals, multi-window apps, closed windows, reused process IDs), focus stealing, and install → update → re-install → uninstall against a temporary Claude config folder. The phone dashboard tests cover desktop/phone parity, dismissal in both directions, the delayed-dismiss race and 400 randomized hook-write/dismiss interleavings, malformed and cross-site requests, Host/Origin checks, start/stop/port conflicts, and that phone.js formats timers exactly like the desktop. For the Creatures view they check that a tap reaches the desktop's own click-on-a-worker routine for exactly that worker (and that a desktop click uses the same routine), with window lookup and activation **mocked** so the tests never move your focus. They also check that rapid taps make one request, that taps and **×** never trigger each other, stale and malformed references, the action's request protections, and stable, distinct, mostly orange creature looks (the first always orange). Context bars: per-session readings for two workers of one project, a real 0%, missing / malformed / post-`/compact` (unknown) / lower-after-compaction / changed-capacity / old readings, and that a context update leaves state files, timer starts, order, looks and dismiss tokens untouched and never revives a dismissed worker. Sleeping uses a fixed clock for just before, exactly at and after 3 hours, and checks it never applies to WORKING / NEEDS YOU / ERROR. `-Browser` additionally drives the real page at 320/360/390/412 px widths in both views, with two columns and Compact's three, with and without context bars (equal columns, nothing overlapping or cut off, crisp centred sprites), the Compact / Show context switches (saved per phone, no reconnect or rebuild, List unaffected), a creature falling asleep by itself at the 3-hour mark, staying asleep across background / reload / view switch / reduced motion, and waking on a new prompt, through disconnects, a 502 from `tailscale serve`, resume and recovery, reduced motion, keyboard use and background pausing, saving `phone-*.png` screenshots. These are emulated phones; Tailscale itself and a physical Android device are not part of the automated tests. `-RenderDir <folder>` saves PNG renders of the board for a visual check.

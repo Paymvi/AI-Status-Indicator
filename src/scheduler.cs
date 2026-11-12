@@ -26,7 +26,7 @@ namespace ClaudeStatus
         public static bool Finished(string s) { return s == Completed || s == Failed || s == Canceled; }
         public static string Label(string s)
         {
-            switch (s) { case WaitingUsage: return "Waiting for usage"; case NeedsAttention: return "Needs attention"; default: return s ?? ""; }
+            switch (s) { case WaitingUsage: return "Waiting for usage"; case NeedsAttention: return "Needs attention"; case Queued: return "Ready"; default: return s ?? ""; }
         }
     }
 
@@ -36,6 +36,12 @@ namespace ClaudeStatus
         public string SessionId = "", Mode = "", Prompt = "", Outcome = "", Owner = "", Job = "", Log = "";
         public DateTime StartedUtc, EndedUtc, PidStartedUtc, OwnerStartedUtc;
         public int OwnerPid;
+        // VS Code runs: "" = headless (claude -p; every attempt made before the VS Code runner existed).
+        // Phase: opening (asked VS Code) -> terminal (terminal open, Claude not started yet) -> working / needs_you -> ended.
+        public string Runner = "", Phase = "", Req = "", Window = "", Terminal = "", Attention = "";
+        public int ClaudePid;
+        public DateTime ClaudeStartedUtc, HookBefore;   // HookBefore: the session's last hook event before this run (older ones are never this run's)
+        [ScriptIgnore] public bool InVsCode { get { return Runner == "vscode"; } }
     }
 
     public class QueueTask
@@ -50,6 +56,8 @@ namespace ClaudeStatus
         public List<string> AllowCommands = new List<string>();
         public bool AllowCommit, AllowPush, AllowDelete, RunNow, NeedsContinue;
         public string Model = "", ContinueWhy = "";
+        public string Runner = "vscode";               // vscode (a terminal in the project's VS Code window) | headless (claude -p, no window)
+        public string ManualReq = "";                  // a VS Code terminal you opened on this conversation yourself (the queue leaves it alone)
         public string State = QState.Draft, Reason = "", Outcome = "", ResultText = "", Summary = "", ResetSource = "", Notified = "";
         public List<string> Denials = new List<string>();
         public double Order;
@@ -121,6 +129,7 @@ namespace ClaudeStatus
             if (t.Attempts == null) t.Attempts = new List<RunAttempt>();
             t.Attempts.RemoveAll(a => a == null);
             Fix(t);
+            if (t.Runner != "headless") t.Runner = "vscode";   // tasks saved before the VS Code runner existed run in VS Code from now on
             foreach (var a in t.Attempts) Fix(a);
         }
 
@@ -243,7 +252,12 @@ namespace ClaudeStatus
             try { p = Path.GetFullPath(p); } catch { }
             return p.TrimEnd('\\', '/');
         }
-        public static bool SamePath(string a, string b) { return a != "" && string.Equals(NormPath(a), NormPath(b), StringComparison.OrdinalIgnoreCase); }
+        // Full paths, case-insensitive, Unicode-normalized (a folder typed as "é" and one stored as "e" + accent match).
+        public static bool SamePath(string a, string b)
+        {
+            if (string.IsNullOrEmpty(a) || string.IsNullOrEmpty(b)) return false;
+            return string.Equals(NormPath(a).Normalize(NormalizationForm.FormC), NormPath(b).Normalize(NormalizationForm.FormC), StringComparison.OrdinalIgnoreCase);
+        }
 
         // ----- permissions: what a task may do unattended -----
         public static readonly string[] DefaultCommands = {
@@ -310,7 +324,9 @@ namespace ClaudeStatus
             var extra = new List<string>();
             if (t.AllowCommit) extra.Add("git commit"); if (t.AllowPush) extra.Add("git push"); if (t.AllowDelete) extra.Add("deleting files");
             sb.Append(extra.Count > 0 ? " Also authorized: " + string.Join(", ", extra) + "." : " Commits, pushes and deletions are denied.");
-            sb.Append(" Anything else (network, deploys, other tools, questions) is denied automatically and the task is marked Needs attention.");
+            sb.Append(t.Runner == "headless"
+                ? " Anything else (network, deploys, other tools, questions) is denied automatically and the task is marked Needs attention."
+                : " Anything else (network, deploys, other tools) makes Claude ask you in the task's VS Code terminal; the task waits as Needs you until you answer there.");
             return sb.ToString();
         }
 
@@ -320,7 +336,8 @@ namespace ClaudeStatus
             var extra = new List<string>();
             if (t.AllowCommit) extra.Add("commit"); if (t.AllowPush) extra.Add("push"); if (t.AllowDelete) extra.Add("delete");
             return ModeLabel(t.PermissionMode) + (t.PermissionMode != "plan" ? " (" + n + " allowed command patterns)" : "") +
-                "; " + (extra.Count > 0 ? "also authorized: " + string.Join(", ", extra) : "no commit, push or delete") + "; everything else is denied.";
+                "; " + (extra.Count > 0 ? "also authorized: " + string.Join(", ", extra) : "no commit, push or delete") +
+                (t.Runner == "headless" ? "; everything else is denied." : "; anything else is asked in VS Code.");
         }
 
         public static string ContinuationPrompt(string why)
@@ -434,7 +451,7 @@ namespace ClaudeStatus
         }
 
         // ": npm test" / ": src\app.ts" / ": Which database?" - the one field that says what a tool call was.
-        static string ToolBrief(Dictionary<string, object> input)
+        public static string ToolBrief(Dictionary<string, object> input)
         {
             if (input == null) return "";
             foreach (var k in new[] { "command", "file_path", "path", "pattern", "url", "query", "description" })
@@ -657,7 +674,82 @@ namespace ClaudeStatus
             catch { }
             return list;
         }
+
+        // What happened in a conversation since `sinceUtc` (best effort: the transcript format isn't documented).
+        // Text: a readable log; LastReply: Claude's last message; Pending: the newest tool call still waiting for its
+        // result, which is what Claude is asking about while the hooks say it needs you.
+        public static Activity ReadActivity(string file, DateTime sinceUtc, string skipPrompt)
+        {
+            var act = new Activity();
+            if (file == null || !File.Exists(file)) return act;
+            var rep = new RunReport();
+            var open = new List<KeyValuePair<string, string>>();
+            bool skipped = false;
+            try
+            {
+                using (var fs = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+                {
+                    const int Max = 4 * 1024 * 1024;
+                    var ser = QueueStore.Ser();
+                    foreach (var line in Lines(fs, Math.Max(0, fs.Length - Max), Max))
+                    {
+                        if (!line.StartsWith("{")) continue;
+                        Dictionary<string, object> o;
+                        try { o = ser.DeserializeObject(line) as Dictionary<string, object>; } catch { continue; }
+                        if (o == null) continue;
+                        object v;
+                        DateTime ts;
+                        if (o.TryGetValue("timestamp", out v) && v != null && DateTime.TryParse(v.ToString(), CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out ts) && ts < sinceUtc) continue;
+                        string type = o.TryGetValue("type", out v) && v != null ? v.ToString() : "";
+                        var msg = o.TryGetValue("message", out v) ? v as Dictionary<string, object> : null;
+                        object c = null;
+                        if (msg != null) msg.TryGetValue("content", out c);
+                        if (type == "assistant")
+                        {
+                            RunParser.Feed(rep, line);
+                            var arr = c as object[];
+                            if (arr != null)
+                                foreach (var it in arr)
+                                {
+                                    var d = it as Dictionary<string, object>;
+                                    if (d == null) continue;
+                                    string ct = d.TryGetValue("type", out v) && v != null ? v.ToString() : "";
+                                    if (ct == "text" && d.TryGetValue("text", out v) && v != null && v.ToString().Trim() != "") act.LastReply = v.ToString().Trim();
+                                    else if (ct == "tool_use" && d.TryGetValue("id", out v) && v != null)
+                                    {
+                                        object nm, inp; d.TryGetValue("name", out nm); d.TryGetValue("input", out inp);
+                                        open.Add(new KeyValuePair<string, string>(v.ToString(), (nm ?? "").ToString() + RunParser.ToolBrief(inp as Dictionary<string, object>)));
+                                    }
+                                }
+                        }
+                        else if (type == "user")
+                        {
+                            string text = c as string;
+                            var arr = c as object[];
+                            if (arr != null)
+                                foreach (var it in arr)
+                                {
+                                    var d = it as Dictionary<string, object>;
+                                    if (d == null) continue;
+                                    string ct = d.TryGetValue("type", out v) && v != null ? v.ToString() : "";
+                                    if (ct == "tool_result" && d.TryGetValue("tool_use_id", out v) && v != null) { string tid = v.ToString(); open.RemoveAll(k => k.Key == tid); }
+                                    else if (ct == "text" && d.TryGetValue("text", out v) && v != null && text == null) text = v.ToString();
+                                }
+                            if (text == null || text.TrimStart().StartsWith("<")) continue;
+                            if (!skipped && skipPrompt != null && text.Trim() == skipPrompt.Trim()) { skipped = true; continue; }
+                            rep.Readable.Append("› You: ").Append(text.Trim()).Append("\r\n\r\n");
+                        }
+                    }
+                }
+            }
+            catch { }
+            act.Text = rep.Readable.ToString();
+            if (open.Count > 0) act.Pending = open[open.Count - 1].Value;
+            return act;
+        }
     }
+
+    public class Activity { public string Text = "", LastReply = "", Pending = ""; }
 
     public class ActiveSession { public string SessionId = "", Cwd = "", Status = "", Kind = ""; public int Pid; }
 
@@ -678,6 +770,9 @@ namespace ClaudeStatus
         public event Action Changed;
         public event Action<QueueTask> Notify;
         public string BusyNote = "";
+        public readonly VsBridge Bridge;
+        public TimeSpan OpenTimeout = TimeSpan.FromSeconds(90);     // VS Code must claim a launch within this
+        public TimeSpan StartNotice = TimeSpan.FromMinutes(2);      // then "Claude hasn't started yet: check the terminal"
 
         readonly string instance = Guid.NewGuid().ToString("N");
         readonly int myPid;
@@ -697,7 +792,8 @@ namespace ClaudeStatus
             public long Offset;
             public byte[] Pending = new byte[0];
             public RunReport Report = new RunReport();
-            public bool Canceled, Guard;
+            public bool Canceled, Guard, Vs;
+            public DateTime SeenUtc;   // VS Code: last time its terminal was seen open
         }
 
         public QueueEngine(string root)
@@ -707,6 +803,7 @@ namespace ClaudeStatus
             RunsDir = Path.Combine(dir, "runs");
             SessionsStateDir = Path.Combine(root, "state\\sessions");
             Directory.CreateDirectory(RunsDir);
+            Bridge = new VsBridge(root);
             Data = Store.Read();
             var me = System.Diagnostics.Process.GetCurrentProcess();
             myPid = me.Id;
@@ -794,7 +891,8 @@ namespace ClaudeStatus
             string err = null;
             Mutate(d =>
             {
-                err = Validate(t, d.Tasks);
+                // A draft may be incomplete (it never runs); only a loop between tasks is refused. Enqueue checks the rest.
+                err = t.State == QState.Draft ? (t.Schedule == "after" && t.After != "" && Sched.CreatesCycle(d.Tasks, t.Id, t.After) ? "That would make tasks wait for each other in a loop." : null) : Validate(t, d.Tasks);
                 if (err != null) return false;
                 var cur = d.Find(t.Id);
                 if (cur != null && cur.Revision != expectedRevision) { err = "The task changed while you were editing it (" + QState.Label(cur.State) + "). Close the editor and try again."; return false; }
@@ -885,7 +983,22 @@ namespace ClaudeStatus
         // Runs as soon as nothing else is running: skips its time / usage wait, but not its predecessor.
         public void RunNow(string id) { Edit(id, t => { if (t.State == QState.Running || QState.Finished(t.State)) return false; t.RunNow = true; if (t.State == QState.Draft || t.State == QState.NeedsAttention) t.State = QState.Scheduled; t.NextRetryUtc = DateTime.MinValue; t.Notified = ""; return true; }); Tick(); }
 
-        public void Enqueue(string id) { Edit(id, t => { if (t.State != QState.Draft) return false; t.State = QState.Scheduled; t.Reason = ""; return true; }); Tick(); }
+        // A draft joins the queue once it's complete. Returns what's missing, or null.
+        public string Enqueue(string id)
+        {
+            string err = null;
+            Mutate(d =>
+            {
+                var t = d.Find(id);
+                if (t == null || t.State != QState.Draft) return false;
+                err = Validate(t, d.Tasks);
+                if (err != null) return false;
+                t.State = QState.Scheduled; t.Reason = ""; t.Revision++;
+                return true;
+            });
+            if (err == null) Tick();
+            return err;
+        }
         public void ToDraft(string id) { Edit(id, t => { if (!QState.Pending(t.State)) return false; t.State = QState.Draft; t.RunNow = false; t.Reason = "Draft: won't run until you add it to the queue."; return true; }); }
         public void Skip(string id) { Edit(id, t => { if (!QState.Pending(t.State) && t.State != QState.Draft) return false; Finish(t, QState.Canceled, "skipped", "Skipped. It won't run."); return true; }); Tick(); }
 
@@ -905,7 +1018,23 @@ namespace ClaudeStatus
             Tick();
         }
 
-        public void MarkCompleted(string id) { Edit(id, t => { if (t.State == QState.Running) return false; Finish(t, QState.Completed, "marked_completed", "You marked this completed."); t.Notified = QState.Completed; return true; }); Tick(); }
+        // Your own resolution. Also for a VS Code run (Claude keeps running there; the queue just stops waiting for it).
+        public void MarkCompleted(string id)
+        {
+            if (run != null && run.TaskId == id && run.Vs) run = null;
+            Edit(id, t =>
+            {
+                if (t.State == QState.Running && (t.Last == null || !t.Last.InVsCode)) return false;
+                if (t.State == QState.Running) { t.Last.EndedUtc = Now(); t.Last.Outcome = "marked_completed"; t.Last.Phase = "ended"; t.Last.Attention = ""; }
+                Finish(t, QState.Completed, "marked_completed", "You marked this completed.");
+                t.Notified = QState.Completed;
+                return true;
+            });
+            Tick();
+        }
+
+        // Your explicit choice of where a task runs next (VS Code, or headless in the background).
+        public void SetRunner(string id, string runner) { Edit(id, t => { if (t.State == QState.Running || (runner != "vscode" && runner != "headless")) return false; t.Runner = runner; return true; }); }
 
         public void SetRetryTime(string id, DateTime utc) { Edit(id, t => { if (!QState.Pending(t.State)) return false; t.NextRetryUtc = utc; t.ResetSource = "you"; t.Reason = "Waiting for usage; next try " + Sched.LocalText(utc) + " (time you set)."; return true; }); }
 
@@ -932,7 +1061,11 @@ namespace ClaudeStatus
 
         void Edit(string id, Func<QueueTask, bool> f) { Mutate(d => { var t = d.Find(id); return t != null && f(t); }); }
 
-        void DeleteRuns(string id) { try { string p = Path.Combine(RunsDir, id); if (Directory.Exists(p)) Directory.Delete(p, true); } catch { } }
+        void DeleteRuns(string id)
+        {
+            try { string p = Path.Combine(RunsDir, id); if (Directory.Exists(p)) Directory.Delete(p, true); } catch { }
+            try { foreach (var f in Directory.GetFiles(Path.Combine(Bridge.Dir, "status"), id + "-*.json")) File.Delete(f); } catch { }
+        }
 
         static void Finish(QueueTask t, string state, string outcome, string reason)
         {
@@ -943,6 +1076,14 @@ namespace ClaudeStatus
         // Stops the running task's process tree (or marks a waiting task canceled).
         public void Cancel(string id)
         {
+            if (run != null && run.TaskId == id && run.Vs)
+            {
+                var vt = Data.Find(id);
+                if (vt != null && vt.Last != null) StopVs(vt.Last);
+                run = null;
+                Edit(id, x => { if (x.State != QState.Running) return false; x.Last.EndedUtc = Now(); x.Last.Outcome = "canceled"; x.Last.Phase = "ended"; Finish(x, QState.Canceled, "canceled", "Canceled: Claude in the VS Code terminal was stopped. The conversation is kept; file edits Claude already made are not undone."); return true; });
+                Tick(); return;
+            }
             if (run != null && run.TaskId == id)
             {
                 run.Canceled = true; Kill(run);
@@ -954,7 +1095,8 @@ namespace ClaudeStatus
             {
                 // Running under another app instance or found after a restart: stop it by its recorded identity.
                 var a = t.Last;
-                if (a != null) KillTree(a.Pid, a.PidStartedUtc, a.Job);
+                if (a != null && a.InVsCode) StopVs(a);
+                else if (a != null) KillTree(a.Pid, a.PidStartedUtc, a.Job);
                 Edit(id, x => { if (x.State != QState.Running) return false; Finish(x, QState.Canceled, "canceled", "Canceled. Partial output is kept below. File edits Claude already made are not undone."); return true; });
                 return;
             }
@@ -972,6 +1114,7 @@ namespace ClaudeStatus
 
             if (run != null) Poll();
             if (run == null) Adopt();
+            if (run != null && run.Vs) Poll();   // just picked up again: look at it now
             if ((now - lastPrune).TotalHours >= 1) { lastPrune = now; Prune(); }
             if (run != null) { SetAwake(true); return; }
             SetAwake(false);
@@ -990,6 +1133,8 @@ namespace ClaudeStatus
                 foreach (var t in ready)
                 {
                     string busy = t.RunNow ? null : ProjectBusy(t, d);
+                    if (busy == null) busy = Held(t, d, now);
+                    if (busy != null && busy.StartsWith("!")) { Finish(t, QState.NeedsAttention, "conversation", busy.Substring(1)); dirty = true; continue; }
                     if (busy != null) { if (t.Reason != busy) { t.Reason = busy; dirty = true; } continue; }
                     string why;
                     string mode, sid, prompt;
@@ -1000,12 +1145,13 @@ namespace ClaudeStatus
                         continue;
                     }
                     // Claim it in the same locked write, so no other tick, timer or instance can launch it too.
-                    var a = new RunAttempt { N = t.Attempts.Count + 1, SessionId = sid, Mode = mode, Prompt = prompt, StartedUtc = now, Owner = instance, OwnerPid = myPid, OwnerStartedUtc = myStart };
+                    var a = new RunAttempt { N = t.Attempts.Count + 1, SessionId = sid, Mode = mode, Prompt = prompt, StartedUtc = now, Owner = instance, OwnerPid = myPid, OwnerStartedUtc = myStart, Runner = t.Runner == "headless" ? "" : "vscode" };
                     a.Log = Path.Combine(t.Id, a.N + ".jsonl");
                     a.Job = "Local\\ClaudeStatusQueue-" + t.Id + "-" + a.N;
                     t.Attempts.Add(a);
                     t.SessionId = sid;
-                    t.State = QState.Running; t.Reason = "Running since " + Sched.LocalText(now) + "."; t.RunNow = false;
+                    t.State = QState.Running; t.RunNow = false;
+                    t.Reason = a.InVsCode ? "Opening VS Code for this project…" : "Running in the background since " + Sched.LocalText(now) + ".";
                     t.Revision++;
                     pick = t;
                     return true;
@@ -1059,7 +1205,7 @@ namespace ClaudeStatus
                 }
                 if (state == QState.Queued && reason == "")
                     reason = d.Paused ? "Queue paused." : t.RunNow ? "Starting now." : t.NeedsContinue ? "Ready to continue its conversation." : "Ready; runs when nothing else is running.";
-                if (state == QState.Queued && t.State == QState.Queued && t.Reason.StartsWith("Waiting: Claude is busy")) reason = t.Reason;
+                if (state == QState.Queued && t.State == QState.Queued && t.Reason.StartsWith("Waiting:")) reason = t.Reason;
                 if (t.State != state || t.Reason != reason) { t.State = state; t.Reason = reason; dirty = true; }
             }
             return dirty;
@@ -1082,6 +1228,11 @@ namespace ClaudeStatus
             if (t.Conversation == "new" && !Sched.IsGuid(sid)) sid = Guid.NewGuid().ToString();
             if (!Sched.IsGuid(sid)) { why = "\"" + sid + "\" isn't a Claude Code session ID."; return false; }
             string file = Sessions.Find(ProjectsDir, t.Project, sid);
+            // Claude already ran this conversation in VS Code but saved no transcript: it can't be resumed, and sending the
+            // original prompt again would repeat the work. (Run again clears the session first, so it never lands here.)
+            string planned = sid;
+            if (file == null && t.Attempts.Exists(x => x.InVsCode && x.ClaudePid > 0 && string.Equals(x.SessionId, planned, StringComparison.OrdinalIgnoreCase)))
+            { why = "Claude Code didn't save conversation " + sid.Substring(0, 8) + " on this computer, so it can't be continued, and the original prompt isn't sent again by itself. Read the result in its VS Code terminal if it's still open, then Mark completed, or use Run again to start over."; return false; }
             if (t.Conversation != "new" || file != null)
             {
                 if (file == null) { why = "Conversation " + sid + " wasn't found on this computer, so it can't be resumed."; return false; }
@@ -1249,7 +1400,22 @@ namespace ClaudeStatus
             return JoinArgs(all);
         }
 
-        void Launch(QueueTask t)
+        // The task's permission scope as a Claude Code --settings file (allow + deny rules; deny always wins).
+        string WriteSettings(QueueTask t, string name)
+        {
+            string dir = Path.Combine(RunsDir, t.Id);
+            Directory.CreateDirectory(dir);
+            string settingsFile = Path.Combine(dir, name + ".settings.json");
+            var allow = new List<string>(); var deny = new List<string>();
+            Sched.Rules(t, allow, deny);
+            var perms = new Dictionary<string, object> { { "allow", allow }, { "deny", deny } };
+            File.WriteAllText(settingsFile, Json.Pretty(QueueStore.Ser().Serialize(new Dictionary<string, object> { { "permissions", perms } })), new UTF8Encoding(false));
+            return settingsFile;
+        }
+
+        void Launch(QueueTask t) { if (t.Last.InVsCode) LaunchVs(t); else LaunchHeadless(t); }
+
+        void LaunchHeadless(QueueTask t)
         {
             var a = t.Last;
             string dir = Path.Combine(RunsDir, t.Id);
@@ -1257,13 +1423,9 @@ namespace ClaudeStatus
             var r = new Run { TaskId = t.Id, N = a.N, Log = LogPath(t.Id, a.N), Err = ErrPath(t.Id, a.N) };
             try
             {
-                Directory.CreateDirectory(dir);
-                string promptFile = Path.Combine(dir, a.N + ".prompt.txt"), settingsFile = Path.Combine(dir, a.N + ".settings.json");
+                string settingsFile = WriteSettings(t, a.N.ToString());
+                string promptFile = Path.Combine(dir, a.N + ".prompt.txt");
                 File.WriteAllText(promptFile, a.Prompt, new UTF8Encoding(false));
-                var allow = new List<string>(); var deny = new List<string>();
-                Sched.Rules(t, allow, deny);
-                var perms = new Dictionary<string, object> { { "allow", allow }, { "deny", deny } };
-                File.WriteAllText(settingsFile, Json.Pretty(QueueStore.Ser().Serialize(new Dictionary<string, object> { { "permissions", perms } })), new UTF8Encoding(false));
 
                 var claude = ResolveClaude(ClaudeCommand);
                 if (claude == null) throw new FileNotFoundException("Claude Code (claude.exe) wasn't found on PATH or in %USERPROFILE%\\.local\\bin.");
@@ -1288,6 +1450,340 @@ namespace ClaudeStatus
             });
             if (err == null) { run = r; SetAwake(true); }
         }
+
+        // ---------- VS Code runner: interactive Claude in a named terminal of the project's VS Code window ----------
+        // Progress comes from Claude Code's own hooks for the task's session (state\sessions\<id>.json, written by
+        // hook.ps1): no hook yet = Claude hasn't started the prompt; WORKING / NEEDS_YOU; DONE (Stop) = it finished its
+        // turn; ERROR (StopFailure) = it stopped with that error. The terminal opening or closing never counts as success.
+        public const int MaxArgChars = 30000;   // Windows command lines are limited to 32,767 characters
+
+        // Arguments after the executable. The prompt is the last one, after "--" (so a prompt starting with "-" isn't
+        // read as an option), quoted with the Windows argv rules: it reaches Claude as one exact argument, no shell.
+        public static string VsArgs(string[] claude, QueueTask t, string settingsFile, string mode, string sid, string prompt, out string error)
+        {
+            error = null;
+            var args = new List<string>();
+            for (int i = 1; i < claude.Length; i++) args.Add(claude[i]);
+            args.Add("--permission-mode"); args.Add(t.PermissionMode);
+            args.Add("--settings"); args.Add(settingsFile);
+            args.Add(mode == "resume" ? "--resume" : "--session-id"); args.Add(sid);
+            if (t.Model != "") { args.Add("--model"); args.Add(t.Model); }
+            if (mode != "resume" && t.Title.Trim() != "") { args.Add("--name"); args.Add(Sched.FirstLine(t.Title, 80)); }
+            if (!string.IsNullOrEmpty(prompt)) { args.Add("--"); args.Add(prompt); }
+            string line = JoinArgs(args);
+            if (line.Length > MaxArgChars)
+            {
+                error = "The prompt is too long to start in a VS Code terminal (" + (prompt ?? "").Length + " characters; Windows allows about " + (MaxArgChars - 2000) + " here). Shorten it, or run this task in the background.";
+                return null;
+            }
+            return line;
+        }
+
+        public static string TerminalName(QueueTask t) { return "⏱ " + Sched.FirstLine(t.Title, 50); }
+
+        void LaunchVs(QueueTask t)
+        {
+            var a = t.Last;
+            string err = null, req = t.Id + "-" + a.N, target = "", name = TerminalName(t);
+            var before = HookOf(a.SessionId, DateTime.MinValue);
+            DateTime hookBefore = before != null ? before.Updated : DateTime.MinValue;
+            try { target = StartVs(t, req, a.Mode, a.SessionId, a.Prompt, name); }
+            catch (Exception e) { err = e.Message; }
+            Mutate(d =>
+            {
+                var x = d.Find(t.Id);
+                if (x == null) return false;
+                var xa = x.Last;
+                if (err != null) { Finish(x, QState.NeedsAttention, "vscode", "Couldn't start it in VS Code: " + err); xa.EndedUtc = Now(); xa.Outcome = "vscode"; xa.Phase = "ended"; return true; }
+                xa.Req = req; xa.Window = target; xa.Terminal = name; xa.Phase = "opening"; xa.HookBefore = hookBefore;
+                x.Reason = target != "" ? "Opening a terminal in the project's VS Code window…" : "Opening a VS Code window for this project…";
+                return true;
+            });
+            if (err == null) { run = new Run { TaskId = t.Id, N = a.N, Vs = true, SeenUtc = Now() }; SetAwake(true); }
+        }
+
+        // Asks VS Code for a terminal running Claude in the project: in the window that has the project open, or in a
+        // dedicated new window. Returns the window it was addressed to ("" = the window VS Code is opening now).
+        string StartVs(QueueTask t, string req, string mode, string sid, string prompt, string name)
+        {
+            var claude = ResolveClaude(ClaudeCommand);
+            if (claude == null) throw new FileNotFoundException("Claude Code (claude.exe) wasn't found on PATH or in %USERPROFILE%\\.local\\bin.");
+            if (!claude[0].EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("VS Code runs need claude.exe (found " + claude[0] + "). Run this task in the background instead.");
+            if (!Directory.Exists(t.Project)) throw new DirectoryNotFoundException("The project folder doesn't exist: " + t.Project);
+            if (!Bridge.Installed()) throw new InvalidOperationException("the Claude Status Bridge extension isn't installed in VS Code. Click \"Install VS Code bridge\" in the Queue (or run install.ps1), then Retry. Or choose \"Run in background instead\".");
+            string error, line = VsArgs(claude, t, WriteSettings(t, req), mode, sid, prompt, out error);
+            if (line == null) throw new InvalidOperationException(error);
+            var env = new Dictionary<string, object> { { "CLAUDECODE", null }, { "CLAUDE_CODE_ENTRYPOINT", null }, { "CLAUDE_STATUS_TASK", t.Id } };
+            if (!AllowApiBilling) { env["ANTHROPIC_API_KEY"] = null; env["ANTHROPIC_AUTH_TOKEN"] = null; }
+            var w = VsBridge.Pick(Bridge.Windows(), t.Project);
+            string target = w != null ? w.Id : "";
+            Bridge.Send(new Dictionary<string, object> { { "req", req }, { "type", "launch" }, { "target", target }, { "folder", t.Project }, { "cwd", t.Project }, { "exe", claude[0] }, { "args", line }, { "env", env }, { "name", name } });
+            if (w == null)
+            {
+                string e = Bridge.Open(t.Project);
+                if (e != null) { Bridge.Retract(req); throw new InvalidOperationException(e); }
+            }
+            return target;
+        }
+
+        // Claude Code's hook state for a session, if written at or after sinceUtc.
+        public SessionInfo HookOf(string sid, DateTime sinceUtc)
+        {
+            if (!Sched.IsGuid(sid)) return null;
+            string f = Path.Combine(SessionsStateDir, sid + ".json");
+            try
+            {
+                if (!File.Exists(f)) return null;
+                var d = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(File.ReadAllText(f));
+                var si = Board.Parse(sid, d, DateTime.MinValue, File.GetLastWriteTimeUtc(f));
+                return sinceUtc == DateTime.MinValue || si.Updated >= sinceUtc.AddSeconds(-2) ? si : null;   // (MinValue - 2 s would throw)
+            }
+            catch { return null; }
+        }
+
+        public Activity ActivityOf(QueueTask t, RunAttempt a)
+        {
+            return Sessions.ReadActivity(Sessions.Find(ProjectsDir, t.Project, a.SessionId), a.StartedUtc.AddSeconds(-2), a.Prompt);
+        }
+
+        void PollVs(Run r)
+        {
+            var t = Data.Find(r.TaskId);
+            RunAttempt a = null;
+            if (t != null) foreach (var x in t.Attempts) if (x.N == r.N) a = x;
+            if (t == null || a == null || t.State != QState.Running) { run = null; return; }
+            DateTime now = Now();
+            var st = Bridge.Status(a.Req);
+            if (st == null)
+            {
+                // Not claimed by any window yet. Taking the request back is atomic, so it can't also start late.
+                if (now - a.StartedUtc > OpenTimeout && Bridge.Retract(a.Req))
+                    EndVs(r, Fail("vscode", "VS Code didn't take the task within " + (int)OpenTimeout.TotalSeconds + " seconds, so nothing was started. Check that VS Code opened " + t.Project +
+                        " and that the Claude Status Bridge extension is enabled there, then Retry (or choose Run in background instead)."), null);
+                else Raise();
+                return;
+            }
+            if (st.State == "error") { EndVs(r, Fail("vscode", "VS Code couldn't open the task's terminal: " + st.Error), null); return; }
+
+            var h = HookOf(a.SessionId, a.StartedUtc);
+            // Still the previous run's last event (tasks.json keeps times to the millisecond; hook files are finer).
+            if (h != null && a.HookBefore != DateTime.MinValue && h.Updated <= a.HookBefore.AddMilliseconds(1)) h = null;
+            if (h != null && h.ClaudePid > 0 && a.ClaudePid != h.ClaudePid)
+            {
+                Edit(t.Id, x => { var xa = x.Last; if (xa == null || xa.N != a.N) return false; xa.ClaudePid = h.ClaudePid; xa.ClaudeStartedUtc = h.ClaudeStarted; return true; });
+                a = Data.Find(t.Id).Last;
+            }
+            if (h != null && h.State == Board.Done)
+            {
+                var act = ActivityOf(t, a);
+                var rep = new RunReport { HasResult = act.LastReply != "", ResultText = act.LastReply, SessionId = a.SessionId };
+                EndVs(r, Fail("completed", "Claude finished its turn in VS Code; its last message is below. That's Claude's own report: the work isn't independently verified. The conversation stays open in the terminal for follow-ups."), rep);
+                return;
+            }
+            if (h != null && h.State == Board.Error) { EndVs(r, VsError(h.Detail, now), null); return; }
+
+            if (Bridge.TerminalOpen(st.Window, a.Req)) r.SeenUtc = now;
+            bool started = h != null || a.Phase == "working" || a.Phase == "needs_you";
+            int cpid = h != null ? h.ClaudePid : a.ClaudePid;
+            DateTime cst = h != null ? h.ClaudeStarted : a.ClaudeStartedUtc;
+            bool claudeGone = cpid > 0 && WorkerWindows.ProcessAlive(cpid, cst) == 0;
+            if (st.State == "closed" || claudeGone || now - r.SeenUtc > TimeSpan.FromSeconds(60))
+            {
+                EndVs(r, started
+                    ? Fail("interrupted", "Claude stopped before finishing its turn: its VS Code terminal was closed or Claude exited. The conversation is kept: Continue resumes it (without resending the original prompt), or Mark completed if you finished it yourself.")
+                    : Fail("interrupted", "The VS Code terminal closed before Claude started the prompt, so nothing ran. Retry starts it again."), null);
+                return;
+            }
+
+            string phase = h == null ? (started ? a.Phase : "terminal") : h.State == Board.NeedsYou ? "needs_you" : "working", attention = "", reason;
+            string where = "terminal \"" + a.Terminal + "\"";
+            if (phase == "needs_you")
+            {
+                string ask = ActivityOf(t, a).Pending;
+                attention = ask != "" ? "Claude is asking: " + ask : "Claude is waiting for your input or approval" + (h != null && h.Detail != "" ? " (" + h.Detail + ")" : "") + ".";
+                reason = "Needs you: answer Claude in VS Code (" + where + ").";
+            }
+            else if (phase == "working") reason = "Claude is working in VS Code (" + where + ").";
+            else if (now - a.StartedUtc > StartNotice)
+            {
+                attention = "Claude hasn't started the prompt yet. Open the terminal in VS Code: Claude may be asking you to trust the folder, or to sign in.";
+                reason = "Waiting for Claude to start in VS Code (" + where + ").";
+            }
+            else reason = "Terminal open in VS Code; Claude is starting…";
+            if (a.Phase != phase || a.Attention != attention || t.Reason != reason || a.Window != st.Window || a.ClaudePid != cpid)
+                Edit(t.Id, x =>
+                {
+                    var xa = x.Last;
+                    if (x.State != QState.Running || xa == null || xa.N != a.N) return false;
+                    xa.Phase = phase; xa.Attention = attention; xa.Window = st.Window; xa.ClaudePid = cpid; xa.ClaudeStartedUtc = cst; x.Reason = reason;
+                    return true;
+                });
+            else Raise();
+        }
+
+        static Verdict Fail(string kind, string message) { return new Verdict { Kind = kind, Message = message }; }
+
+        // A StopFailure error type (hook detail: rate_limit, authentication_failed, billing_error, server_error, ...).
+        Verdict VsError(string detail, DateTime now)
+        {
+            string d = (detail ?? "").ToLowerInvariant();
+            if (d.Contains("rate_limit"))
+            {
+                var v = Fail("usage_limit", "");
+                DateTime u = UsageBlockedUntil != null ? UsageBlockedUntil() : DateTime.MinValue;
+                if (u > now) { v.ResetUtc = u; v.ResetReported = true; }
+                v.Message = "Usage limit reached in VS Code" + (v.ResetReported ? "; Claude Code reported it resets " + Sched.LocalText(u) : "; no reset time is known") + ".";
+                return v;
+            }
+            if (d.Contains("auth")) return Fail("auth", "Claude Code isn't signed in (or its sign-in expired). Use /login in the task's VS Code terminal, then Continue.");
+            if (d.Contains("billing")) return Fail("billing", "Billing problem reported by Claude Code (" + detail + "). Details are in the task's VS Code terminal.");
+            if (d.Contains("server") || d.Contains("overload") || d.Contains("network") || d.Contains("connection") || d.Contains("timeout"))
+                return Fail("network", "Network or service problem (" + detail + ").");
+            return Fail("error", "Claude stopped with an error (" + (detail != "" ? detail : "unknown") + ") in VS Code. Read it in the terminal, then Continue, or Mark completed if you finished it there.");
+        }
+
+        void EndVs(Run r, Verdict v, RunReport rep)
+        {
+            run = null;
+            Apply(r.TaskId, r.N, v, int.MinValue, rep ?? new RunReport());
+        }
+
+        // Stops Claude for a VS Code run: an unclaimed request is taken back; otherwise Claude's process tree is ended
+        // (the terminal stays, so its output can still be read) or, if its process isn't known yet, the terminal closes.
+        void StopVs(RunAttempt a)
+        {
+            if (a.Req == "" || Bridge.Retract(a.Req)) return;
+            var h = HookOf(a.SessionId, a.StartedUtc);
+            int pid = h != null ? h.ClaudePid : a.ClaudePid;
+            DateTime started = h != null ? h.ClaudeStarted : a.ClaudeStartedUtc;
+            if (pid > 0 && WorkerWindows.ProcessAlive(pid, started) == 1) { KillTree(pid, started, ""); return; }
+            var st = Bridge.Status(a.Req);
+            if (st != null && st.Window != "") Bridge.Send(new Dictionary<string, object> { { "req", "close-" + Guid.NewGuid().ToString("N").Substring(0, 12) }, { "type", "close" }, { "target", st.Window }, { "of", a.Req } });
+        }
+
+        // A manual VS Code terminal (Open in VS Code on a task that isn't running) that is still open.
+        public bool ManualOpen(QueueTask t)
+        {
+            if (t.ManualReq == "") return false;
+            if (Bridge.Pending(t.ManualReq)) return true;
+            var st = Bridge.Status(t.ManualReq);
+            return st != null && st.State == "open" && Bridge.TerminalOpen(st.Window, t.ManualReq);
+        }
+
+        static string ResumeSid(QueueTask t, QueueData d)
+        {
+            if (t.Conversation == "resume") return t.ResumeSession;
+            if (t.Conversation == "predecessor") { var p = d.Find(t.After); return p != null ? p.SessionId : ""; }
+            return t.SessionId;
+        }
+
+        readonly Dictionary<string, DateTime> releasing = new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
+
+        // Before a run continues a conversation, nothing else may hold it (two Claude processes on one conversation
+        // mix up its messages). A finished run's own VS Code terminal that nobody used since is closed first, and
+        // Claude in it must have exited. A conversation you used yourself in VS Code is left alone: the task waits.
+        // null = free; "Waiting: ..." = not yet; "!..." = needs you.
+        string Held(QueueTask t, QueueData d, DateTime now)
+        {
+            if (ManualOpen(t)) return "Waiting: you opened this task's conversation in VS Code yourself. The queue continues it after you close that terminal.";
+            string sid = ResumeSid(t, d);
+            if (!Sched.IsGuid(sid)) return null;
+            foreach (var x in d.Tasks)
+            {
+                if (x != t && string.Equals(x.SessionId, sid, StringComparison.OrdinalIgnoreCase) && ManualOpen(x)) return "Waiting: you have this conversation open in VS Code (from \"" + x.Title + "\"). The queue continues it after you close that terminal.";
+                foreach (var a in x.Attempts)
+                {
+                    if (!a.InVsCode || a.Req == "" || !string.Equals(a.SessionId, sid, StringComparison.OrdinalIgnoreCase) || a.EndedUtc == DateTime.MinValue) continue;
+                    var st = Bridge.Status(a.Req);
+                    if (st == null || st.State != "open" || !Bridge.TerminalOpen(st.Window, a.Req)) continue;
+                    var h = HookOf(sid, DateTime.MinValue);
+                    if (h != null && h.Updated > a.EndedUtc.AddSeconds(30))
+                        return "Waiting: this conversation is still open in VS Code (terminal \"" + a.Terminal + "\") and was used after its run ended, so the queue won't take it over. Close that terminal when you're done.";
+                    DateTime asked;
+                    if (!releasing.TryGetValue(sid, out asked)) { releasing[sid] = now; Bridge.Send(new Dictionary<string, object> { { "req", "close-" + Guid.NewGuid().ToString("N").Substring(0, 12) }, { "type", "close" }, { "target", st.Window }, { "of", a.Req } }); }
+                    else if (now - asked > TimeSpan.FromSeconds(45)) { releasing.Remove(sid); return "!The VS Code terminal \"" + a.Terminal + "\" still holds this conversation and didn't close. Close it yourself, then Retry."; }
+                    return "Waiting: closing the finished VS Code terminal of this conversation before continuing it…";
+                }
+            }
+            if (releasing.ContainsKey(sid))
+            {
+                // Its terminal is gone; Claude in it must have exited before the conversation is used again.
+                var h = HookOf(sid, DateTime.MinValue);
+                if (h != null && h.ClaudePid > 0 && WorkerWindows.ProcessAlive(h.ClaudePid, h.ClaudeStarted) == 1)
+                {
+                    if (now - releasing[sid] > TimeSpan.FromSeconds(45)) { releasing.Remove(sid); return "!Claude (process " + h.ClaudePid + ") still holds this conversation after its terminal closed. Close it, then Retry."; }
+                    return "Waiting: closing the finished VS Code terminal of this conversation before continuing it…";
+                }
+                releasing.Remove(sid);
+                activeCache = null;   // ask `claude agents` afresh
+            }
+            return null;
+        }
+
+        // The prominent "Open in VS Code" action. Reveals the task's own terminal (never starts a second Claude for a
+        // conversation that's already open); otherwise resumes the task's conversation in a new terminal without any
+        // prompt. Returns a note for you, or null when it simply worked.
+        public string OpenInVsCode(string id)
+        {
+            var t = Data.Find(id);
+            if (t == null) return "That task no longer exists.";
+            var a = t.Last;
+            if (t.State == QState.Running && a != null && !a.InVsCode)
+                return "This task is running in the background (claude -p), not in VS Code. One conversation must never have two Claude processes, so it can't move while it runs: let it finish, or stop it with Cancel run. " +
+                    "Afterwards, Open in VS Code resumes the same conversation (" + Short(t.SessionId) + ") with its progress, without resending the prompt.";
+            string note;
+            for (int i = t.Attempts.Count - 1; i >= 0; i--)
+            {
+                var x = t.Attempts[i];
+                // A terminal whose Claude has exited isn't worth revealing: resume the conversation instead.
+                bool claudeLeft = x.EndedUtc != DateTime.MinValue && x.ClaudePid > 0 && WorkerWindows.ProcessAlive(x.ClaudePid, x.ClaudeStartedUtc) == 0;
+                if (x.InVsCode && x.Req != "" && !claudeLeft && Reveal(x.Req, out note)) return note;
+            }
+            if (t.ManualReq != "" && Reveal(t.ManualReq, out note)) return note;
+            if (t.State == QState.Running && a != null)
+            {
+                if (a.Window != "" && Bridge.Focus(Bridge.Window(a.Window))) return null;
+                return "VS Code is still opening this task's terminal. Try again in a moment.";
+            }
+            if (ManualOpen(t)) return "VS Code is opening this conversation. Try again in a moment.";
+            if (!Sched.IsGuid(t.SessionId)) return "This task has no conversation yet because it hasn't started. Use Run now to start it in VS Code.";
+            if (Sessions.Find(ProjectsDir, t.Project, t.SessionId) == null)
+                return "Conversation " + Short(t.SessionId) + " wasn't found on this computer: Claude Code didn't save it (or the run stopped before it started), so it can't be resumed. Use Run again to start fresh.";
+            activeCache = null;
+            var act = ActiveFor(t.SessionId);
+            if (act != null) return "That conversation is already open in another Claude Code session (" + (act.Kind != "" ? act.Kind + ", " : "") + "process " + act.Pid + "). Switch to it there: a second copy would mix up its messages.";
+            string req = "manual-" + t.Id + "-" + Guid.NewGuid().ToString("N").Substring(0, 8);
+            try { StartVs(t, req, "resume", t.SessionId, null, TerminalName(t)); }
+            catch (Exception e) { return "Couldn't open it in VS Code: " + e.Message; }
+            Edit(id, x => { x.ManualReq = req; return true; });
+            return null;
+        }
+
+        bool Reveal(string req, out string note)
+        {
+            note = null;
+            var st = Bridge.Status(req);
+            if (st == null || st.State != "open") return false;
+            var w = Bridge.Window(st.Window);
+            if (w == null || !w.Terminals.Contains(req)) return false;
+            Bridge.Send(new Dictionary<string, object> { { "req", "reveal-" + Guid.NewGuid().ToString("N").Substring(0, 12) }, { "type", "reveal" }, { "target", w.Id }, { "of", req } });
+            if (!Bridge.Focus(w)) note = "The terminal is shown in its VS Code window (" + w.Display + "), but that window can't be brought forward from here (an unsaved multi-root workspace). Switch to it yourself.";
+            return true;
+        }
+
+        // Where the task runs (or will run), for the details view.
+        public string Where(QueueTask t)
+        {
+            var a = t.Last;
+            bool vs = a != null && a.EndedUtc == DateTime.MinValue && t.State == QState.Running ? a.InVsCode : t.Runner != "headless";
+            if (!vs) return "In the background (claude -p, no window)";
+            var b = a != null && a.InVsCode && a.Req != "" ? a : null;
+            if (b == null) return "VS Code: a terminal in the project's window";
+            var w = b.Window != "" ? Bridge.Window(b.Window) : null;
+            return "VS Code terminal \"" + b.Terminal + "\"" + (w != null ? " in the window for " + w.Display : "");
+        }
+
+        static string Short(string sid) { return sid != null && sid.Length > 8 ? sid.Substring(0, 8) : sid ?? ""; }
 
         void Start(Run r, string cmdline, string cwd, string promptFile, string jobName)
         {
@@ -1371,6 +1867,7 @@ namespace ClaudeStatus
         {
             var r = run;
             if (r == null) return;
+            if (r.Vs) { PollVs(r); return; }
             ReadOutput(r, false);
             bool exited;
             uint code = 0;
@@ -1390,10 +1887,16 @@ namespace ClaudeStatus
 
         void Complete(string id, int n, RunReport rep, int exitCode, string stderr, bool canceled, bool guard)
         {
-            DateTime now = Now();
-            var v = Outcome.Classify(rep, exitCode, stderr, canceled, guard, now);
-            if (v.Kind == "usage_limit" && v.ResetReported && v.ResetUtc > knownBlockedUntil) knownBlockedUntil = v.ResetUtc;
+            var v = Outcome.Classify(rep, exitCode, stderr, canceled, guard, Now());
             try { File.Delete(Path.Combine(RunsDir, id, n + ".prompt.txt")); } catch { }
+            Apply(id, n, v, exitCode, rep);
+        }
+
+        // Records a run's outcome (both runners): finished, retried later, or needs you.
+        void Apply(string id, int n, Verdict v, int exitCode, RunReport rep)
+        {
+            DateTime now = Now();
+            if (v.Kind == "usage_limit" && v.ResetReported && v.ResetUtc > knownBlockedUntil) knownBlockedUntil = v.ResetUtc;
             Mutate(d =>
             {
                 var t = d.Find(id);
@@ -1401,7 +1904,7 @@ namespace ClaudeStatus
                 RunAttempt a = null;
                 foreach (var x in t.Attempts) if (x.N == n) a = x;
                 if (a == null) return false;
-                a.EndedUtc = now; a.ExitCode = exitCode; a.Outcome = v.Kind;
+                a.EndedUtc = now; a.ExitCode = exitCode; a.Outcome = v.Kind; a.Phase = "ended"; a.Attention = "";
                 if (rep.SessionId != "" && Sched.IsGuid(rep.SessionId)) t.SessionId = rep.SessionId;
                 if (rep.HasResult) { t.ResultText = rep.ResultText.Length > 20000 ? rep.ResultText.Substring(0, 20000) + "\n…(full output in the log)" : rep.ResultText; t.Summary = Sched.FirstLine(rep.ResultText, 160); }
                 t.Denials = new List<string>(rep.Denials);
@@ -1447,6 +1950,13 @@ namespace ClaudeStatus
                 if (a == null) { Edit(t.Id, x => { Finish(x, QState.NeedsAttention, "interrupted", "Interrupted before it started."); return true; }); continue; }
                 bool ownerAlive = a.Owner != "" && a.Owner != instance && WorkerWindows.ProcessAlive(a.OwnerPid, a.OwnerStartedUtc) == 1;
                 if (ownerAlive) continue;   // another running instance is watching it
+                if (a.InVsCode)
+                {
+                    // Interactive Claude lives in VS Code, not under this app: just watch it again (hooks + bridge).
+                    Edit(t.Id, x => { var xa = x.Last; if (xa == null) return false; xa.Owner = instance; xa.OwnerPid = myPid; xa.OwnerStartedUtc = myStart; return true; });
+                    run = new Run { TaskId = t.Id, N = a.N, Vs = true, SeenUtc = Now() };
+                    return;
+                }
                 string log = LogPath(t.Id, a.N);
                 if (a.Pid == 0)
                 {

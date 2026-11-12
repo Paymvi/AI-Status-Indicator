@@ -1,0 +1,17 @@
+{
+  "name": "claude-status-bridge",
+  "displayName": "Claude Status Bridge",
+  "description": "Lets the Claude Status app run scheduled Claude Code tasks in a named terminal of the matching project window, and reveal that terminal on request. Local files only; no network.",
+  "version": "1.0.0",
+  "publisher": "claude-status",
+  "license": "MIT",
+  "engines": { "vscode": "^1.75.0" },
+  "categories": ["Other"],
+  "main": "./extension.js",
+  "activationEvents": ["onStartupFinished"],
+  "capabilities": {
+    "untrustedWorkspaces": { "supported": true, "description": "It only opens terminals for tasks you scheduled in the Claude Status app. Claude Code still asks whether to trust the folder." },
+    "virtualWorkspaces": false
+  },
+  "extensionKind": ["ui"]
+}

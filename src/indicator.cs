@@ -577,7 +577,7 @@ namespace ClaudeStatus
             return new Anchor { Hwnd = fg.ToInt64(), Pid = (int)p, Started = t };
         }
 
-        // Brings a window to the foreground (only ever called for an explicit click on a worker row).
+        // Brings a window to the foreground (only ever for an explicit click: a worker row, the tray icon, a notification).
         public static bool Activate(IntPtr h)
         {
             if (Native.IsIconic(h)) Native.ShowWindow(h, SW_RESTORE);
@@ -695,7 +695,7 @@ namespace ClaudeStatus
             [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 64)] public string szInfoTitle;
             public int dwInfoFlags; public Guid guidItem; public IntPtr hBalloonIcon;
         }
-        const int WS_EX_TOPMOST = 0x8, WS_EX_TOOLWINDOW = 0x80, WS_EX_NOACTIVATE = 0x08000000;
+        const int WS_EX_TOPMOST = 0x8, WS_EX_TOOLWINDOW = 0x80, WS_EX_NOACTIVATE = 0x08000000, WS_EX_APPWINDOW = 0x40000;
         const int WM_NCLBUTTONDOWN = 0xA1, HTCAPTION = 2;
 
         static readonly Color Bg = Color.FromArgb(30, 30, 30);
@@ -759,7 +759,7 @@ namespace ClaudeStatus
         // Status never takes focus; the Queue view is a normal window you type in (and isn't always on top).
         protected override CreateParams CreateParams
         {
-            get { var cp = base.CreateParams; cp.ExStyle |= WS_EX_TOOLWINDOW | (board ? WS_EX_TOPMOST | WS_EX_NOACTIVATE : 0); return cp; }
+            get { var cp = base.CreateParams; cp.ExStyle |= board ? WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE : WS_EX_APPWINDOW; return cp; }
         }
         [DllImport("user32.dll")] static extern int GetWindowLong(IntPtr h, int i);
         [DllImport("user32.dll")] static extern int SetWindowLong(IntPtr h, int i, int v);
@@ -813,6 +813,7 @@ namespace ClaudeStatus
             BackColor = Bg;
             DoubleBuffered = true;
             Text = "Claude Status";
+            try { string ico = Path.Combine(root, "favicon.ico"); if (File.Exists(ico)) Icon = new Icon(ico); } catch { }   // the Queue's taskbar button
             if (scaleOverride > 0) scale = scaleOverride;
             else using (var g = CreateGraphics()) scale = g.DpiX / 96f;
             // Pixel-sized fonts (equal to the original 7.5pt / 9pt at any DPI) so layout scales predictably.
@@ -836,6 +837,7 @@ namespace ClaudeStatus
             trayMenu.Items.Add("Quit", null, (s, e) => Close());
             tray = new NotifyIcon { Visible = !testMode, ContextMenuStrip = trayMenu, Text = "Claude Status: IDLE" };
             tray.MouseClick += (s, e) => { if (e.Button == MouseButtons.Left) RestoreFromTray(); };
+            tray.BalloonTipClicked += (s, e) => OpenToastTarget();
             SetTrayIcon(Grey);
             tip = new ToolTip { ShowAlways = true, InitialDelay = 500, ReshowDelay = 200, AutoPopDelay = 8000 };
             note = new ToolTip { ShowAlways = true };
@@ -1061,9 +1063,33 @@ namespace ClaudeStatus
             }
         }
 
-        void Toast(string title, string text, ToolTipIcon icon, SessionInfo si)
+        string toastTask = "", toastSession = "";
+
+        // Clicking a notification: a scheduled task's opens its details in the Queue; any other worker's focuses it.
+        void OpenToastTarget()
+        {
+            var t = toastTask != "" ? queue.Data.Find(toastTask) : queue.TaskForSession(toastSession);
+            if (t != null) { ShowTask(t.Id); return; }
+            SessionInfo si;
+            if (toastSession != "" && sessions.TryGetValue(toastSession, out si)) { RestoreFromTray(); FocusWorker(si); }
+            else RestoreFromTray();
+        }
+
+        // Shows the Queue with one task selected, and brings it forward.
+        public void ShowTask(string id)
+        {
+            if (!Visible) Show();
+            SetView(false);
+            if (queueView != null) queueView.SelectTask(id);
+            RestoreFromTray();
+        }
+
+        void Toast(string title, string text, ToolTipIcon icon, SessionInfo si) { Toast(title, text, icon, si, ""); }
+
+        void Toast(string title, string text, ToolTipIcon icon, SessionInfo si, string taskId)
         {
             if (testMode) return;
+            toastTask = taskId ?? ""; toastSession = si != null ? si.Id : "";
             try { if (WorkerBalloon(title, text, si)) return; } catch { }
             try { tray.ShowBalloonTip(5000, title, text, icon); } catch { }
         }
@@ -1325,9 +1351,14 @@ namespace ClaudeStatus
             else if (queueView != null) { queueView.Visible = false; Padding = Padding.Empty; }
             if (IsHandleCreated)
             {
+                // Status: a tool window that never takes focus. Queue: a normal window with a taskbar button and an
+                // Alt+Tab entry, so it can always be found again. The taskbar only notices the change while hidden.
                 int ex = GetWindowLong(Handle, -20);
-                ex = board ? ex | WS_EX_NOACTIVATE : ex & ~WS_EX_NOACTIVATE;
+                ex = board ? (ex | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW) & ~WS_EX_APPWINDOW : (ex & ~(WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW)) | WS_EX_APPWINDOW;
+                bool shown = Visible;
+                if (shown && !testMode) Hide();
                 SetWindowLong(Handle, -20, ex);
+                if (shown && !testMode) Show();
             }
             TopMost = board;
             MinimumSize = board ? Size.Empty : new Size(S(QueueMinW), S(QueueMinH));
@@ -1383,6 +1414,10 @@ namespace ClaudeStatus
             queue.AllowApiBilling = CfgBool("queueAllowApiBilling", false);
             queue.KeepAwake = CfgBool("queueKeepAwake", true);
             queue.HistoryDays = (int)CfgNum("queueHistoryDays", 30);
+            var vs = cfg.TryGetValue("queueVSCodeCommand", out v) ? v as System.Collections.ArrayList : null;
+            string[] code = null;
+            if (vs != null && vs.Count > 0) { code = new string[vs.Count]; for (int i = 0; i < vs.Count; i++) code[i] = Convert.ToString(vs[i]); }
+            queue.Bridge.CodeCommand = code;
         }
 
         void QueueTick()
@@ -1455,7 +1490,7 @@ namespace ClaudeStatus
             string text = t.Title + ": " + (t.State == QState.Completed ? (t.Summary != "" ? t.Summary : "Claude reported it's done (not verified).") : t.Reason);
             if (text.Length > 250) text = text.Substring(0, 249) + "…";
             if (t.State == QState.NeedsAttention && CfgBool("soundOnNeedsYou", true) && !testMode) SystemSounds.Exclamation.Play();
-            Toast(title, text, icon, new SessionInfo { Id = t.SessionId, State = state });
+            Toast(title, text, icon, new SessionInfo { Id = t.SessionId, State = state }, t.Id);
         }
 
         static bool AutostartOn() { try { return File.Exists(AutostartLink); } catch { return false; } }
@@ -1883,7 +1918,7 @@ namespace ClaudeStatus
             {
                 // A scheduled run has no window of its own: its row opens the task in the Queue.
                 var task = ScheduledTaskOf(si);
-                if (task != null) { SetView(false); if (queueView != null) queueView.SelectTask(task.Id); }
+                if (task != null) ShowTask(task.Id);
                 else FocusWorker(si);
             }
         }
@@ -1977,13 +2012,26 @@ namespace ClaudeStatus
             Hide();
         }
 
-        // Shows the same window again (never a new one) on top, without taking keyboard focus.
+        // Shows the same window again (never a new one): un-minimized, moved back onto a connected monitor if it's off
+        // screen (monitor unplugged, resolution changed), and in front. Status stays on top without taking keyboard
+        // focus; the Queue (a normal window) is activated, because merely raising it leaves it behind the active app.
         void RestoreFromTray()
         {
+            if (WindowState != FormWindowState.Normal) WindowState = FormWindowState.Normal;
+            if (!board && !OnAnyScreen(queueBounds)) queueBounds = Rectangle.Empty;
+            if (board && !OnAnyScreen(new Rectangle(home, new Size(S(BoardW), S(HeadH))))) { home = DefaultPosition(); SavePosition(); }
             UpdateLayout();
             if (!Visible) Show();
-            BringToFrontNoActivate();
+            if (board) BringToFrontNoActivate();
+            else if (!testMode) WorkerWindows.Activate(Handle);
             Invalidate();
+        }
+
+        static bool OnAnyScreen(Rectangle r)
+        {
+            if (r.Width <= 0) return true;   // no saved bounds: the default spot is used
+            foreach (var scr in Screen.AllScreens) { var x = Rectangle.Intersect(scr.WorkingArea, r); if (x.Width >= 60 && x.Height >= 30) return true; }
+            return false;
         }
 
         protected override void OnFormClosed(FormClosedEventArgs e)

@@ -157,6 +157,37 @@ $t = New-Object Windows.Forms.Timer -Property @{ Interval = 120000 }; $t.add_Tic
     for ($k = 0; $k -lt 5; $k++) { $live.MinimizeNow(); [System.Windows.Forms.Application]::DoEvents(); $live.RestoreNow(); [System.Windows.Forms.Application]::DoEvents() }
     $forms = @([System.Windows.Forms.Application]::OpenForms | Where-Object { $_ -is [ClaudeStatus.IndicatorForm] })
     Check 'repeated minimize/restore (and restore while open) keeps exactly one window' ($forms.Count -eq 1 -and $live.Visible -and $live.Handle -eq $handle)
+    Section 'Finding the window again from the tray (Queue view, minimized, off screen)'
+    $NF = [Reflection.BindingFlags]'NonPublic,Instance'
+    $live.ShowQueue($true); [System.Windows.Forms.Application]::DoEvents()
+    $ex = [TNative]::GetWindowLong($live.Handle, -20)
+    Check 'the Queue has a taskbar button and an Alt+Tab entry (an app window, not a tool window)' (($ex -band 0x40000) -ne 0 -and ($ex -band 0x80) -eq 0) ('0x{0:X}' -f $ex)
+    $null = $WW::Activate($a.Window); Start-Sleep -Milliseconds 200
+    Check '(another window is now in front of the Queue)' ([TNative]::GetForegroundWindow() -eq $a.Window)
+    $live.RestoreNow(); for ($i = 0; $i -lt 5; $i++) { [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 40 }
+    Check 'tray click brings a Queue that was behind other windows to the front (activated)' ($live.Visible -and [TNative]::GetForegroundWindow() -eq $live.Handle)
+    $live.MinimizeNow(); [System.Windows.Forms.Application]::DoEvents(); $null = $WW::Activate($a.Window); Start-Sleep -Milliseconds 200
+    $live.RestoreNow(); for ($i = 0; $i -lt 5; $i++) { [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 40 }
+    Check 'tray click after Minimize to tray: the Queue is shown and in front' ($live.Visible -and [TNative]::GetForegroundWindow() -eq $live.Handle)
+    $live.WindowState = 'Minimized'; [System.Windows.Forms.Application]::DoEvents()
+    $live.RestoreNow(); for ($i = 0; $i -lt 5; $i++) { [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 40 }
+    Check 'tray click un-minimizes a window Windows minimized (e.g. Win+D / Win+M)' ($live.WindowState -eq 'Normal' -and $live.Visible -and [TNative]::GetForegroundWindow() -eq $live.Handle)
+    $live.GetType().GetField('queueBounds', $NF).SetValue($live, (New-Object System.Drawing.Rectangle(-9000, -9000, 900, 600)))
+    $live.RestoreNow(); [System.Windows.Forms.Application]::DoEvents()
+    $onScreen = @([System.Windows.Forms.Screen]::AllScreens | Where-Object { $_.WorkingArea.Contains($live.Bounds) }).Count -gt 0
+    Check 'a Queue position left on a monitor that is gone is moved back onto a connected one' $onScreen "$($live.Bounds)"
+    $q = $live.Queue
+    $tk = [ClaudeStatus.TaskEditor]::NewTask(); $tk.Title = 'From a notification'; $tk.Project = $root; $tk.Prompt = 'x'; $tk.State = 'Draft'; $null = $q.Save($tk, 0)
+    $live.ShowQueue($false); $live.MinimizeNow(); [System.Windows.Forms.Application]::DoEvents(); $null = $WW::Activate($a.Window); Start-Sleep -Milliseconds 200
+    $live.ShowTask($tk.Id); for ($i = 0; $i -lt 5; $i++) { [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 40 }
+    Check 'clicking a task notification opens that task''s details in the Queue, in front' ($live.IsQueue -and $live.Visible -and $live.QueueViewControl.SelectedId -eq $tk.Id -and [TNative]::GetForegroundWindow() -eq $live.Handle)
+    $live.ShowQueue($false); [System.Windows.Forms.Application]::DoEvents()
+    $live.Home = New-Object System.Drawing.Point(-9000, -9000)
+    $live.MinimizeNow(); $live.RestoreNow(); [System.Windows.Forms.Application]::DoEvents()
+    Check 'the Status window is moved back onto a connected monitor too' (@([System.Windows.Forms.Screen]::AllScreens | Where-Object { $_.WorkingArea.IntersectsWith($live.Bounds) }).Count -gt 0) "$($live.Bounds)"
+    $ex = [TNative]::GetWindowLong($live.Handle, -20)
+    Check 'back in Status: a tool window again (no taskbar button), topmost and non-activating' (($ex -band 0x80) -ne 0 -and ($ex -band 0x40000) -eq 0 -and ($ex -band 0x8) -ne 0 -and ($ex -band 0x08000000) -ne 0)
+
     $live.MinimizeNow(); [System.Windows.Forms.Application]::DoEvents()
     ($live.TrayMenu.Items | Where-Object { $_.Text -eq 'Quit' }).PerformClick(); [System.Windows.Forms.Application]::DoEvents()
     Check 'tray Quit (while minimized) exits: window closed and disposed' ($live.IsDisposed)

@@ -1,0 +1,10 @@
+{
+  "name": "claude-status-test-driver",
+  "displayName": "Claude Status test driver (tests only)",
+  "version": "0.0.1",
+  "publisher": "claude-status-tests",
+  "engines": { "vscode": "^1.75.0" },
+  "main": "./extension.js",
+  "activationEvents": ["onStartupFinished"],
+  "capabilities": { "untrustedWorkspaces": { "supported": true } }
+}

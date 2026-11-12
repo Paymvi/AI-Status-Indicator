@@ -10,16 +10,19 @@
     -E2E       also runs one real headless `claude -p` prompt with the hooks pointed at a temporary install.
     -Browser   also checks the phone dashboard page in headless Chrome/Edge emulating Android phones
                (tests\phone-browser.mjs; needs Node.js 22+; screenshots go to -RenderDir).
+    -VSCode    also runs vscode-tests.ps1: real VS Code windows (an isolated profile with the bridge installed from
+               its .vsix) running scheduled tasks against a mock claude.exe (a few minutes; moves focus).
+               Set CLAUDE_STATUS_TEST_CODE to a portable Code.exe if your VS Code has an update waiting to install.
     -RenderDir where to save PNG renders of the Worker Board at each DPI scale (for visual review).
 
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File .\tests\run-tests.ps1 -Live
 #>
-param([switch]$Live, [switch]$E2E, [switch]$Browser, [string]$RenderDir)
+param([switch]$Live, [switch]$E2E, [switch]$Browser, [switch]$VSCode, [string]$RenderDir)
 
 if ($PSVersionTable.PSEdition -eq 'Core') {
     $a = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $PSCommandPath)
-    if ($Live) { $a += '-Live' }; if ($E2E) { $a += '-E2E' }; if ($Browser) { $a += '-Browser' }; if ($RenderDir) { $a += @('-RenderDir', $RenderDir) }
+    if ($Live) { $a += '-Live' }; if ($E2E) { $a += '-E2E' }; if ($Browser) { $a += '-Browser' }; if ($VSCode) { $a += '-VSCode' }; if ($RenderDir) { $a += @('-RenderDir', $RenderDir) }
     & (Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe') @a
     exit $LASTEXITCODE
 }
@@ -1854,7 +1857,7 @@ if ($haveGit) {
     $backupsBefore = @(Get-ChildItem $cd -Filter 'settings.json.bak*').Count
 } else { Skip 'update from previous version' 'git not found' }
 
-$out = & $winPs -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repo 'install.ps1') -ClaudeDir $cd -NoStart 2>&1
+$out = & $winPs -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repo 'install.ps1') -ClaudeDir $cd -NoStart -NoVSCodeBridge 2>&1
 Check 'new version installs / updates' ($LASTEXITCODE -eq 0) ($out | Out-String)
 Check 'application files replaced with the new version' ((Get-Content (Join-Path $inst 'indicator.cs') -Raw) -match 'Worker Board')
 $c = Get-Content (Join-Path $inst 'config.json') -Raw | ConvertFrom-Json
@@ -1881,15 +1884,16 @@ Check 'status line set to statusline.ps1 (forward slashes for Git Bash), no chai
 Check 'usage files installed; config gets showUsage=true' ((Test-Path (Join-Path $inst 'usage.cs')) -and (Test-Path (Join-Path $inst 'statusline.ps1')) -and $c.showUsage -eq $true)
 $cfgText = Get-Content (Join-Path $inst 'config.json') -Raw
 $pushDat = Join-Path $inst 'state\push.dat'; [IO.File]::WriteAllBytes($pushDat, [byte[]](7, 7, 7))   # stands in for a phone registration
-$out = & $winPs -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repo 'install.ps1') -ClaudeDir $cd -NoStart 2>&1
+$out = & $winPs -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repo 'install.ps1') -ClaudeDir $cd -NoStart -NoVSCodeBridge 2>&1
 Check 're-running the installer is a no-op for settings.json and config.json' ((Get-Content (Join-Path $inst 'config.json') -Raw) -eq $cfgText -and (($out | Out-String) -match 'already up to date'))
 Check 'upgrade (re-running the installer) keeps phone notification registrations (state\push.dat)' ((Test-Path $pushDat) -and (([IO.File]::ReadAllBytes($pushDat)) -join ',') -eq '7,7,7')
 Check 'phone dashboard files installed; config gets phoneDashboard=false, phonePort=48521' ((@('phone.cs', 'phone.html', 'phone.css', 'phone.js', 'phone-setup.ps1', 'push.cs', 'sw.js', 'workers.png', 'favicon.ico', 'worker-192.png', 'apple-touch-icon.png') | Where-Object { -not (Test-Path (Join-Path $inst $_)) }).Count -eq 0 -and $c.phoneDashboard -eq $false -and $c.phonePort -eq 48521)
-$out = & $winPs -NoProfile -Command "Add-Type -Path '$inst\indicator.cs', '$inst\phone.cs', '$inst\usage.cs', '$inst\push.cs', '$inst\scheduler.cs', '$inst\queue.cs' -ReferencedAssemblies System.Windows.Forms, System.Drawing, System.Web.Extensions, System.Core, System.Security, System.Numerics; 'ok'" 2>&1
+$out = & $winPs -NoProfile -Command "Add-Type -Path '$inst\indicator.cs', '$inst\phone.cs', '$inst\usage.cs', '$inst\push.cs', '$inst\scheduler.cs', '$inst\queue.cs', '$inst\vscode.cs' -ReferencedAssemblies System.Windows.Forms, System.Drawing, System.Web.Extensions, System.Core, System.Security, System.Numerics; 'ok'" 2>&1
 Check 'installed indicator compiles with Windows PowerShell 5.1' (($out | Out-String).Trim() -eq 'ok') ($out | Out-String)
+Check 'VS Code runner files installed (vscode.cs and the bridge extension with its installer)' ((@('vscode.cs', 'vscode-bridge\package.json', 'vscode-bridge\extension.js', 'vscode-bridge\install-bridge.ps1') | Where-Object { -not (Test-Path (Join-Path $inst $_)) }).Count -eq 0)
 Check 'scheduler files installed; config gets the queue defaults' ((Test-Path (Join-Path $inst 'scheduler.cs')) -and (Test-Path (Join-Path $inst 'queue.cs')) -and $c.toastOnQueue -eq $true -and $c.queueHistoryDays -eq 30 -and $c.queueAllowApiBilling -eq $false)
 $mc = Get-Content (Join-Path $inst 'config.json') -Raw | ConvertFrom-Json; $mc.startupView = 'compact'; [IO.File]::WriteAllText((Join-Path $inst 'config.json'), ($mc | ConvertTo-Json -Depth 5))
-$null = & $winPs -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repo 'install.ps1') -ClaudeDir $cd -NoStart 2>&1
+$null = & $winPs -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repo 'install.ps1') -ClaudeDir $cd -NoStart -NoVSCodeBridge 2>&1
 Check 'updating from a version with Compact: startupView compact becomes workerBoard (Status)' ((Get-Content (Join-Path $inst 'config.json') -Raw | ConvertFrom-Json).startupView -eq 'workerBoard')
 $auto = & $winPs -NoProfile -ExecutionPolicy Bypass -File (Join-Path $inst 'autostart.ps1') 2>&1
 Check 'autostart script runs (status query only; your Startup folder is not modified)' (($auto | Out-String) -match 'Autostart is currently')
@@ -1905,7 +1909,7 @@ Check 'phone-setup.ps1 -NoServe turns phoneDashboard on, keeps every other setti
 $out = & $winPs -NoProfile -ExecutionPolicy Bypass -File $setupPs -Disable 2>&1 | Out-String
 Check 'phone-setup.ps1 -Disable turns it off; leaves tailscale serve alone when this install never set it up' ((Get-Content (Join-Path $inst 'config.json') -Raw | ConvertFrom-Json).phoneDashboard -eq $false -and $out -notmatch 'removed tailscale serve') $out
 
-$out = & $winPs -NoProfile -ExecutionPolicy Bypass -File (Join-Path $inst 'uninstall.ps1') -ClaudeDir $cd 2>&1
+$out = & $winPs -NoProfile -ExecutionPolicy Bypass -File (Join-Path $inst 'uninstall.ps1') -ClaudeDir $cd -KeepVSCodeBridge 2>&1
 $s = Get-Content $settingsPath -Raw
 Check 'uninstall removes the app folder' (-not (Test-Path $inst)) ($out | Out-String)
 Check 'uninstall removes only Claude Status hooks (and its status line)' ($s -notmatch 'status-indicator' -and $s -match 'my-own-hook' -and $s -match 'opus' -and -not ($s | ConvertFrom-Json).PSObject.Properties['statusLine'])
@@ -1914,16 +1918,16 @@ Check 'uninstall removes only Claude Status hooks (and its status line)' ($s -no
 $cd3 = Join-Path $tmp 'claude-sl'; $null = New-Item -ItemType Directory -Force $cd3
 $sp3 = Join-Path $cd3 'settings.json'; $inst3 = Join-Path $cd3 'status-indicator'
 [IO.File]::WriteAllText($sp3, '{"statusLine":{"type":"command","command":"echo my-own-line","padding":2}}')
-$out = & $winPs -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repo 'install.ps1') -ClaudeDir $cd3 -NoStart 2>&1
+$out = & $winPs -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repo 'install.ps1') -ClaudeDir $cd3 -NoStart -NoVSCodeBridge 2>&1
 $s3 = Get-Content $sp3 -Raw | ConvertFrom-Json
 $chain = Join-Path $inst3 'statusline-chain.json'
 Check 'existing status line: replaced by statusline.ps1, original saved to statusline-chain.json, padding kept' ($s3.statusLine.command -match 'status-indicator/statusline\.ps1' -and $s3.statusLine.padding -eq 2 -and (Test-Path $chain) -and (Get-Content $chain -Raw | ConvertFrom-Json).command -eq 'echo my-own-line') ($out | Out-String)
-$out = & $winPs -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repo 'install.ps1') -ClaudeDir $cd3 -NoStart 2>&1
+$out = & $winPs -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repo 'install.ps1') -ClaudeDir $cd3 -NoStart -NoVSCodeBridge 2>&1
 Check 're-install with a chained status line: no change, the original stays saved' ((($out | Out-String) -match 'already up to date') -and (Get-Content $chain -Raw | ConvertFrom-Json).command -eq 'echo my-own-line')
-$out = & $winPs -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repo 'install.ps1') -ClaudeDir $cd3 -NoStart -NoUsageStatusLine 2>&1
+$out = & $winPs -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repo 'install.ps1') -ClaudeDir $cd3 -NoStart -NoVSCodeBridge -NoUsageStatusLine 2>&1
 $s3 = Get-Content $sp3 -Raw | ConvertFrom-Json
 Check '-NoUsageStatusLine: your own status line is back, chain file removed' ($s3.statusLine.command -eq 'echo my-own-line' -and $s3.statusLine.padding -eq 2 -and -not (Test-Path $chain)) ($out | Out-String)
-$null = & $winPs -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repo 'install.ps1') -ClaudeDir $cd3 -NoStart 2>&1
+$null = & $winPs -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repo 'install.ps1') -ClaudeDir $cd3 -NoStart -NoVSCodeBridge 2>&1
 $null = & $winPs -NoProfile -ExecutionPolicy Bypass -File (Join-Path $inst3 'uninstall.ps1') -ClaudeDir $cd3 2>&1
 $s3 = Get-Content $sp3 -Raw | ConvertFrom-Json
 Check 'uninstall restores your own status line exactly' ($s3.statusLine.command -eq 'echo my-own-line' -and $s3.statusLine.padding -eq 2 -and $s3.statusLine.type -eq 'command' -and -not (Test-Path $inst3))
@@ -1953,6 +1957,8 @@ Check 'indicator never reads window titles' ($code -notmatch 'GetWindowText' -an
 Check 'hook never reads the prompt / message / tool input fields; unchanged by the phone feature' ((Get-Content (Join-Path $src 'hook.ps1') -Raw) -notmatch 'phone' -and $code -notmatch '\$in\.(prompt|last_assistant_message|tool_input|tool_response|message|transcript_path|error_details)')
 
 # ======================================================================================
+if ($VSCode) { & { . (Join-Path $PSScriptRoot 'vscode-tests.ps1') } }
+
 if ($E2E) {
     Section 'End-to-end: real `claude -p` with hooks pointed at a temporary install'
     if (-not (Get-Command claude -ErrorAction SilentlyContinue)) { Skip 'e2e' 'claude not on PATH' }

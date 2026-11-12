@@ -20,6 +20,10 @@
 .PARAMETER NoStart
     Don't launch the indicator after installing.
 
+.PARAMETER NoVSCodeBridge
+    Don't install (or update) the Claude Status Bridge extension in VS Code. Scheduled tasks run in VS Code
+    terminals through it; without it they can only run in the background.
+
 .PARAMETER NoUsageStatusLine
     Don't set up the status line feed (and remove it if an earlier install added it). The Claude Usage
     section then only has Claude Code's /usage cache to go on.
@@ -32,7 +36,8 @@ param(
     [string]$ClaudeDir,
     [switch]$Autostart,
     [switch]$NoStart,
-    [switch]$NoUsageStatusLine
+    [switch]$NoUsageStatusLine,
+    [switch]$NoVSCodeBridge
 )
 
 $ErrorActionPreference = 'Stop'
@@ -53,6 +58,7 @@ if ($PSVersionTable.PSEdition -eq 'Core') {
     if ($Autostart) { $a += '-Autostart' }
     if ($NoStart)   { $a += '-NoStart' }
     if ($NoUsageStatusLine) { $a += '-NoUsageStatusLine' }
+    if ($NoVSCodeBridge) { $a += '-NoVSCodeBridge' }
     & $winPs @a
     exit $LASTEXITCODE
 }
@@ -68,7 +74,8 @@ if (-not (Get-Command claude -ErrorAction SilentlyContinue)) {
 $src = Join-Path $PSScriptRoot 'src'
 $appFiles = @('hook.ps1', 'indicator.cs', 'indicator.ps1', 'start-indicator.vbs', 'stop-indicator.ps1', 'autostart.ps1', 'uninstall.ps1',
               'phone.cs', 'phone.html', 'phone.css', 'phone.js', 'phone-setup.ps1', 'usage.cs', 'statusline.ps1',
-              'push.cs', 'sw.js', 'workers.png', 'favicon.ico', 'worker-192.png', 'apple-touch-icon.png', 'scheduler.cs', 'queue.cs')
+              'push.cs', 'sw.js', 'workers.png', 'favicon.ico', 'worker-192.png', 'apple-touch-icon.png', 'scheduler.cs', 'queue.cs', 'vscode.cs',
+              'vscode-bridge\package.json', 'vscode-bridge\extension.js', 'vscode-bridge\install-bridge.ps1')
 foreach ($f in $appFiles + 'config.json') {
     if (-not (Test-Path -LiteralPath (Join-Path $src $f))) { Fail "Missing source file src\$f. Run install.ps1 from the root of the Claude Status repository." }
 }
@@ -184,7 +191,7 @@ if (Test-Path -LiteralPath (Join-Path $installDir 'indicator.ps1')) {
     if ($wasRunning) { Write-Host '  stopped the running indicator so the update takes effect' }
 }
 
-$null = New-Item -ItemType Directory -Force -Path (Join-Path $installDir 'state\sessions')
+$null = New-Item -ItemType Directory -Force -Path (Join-Path $installDir 'state\sessions'), (Join-Path $installDir 'vscode-bridge')
 foreach ($f in $appFiles) {
     Copy-Item -LiteralPath (Join-Path $src $f) -Destination (Join-Path $installDir $f) -Force
 }
@@ -211,6 +218,7 @@ if (-not (Test-Path -LiteralPath $cfgDest)) {
     }
 }
 Get-ChildItem -LiteralPath $installDir -File | Unblock-File -ErrorAction SilentlyContinue
+Get-ChildItem -LiteralPath (Join-Path $installDir 'vscode-bridge') -File | Unblock-File -ErrorAction SilentlyContinue
 
 # ---------- 4. Merge hooks into settings.json ----------
 function New-HookGroup([string]$matcher, [string]$action, [bool]$async) {
@@ -296,7 +304,15 @@ if ($before -ceq $after) {
 }
 if ($slNote) { Write-Host "  $slNote" }
 
-# ---------- 5. Autostart / start ----------
+# ---------- 5. VS Code bridge (scheduled tasks run in a terminal of the project's VS Code window) ----------
+$bridgeNote = ''
+if (-not $NoVSCodeBridge) {
+    $bout = & { $ErrorActionPreference = 'Continue'; & $winPs -NoProfile -ExecutionPolicy Bypass -File (Join-Path $installDir 'vscode-bridge\install-bridge.ps1') 2>&1 | ForEach-Object { "$_" } }
+    $bridgeNote = if ($LASTEXITCODE -eq 0) { 'installed in VS Code (Claude Status Bridge)' } else { 'NOT installed: ' + (($bout | Select-Object -Last 1) -as [string]) + ' Scheduled tasks can still run in the background; install it later from the Queue.' }
+    Write-Host "  VS Code bridge: $bridgeNote"
+}
+
+# ---------- 6. Autostart / start ----------
 if ($Autostart) { & $winPs -NoProfile -ExecutionPolicy Bypass -File (Join-Path $installDir 'autostart.ps1') -Enable | ForEach-Object { "  $_" } }
 
 $started = $false
@@ -310,6 +326,7 @@ Write-Host 'Claude Status installed successfully.' -ForegroundColor Green
 Write-Host "  App folder : $installDir"
 Write-Host "  Hooks      : $settingsPath"
 if ($backup) { Write-Host "  Backup     : $backup" }
+if ($bridgeNote) { Write-Host "  VS Code    : bridge $bridgeNote" }
 if ($started) { Write-Host '  Indicator  : started (look near the bottom-right of your screen)' }
 else          { Write-Host "  Indicator  : start it by double-clicking $(Join-Path $installDir 'start-indicator.vbs')" }
 Write-Host ''
