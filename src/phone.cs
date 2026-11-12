@@ -156,6 +156,30 @@ namespace ClaudeStatus
             return bmp;
         }
 
+        // The tray icon: the default worker in the pose of its status, scaled by a whole number (crisp pixels;
+        // at 20 or 24 px that leaves a small margin) and centred, plus a status dot in the bottom-right corner
+        // inside a transparent cut-out, so it reads on light and dark taskbars. No dot when idle (null badge).
+        public static Bitmap Tray(string root, string state, Color? badge, int size)
+        {
+            int k = Math.Max(1, size / 16), art = 16 * k, off = (size - art) / 2;
+            var bmp = new Bitmap(size, size, PixelFormat.Format32bppArgb);
+            using (var cell = Draw(root, DefaultLook, state, art))
+            using (var g = Graphics.FromImage(bmp))
+            {
+                // Plain Clawde: the default look's party hat (columns 4-11 above the body's top edge, row 6)
+                // is erased, and the body (rows 6-15) moved up 2 rows to sit in the middle.
+                using (var cg = Graphics.FromImage(cell)) { cg.CompositingMode = CompositingMode.SourceCopy; using (var b = new SolidBrush(Color.Transparent)) cg.FillRectangle(b, 4 * k, 0, 8 * k, 6 * k); }
+                g.DrawImageUnscaled(cell, off, off - 2 * k);
+                if (badge == null) return bmp;
+                float d = size * 6 / 16f, cut = Math.Max(1f, size / 16f), x = size - d, y = size - d;
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                g.CompositingMode = CompositingMode.SourceCopy;
+                using (var b = new SolidBrush(Color.Transparent)) g.FillEllipse(b, x - cut, y - cut, d + cut * 2, d + cut * 2);
+                using (var b = new SolidBrush(badge.Value)) g.FillEllipse(b, x, y, d - 0.5f, d - 0.5f);
+            }
+            return bmp;
+        }
+
         // Base64 PNG, or null if the sheet can't be read.
         public static string Png(string root, int look, string state)
         {

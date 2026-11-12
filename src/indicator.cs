@@ -838,7 +838,7 @@ namespace ClaudeStatus
             tray = new NotifyIcon { Visible = !testMode, ContextMenuStrip = trayMenu, Text = "Claude Status: IDLE" };
             tray.MouseClick += (s, e) => { if (e.Button == MouseButtons.Left) RestoreFromTray(); };
             tray.BalloonTipClicked += (s, e) => OpenToastTarget();
-            SetTrayIcon(Grey);
+            SetTrayIcon("IDLE");
             tip = new ToolTip { ShowAlways = true, InitialDelay = 500, ReshowDelay = 200, AutoPopDelay = 8000 };
             note = new ToolTip { ShowAlways = true };
 
@@ -1028,7 +1028,7 @@ namespace ClaudeStatus
             current = ordered.Count > 0 ? ordered[0] : null;
 
             string st = current == null ? "IDLE" : current.State;
-            if (st != trayState) { trayState = st; SetTrayIcon(ColorFor(st)); }
+            if (st != trayState) { trayState = st; SetTrayIcon(st); }
             string tipLine = "Claude Status: " + Board.Label(st) + (current != null ? " (" + current.DisplayName + ")" : "");
             tray.Text = tipLine.Length > 63 ? tipLine.Substring(0, 63) : tipLine;
             UpdateLayout();
@@ -1807,15 +1807,21 @@ namespace ClaudeStatus
             g.SmoothingMode = SmoothingMode.None;
         }
 
-        void SetTrayIcon(Color c)
+        // Clawde in the pose of the status, with a dot of the status colour (none when idle). If workers.png
+        // can't be read, the plain coloured circle it used to be.
+        void SetTrayIcon(string st)
         {
-            using (var bmp = new Bitmap(16, 16))
+            int size = SystemInformation.SmallIconSize.Width;   // 16 / 20 / 24 / 32 at 100-200% (the process is DPI aware)
+            Color c = ColorFor(st);
+            Bitmap bmp;
+            try { bmp = WorkerArt.Tray(root, st, c == Grey ? (Color?)null : c, size); }
+            catch
             {
-                using (var g = Graphics.FromImage(bmp))
-                {
-                    g.SmoothingMode = SmoothingMode.AntiAlias;
-                    using (var b = new SolidBrush(c)) g.FillEllipse(b, 2, 2, 12, 12);
-                }
+                bmp = new Bitmap(16, 16);
+                using (var g = Graphics.FromImage(bmp)) { g.SmoothingMode = SmoothingMode.AntiAlias; using (var b = new SolidBrush(c)) g.FillEllipse(b, 2, 2, 12, 12); }
+            }
+            using (bmp)
+            {
                 IntPtr h = bmp.GetHicon();
                 var old = tray.Icon;
                 tray.Icon = (Icon)Icon.FromHandle(h).Clone();
