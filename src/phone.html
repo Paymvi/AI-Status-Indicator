@@ -27,6 +27,7 @@
         <button type="button" id="view-list" class="seg" data-view="list" aria-pressed="true">List</button>
         <button type="button" id="view-creatures" class="seg" data-view="creatures" aria-pressed="false">Creatures</button>
         <button type="button" id="view-sched" class="seg" data-view="sched" aria-pressed="false">Scheduled</button>
+        <button type="button" id="view-git" class="seg" data-view="git" aria-pressed="false">Commit</button>
       </div>
       <button type="button" id="gear" class="gear" aria-label="Display settings" aria-expanded="false" aria-controls="settings">
         <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" fill-rule="evenodd" d="M19 9.5L21.8 10L21.8 14L19 14.5L18.7 15.2L20.3 17.5L17.5 20.3L15.2 18.7L14.5 19L14 21.8L10 21.8L9.5 19L8.8 18.7L6.5 20.3L3.7 17.5L5.3 15.2L5 14.5L2.2 14L2.2 10L5 9.5L5.3 8.8L3.7 6.5L6.5 3.7L8.8 5.3L9.5 5L10 2.2L14 2.2L14.5 5L15.2 5.3L17.5 3.7L20.3 6.5L18.7 8.8ZM12 15.3a3.3 3.3 0 1 1 0-6.6a3.3 3.3 0 1 1 0 6.6Z"/></svg>
@@ -82,6 +83,7 @@
     <span id="banner-when"></span>
     <span id="banner-why" class="why"></span>
   </div>
+  <ul id="git-offers" class="git-offers" aria-label="Repositories with changes" hidden></ul>
   <ul id="rows" class="rows">
     <li class="row placeholder"><span class="ring"></span><span class="name muted">Connecting to the laptop…</span></li>
   </ul>
@@ -98,6 +100,17 @@
     <div id="sched-detail" class="sched-detail" hidden>
       <button type="button" id="sched-back" class="usage-btn">‹ Back</button>
       <div id="sched-body"></div>
+    </div>
+  </section>
+  <section id="git" class="sched" aria-label="Review changes and commit" hidden>
+    <div class="sched-bar">
+      <span id="git-info" class="sched-info">Git on the laptop · nothing runs until you press Send</span>
+      <button type="button" id="git-refresh" class="usage-btn">Refresh</button>
+    </div>
+    <div id="git-list"></div>
+    <div id="git-detail" class="sched-detail" hidden>
+      <button type="button" id="git-back" class="usage-btn">‹ Back</button>
+      <div id="git-body"></div>
     </div>
   </section>
 </main>

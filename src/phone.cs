@@ -15,6 +15,10 @@
 //   GET  /sw.js                           the service worker that shows push notifications (push.cs)
 //   POST /api/push {"op":..}              this phone's notifications: on/off, preferences, a test
 //                                         (only the public VAPID key is ever sent to the page)
+//   GET  /api/git?op=repos|review|diff|job  Git review for the workers' repositories (git.cs; read-only)
+//   POST /api/git {"op":"commit"|"push"}  YOUR explicit Send: commit the files you picked with your message
+//                                         and push, or retry the push (git.cs). Repositories are named by
+//                                         tokens; the review screen shows the repository's path and diffs.
 // Only display data leaves the process: friendly name, state, when that state began, a short error type,
 // a creature look number, that session's context-window percentage (and whether that reading is older than
 // its latest activity), and opaque tokens. No session IDs, process IDs, folder paths or window data.
@@ -209,7 +213,7 @@ namespace ClaudeStatus
     public sealed class PhoneServer
     {
         public const int DefaultPort = 48521;
-        const int MaxHeader = 8192, MaxBody = 1024, MaxConnections = 32, WaitMs = 20000, RepeatMs = 1500;
+        const int MaxHeader = 8192, MaxBody = 1024, MaxGitBody = 512 * 1024, MaxConnections = 32, WaitMs = 20000, RepeatMs = 1500;
         // Creature looks: phone.js draws look L as hat (L % Hats) on body colour (L / Hats); see HATS and
         // BODIES there. Bodies 0 .. OrangeBodies-1 are the orange family.
         public const int Hats = 13, Bodies = 8, OrangeBodies = 4, Looks = Hats * Bodies;
@@ -261,6 +265,9 @@ namespace ClaudeStatus
         public Func<bool> UsageRefresh;
         // Phone push notifications (null = not available).
         public PushNotifier Push;
+        // Git review / commit & push for the workers' repositories (git.cs).
+        public readonly GitDesk GitOps;
+        List<string> queueProjects = new List<string>();
 
         public int Port { get { return port; } }
         public bool Running { get { return running; } }
@@ -279,6 +286,13 @@ namespace ClaudeStatus
             this.tailnetLookup = tailnetLookup ?? LookupTailnetNames;
             using (var rng = RandomNumberGenerator.Create()) rng.GetBytes(secret);
             Error = "";
+            GitOps = new GitDesk(Token, () =>
+            {
+                var list = new List<GitWorker>();
+                lock (gate) foreach (var r in rows) list.Add(new GitWorker { Key = r.Key, Name = r.Name, State = r.State, SessionId = r.SessionId });
+                return list;
+            });
+            GitOps.Projects = () => { lock (gate) return new List<string>(queueProjects); };
         }
 
         public bool Start()
@@ -379,8 +393,11 @@ namespace ClaudeStatus
             for (int i = 0; i < past.Count && i < QueuePastMax; i++) tasks.Add(QueueRow(past[i], d));
             var q = new Dictionary<string, object> { { "paused", d.Paused }, { "warn", warning ?? "" }, { "tasks", tasks } };
             string sig = new JavaScriptSerializer { MaxJsonLength = int.MaxValue }.Serialize(q);
+            var projects = new List<string>();
+            foreach (var t in d.Tasks) if (!string.IsNullOrEmpty(t.Project) && !projects.Exists(p => Sched.SamePath(p, t.Project))) projects.Add(t.Project);
             lock (gate)
             {
+                queueProjects = projects;
                 if (sig == queueSig) return;
                 queueData = q; queueSig = sig;
                 if (!published) return;
@@ -508,14 +525,16 @@ namespace ClaudeStatus
                     return;
                 }
                 if (req.Path == "/api/board") { BoardRequest(ns, req); return; }
+                if (req.Path == "/api/git") { GitGet(ns, req); return; }
                 Text(ns, 404, "Not found");
                 return;
             }
+            if (req.Method == "POST" && req.Path == "/api/git") { GitPost(ns, req); return; }
             if (req.Method == "POST" && req.Path == "/api/dismiss") { DismissRequest(ns, req); return; }
             if (req.Method == "POST" && req.Path == "/api/focus") { FocusRequest(ns, req); return; }
             if (req.Method == "POST" && req.Path == "/api/usage-refresh") { UsageRefreshRequest(ns, req); return; }
             if (req.Method == "POST" && req.Path == "/api/push") { PushRequest(ns, req); return; }
-            if (req.Path == "/api/dismiss" || req.Path == "/api/focus" || req.Path == "/api/usage-refresh" || req.Path == "/api/push" || Pages.ContainsKey(req.Path) || req.Path == "/api/board") { Text(ns, 405, "Method not allowed"); return; }
+            if (req.Path == "/api/dismiss" || req.Path == "/api/focus" || req.Path == "/api/usage-refresh" || req.Path == "/api/push" || req.Path == "/api/git" || Pages.ContainsKey(req.Path) || req.Path == "/api/board") { Text(ns, 405, "Method not allowed"); return; }
             Text(ns, 404, "Not found");
         }
 
@@ -555,7 +574,7 @@ namespace ClaudeStatus
             string cl;
             int len = 0;
             if (req.Headers.TryGetValue("Content-Length", out cl) && (!int.TryParse(cl, out len) || len < 0)) return null;
-            if (len > MaxBody) { status = 413; return null; }
+            if (len > (req.Path == "/api/git" ? MaxGitBody : MaxBody)) { status = 413; return null; }   // a commit carries its message and file list
             var body = new byte[len];
             int have = Math.Min(len, n - end - 4);
             Array.Copy(buf, end + 4, body, 0, have);
@@ -788,6 +807,80 @@ namespace ClaudeStatus
                 case FocusResult.Ambiguous: return "ambiguous"; case FocusResult.Gone: return "gone"; case FocusResult.Busy: return "busy";
                 default: return "unavailable";
             }
+        }
+
+        // ---------- Git (git.cs) ----------
+        // Looking (GET) never changes anything; it still needs the page's own header (a cross-site page can't
+        // send one without a preflight this server never approves), since it shows paths and diffs.
+        void GitGet(NetworkStream ns, Request req)
+        {
+            string marker, site;
+            if (!req.Headers.TryGetValue("X-Claude-Status", out marker) || marker != "git" || (req.Headers.TryGetValue("Sec-Fetch-Site", out site) && site != "same-origin")) { Json(ns, 403, "{\"error\":\"forbidden\"}"); return; }
+            var q = new Dictionary<string, string>();
+            foreach (var part in req.Query.Split('&'))
+            {
+                int eq = part.IndexOf('=');
+                if (eq > 0) try { q[part.Substring(0, eq)] = Uri.UnescapeDataString(part.Substring(eq + 1).Replace('+', ' ')); } catch { }
+            }
+            string op, r, id, p;
+            q.TryGetValue("op", out op); q.TryGetValue("r", out r); q.TryGetValue("id", out id); q.TryGetValue("p", out p);
+            Dictionary<string, object> res;
+            try
+            {
+                if (op == "repos") res = GitOps.Repos(q.ContainsKey("fresh"));
+                else if (op == "review" && r != null && TokenRx.IsMatch(r)) res = GitOps.Review(r);
+                else if (op == "diff" && r != null && TokenRx.IsMatch(r) && !string.IsNullOrEmpty(p) && p.Length <= 4096) res = GitOps.Diff(r, p);
+                else if (op == "job" && id != null && TokenRx.IsMatch(id)) res = GitOps.Job(id);
+                else { Json(ns, 400, "{\"result\":\"bad_request\"}"); return; }
+            }
+            catch { Json(ns, 500, "{\"result\":\"error\"}"); return; }
+            Json(ns, 200, new JavaScriptSerializer { MaxJsonLength = int.MaxValue }.Serialize(res));
+        }
+
+        // The only Git actions: Send (commit the reviewed selection, then push) and Retry Push.
+        void GitPost(NetworkStream ns, Request req)
+        {
+            if (!ActionAllowed(ns, req, "git")) return;
+            Dictionary<string, object> d = null;
+            try { d = new JavaScriptSerializer { MaxJsonLength = MaxGitBody, RecursionLimit = 6 }.Deserialize<Dictionary<string, object>>(Encoding.UTF8.GetString(req.Body)); } catch { }
+            object o;
+            string op = d != null && d.TryGetValue("op", out o) ? o as string : null;
+            string id = d != null && d.TryGetValue("id", out o) ? o as string : null;
+            if (op == null || id == null || !TokenRx.IsMatch(id)) { Json(ns, 400, "{\"result\":\"bad_request\"}"); return; }
+            Dictionary<string, object> res = null;
+            if (op == "push")
+            {
+                if (d.TryGetValue("n", out o) && o is int) res = GitOps.RetryPush(id, (int)o);
+            }
+            else if (op == "commit")
+            {
+                string r = d.TryGetValue("r", out o) ? o as string : null, fp = d.TryGetValue("fp", out o) ? o as string : null, msg = d.TryGetValue("msg", out o) ? o as string : null;
+                var picked = new List<KeyValuePair<string, string>>();
+                var cmds = new List<string[]>();
+                bool ok = r != null && TokenRx.IsMatch(r) && fp != null && msg != null;
+                if (ok && d.TryGetValue("files", out o) && o is System.Collections.IList)
+                    foreach (var f in (System.Collections.IList)o)
+                    {
+                        var fd = f as Dictionary<string, object>;
+                        object pv, hv;
+                        if (fd == null || !fd.TryGetValue("p", out pv) || !fd.TryGetValue("h", out hv) || !(pv is string) || !(hv is string)) { ok = false; break; }
+                        picked.Add(new KeyValuePair<string, string>((string)pv, (string)hv));
+                    }
+                else ok = false;
+                if (ok && d.TryGetValue("cmds", out o) && o is System.Collections.IList)
+                    foreach (var c in (System.Collections.IList)o)
+                    {
+                        var arr = c as System.Collections.IList;
+                        if (arr == null) { ok = false; break; }
+                        var args = new string[arr.Count];
+                        for (int i = 0; i < arr.Count; i++) { args[i] = arr[i] as string; if (args[i] == null) ok = false; }
+                        cmds.Add(args);
+                    }
+                else ok = false;
+                if (ok) res = GitOps.Commit(id, r, fp, picked, msg, cmds);
+            }
+            if (res == null) { Json(ns, 400, "{\"result\":\"bad_request\"}"); return; }
+            Json(ns, 200, new JavaScriptSerializer { MaxJsonLength = int.MaxValue }.Serialize(res));
         }
 
         // ---------- allowed hosts / origins ----------

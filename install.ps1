@@ -74,7 +74,7 @@ if (-not (Get-Command claude -ErrorAction SilentlyContinue)) {
 $src = Join-Path $PSScriptRoot 'src'
 $appFiles = @('hook.ps1', 'indicator.cs', 'indicator.ps1', 'start-indicator.vbs', 'stop-indicator.ps1', 'autostart.ps1', 'uninstall.ps1',
               'phone.cs', 'phone.html', 'phone.css', 'phone.js', 'phone-setup.ps1', 'usage.cs', 'statusline.ps1',
-              'push.cs', 'sw.js', 'workers.png', 'favicon.ico', 'worker-192.png', 'apple-touch-icon.png', 'scheduler.cs', 'queue.cs', 'vscode.cs',
+              'push.cs', 'sw.js', 'workers.png', 'favicon.ico', 'worker-192.png', 'apple-touch-icon.png', 'scheduler.cs', 'queue.cs', 'vscode.cs', 'git.cs',
               'vscode-bridge\package.json', 'vscode-bridge\extension.js', 'vscode-bridge\install-bridge.ps1')
 foreach ($f in $appFiles + 'config.json') {
     if (-not (Test-Path -LiteralPath (Join-Path $src $f))) { Fail "Missing source file src\$f. Run install.ps1 from the root of the Claude Status repository." }

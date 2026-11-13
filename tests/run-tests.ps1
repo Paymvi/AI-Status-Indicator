@@ -1752,6 +1752,7 @@ else {
     $f = Form $root
     $f.Usage.ReadNow($true); $f.ReloadNow()
     $cdir = Join-Path $tmp 'browser'; $null = New-Item -ItemType Directory -Force $cdir
+    function BGit([string]$dir) { $ea = $ErrorActionPreference; $ErrorActionPreference = 'Continue'; try { ((& git -C $dir @args 2>&1 | ForEach-Object { "$_" }) -join "`n").Trim() } finally { $ErrorActionPreference = $ea } }
     $profileDir = Join-Path $tmp 'chrome-profile'
     $cp = Start-Process $chrome -ArgumentList '--headless=new', '--remote-debugging-port=0', "--user-data-dir=`"$profileDir`"", '--no-first-run', '--no-default-browser-check', '--disable-extensions', 'about:blank' -PassThru
     $portFile = Join-Path $profileDir 'DevToolsActivePort'
@@ -1827,6 +1828,28 @@ else {
                     'sched-clear'         { foreach ($t in @($f.Queue.Data.Tasks)) { $null = $f.Queue.Remove($t.Id) } }
                     'focus-log*'          { [IO.File]::WriteAllText((Join-Path $cdir 'focus-log.txt'), ($script:browserFocus -join ',')) }
                     'focus-clear*'        { $script:browserFocus.Clear() }
+                    'git-setup'           {
+                        # a temporary repository + local bare remote for one DONE worker (never a real project)
+                        if (-not ('TCwd' -as [type])) { Add-Type 'public class TCwd { public System.Collections.Generic.Dictionary<string, string> Map = new System.Collections.Generic.Dictionary<string, string>(); public string Get(string id) { string v; return Map.TryGetValue(id, out v) ? v : null; } }' }
+                        $script:bgRemote = Join-Path $tmp 'browser-remote.git'; $script:bgWork = Join-Path $tmp 'Git_Demo'
+                        BGit $tmp init -q --bare -b main $script:bgRemote; BGit $tmp clone -q $script:bgRemote $script:bgWork
+                        foreach ($kv in @(@('user.name', 'Test'), @('user.email', 't@example.invalid'), @('commit.gpgsign', 'false'), @('core.autocrlf', 'false'), @('core.hooksPath', ((Join-Path $script:bgWork '.git\hooks') -replace '\\', '/')))) { BGit $script:bgWork config $kv[0] $kv[1] }
+                        BGit $script:bgWork checkout -q -b main
+                        [IO.File]::WriteAllText("$script:bgWork\a.txt", "one`ntwo`n"); [IO.File]::WriteAllBytes("$script:bgWork\bin.dat", [byte[]](0, 1, 2))
+                        BGit $script:bgWork add -A; BGit $script:bgWork commit -q -m initial; BGit $script:bgWork push -q -u origin main
+                        [IO.File]::WriteAllText("$script:bgWork\a.txt", "one changed`ntwo`n" + ('a_long_line_that_must_scroll_inside_its_own_box_' * 6) + "`n")
+                        [IO.File]::WriteAllText("$script:bgWork\new file.txt", "brand new`n"); [IO.File]::WriteAllBytes("$script:bgWork\bin.dat", [byte[]](0, 9, 9))
+                        $script:bcwd = New-Object TCwd; $script:bcwd.Map['gitw'] = $script:bgWork
+                        $f.Phone.GitOps.CwdOf = [Delegate]::CreateDelegate([Func[string, string]], $script:bcwd, 'Get')
+                        Put $root 'gitw' 'DONE' 'Git_Demo' 20 70
+                        $f.ReloadNow()
+                    }
+                    'git-verify'          {
+                        $o = @{ head = (BGit $script:bgWork rev-parse HEAD); remote = (BGit $script:bgRemote rev-parse main); files = (BGit $script:bgWork show --name-only --format= HEAD); status = (BGit $script:bgWork status --porcelain) }
+                        $p = New-Object Diagnostics.Process; $p.StartInfo = New-Object Diagnostics.ProcessStartInfo('git', "-C `"$script:bgWork`" cat-file commit HEAD") -Property @{ UseShellExecute = $false; RedirectStandardOutput = $true }
+                        $null = $p.Start(); $ms = New-Object IO.MemoryStream; $p.StandardOutput.BaseStream.CopyTo($ms); $p.WaitForExit(); $cb = $ms.ToArray(); $at = 0; for ($q = 0; $q + 1 -lt $cb.Length; $q++) { if ($cb[$q] -eq 10 -and $cb[$q + 1] -eq 10) { $at = $q + 2; break } }; $o.msg64 = [Convert]::ToBase64String($cb, $at, $cb.Length - $at)   # the message bytes exactly as stored
+                        [IO.File]::WriteAllText((Join-Path $cdir 'git-verify.json'), ($o | ConvertTo-Json -Compress), (New-Object Text.UTF8Encoding $false))
+                    }
                     'check-pet-dismiss'   { Start-Sleep -Milliseconds 200; $script:petDismissedFile = -not (Test-Path (SessFile $root 'pd1')) -and (Test-Path (SessFile $root 'pd2')); $f.ReloadNow() }
                 }
                 [IO.File]::WriteAllText((Join-Path $cdir "ack-$name"), '')
@@ -1924,7 +1947,7 @@ $out = & $winPs -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repo 'insta
 Check 're-running the installer is a no-op for settings.json and config.json' ((Get-Content (Join-Path $inst 'config.json') -Raw) -eq $cfgText -and (($out | Out-String) -match 'already up to date'))
 Check 'upgrade (re-running the installer) keeps phone notification registrations (state\push.dat)' ((Test-Path $pushDat) -and (([IO.File]::ReadAllBytes($pushDat)) -join ',') -eq '7,7,7')
 Check 'phone dashboard files installed; config gets phoneDashboard=false, phonePort=48521' ((@('phone.cs', 'phone.html', 'phone.css', 'phone.js', 'phone-setup.ps1', 'push.cs', 'sw.js', 'workers.png', 'favicon.ico', 'worker-192.png', 'apple-touch-icon.png') | Where-Object { -not (Test-Path (Join-Path $inst $_)) }).Count -eq 0 -and $c.phoneDashboard -eq $false -and $c.phonePort -eq 48521)
-$out = & $winPs -NoProfile -Command "Add-Type -Path '$inst\indicator.cs', '$inst\phone.cs', '$inst\usage.cs', '$inst\push.cs', '$inst\scheduler.cs', '$inst\queue.cs', '$inst\vscode.cs' -ReferencedAssemblies System.Windows.Forms, System.Drawing, System.Web.Extensions, System.Core, System.Security, System.Numerics; 'ok'" 2>&1
+$out = & $winPs -NoProfile -Command "Add-Type -Path '$inst\indicator.cs', '$inst\phone.cs', '$inst\usage.cs', '$inst\push.cs', '$inst\scheduler.cs', '$inst\queue.cs', '$inst\vscode.cs', '$inst\git.cs' -ReferencedAssemblies System.Windows.Forms, System.Drawing, System.Web.Extensions, System.Core, System.Security, System.Numerics; 'ok'" 2>&1
 Check 'installed indicator compiles with Windows PowerShell 5.1' (($out | Out-String).Trim() -eq 'ok') ($out | Out-String)
 Check 'VS Code runner files installed (vscode.cs and the bridge extension with its installer)' ((@('vscode.cs', 'vscode-bridge\package.json', 'vscode-bridge\extension.js', 'vscode-bridge\install-bridge.ps1') | Where-Object { -not (Test-Path (Join-Path $inst $_)) }).Count -eq 0)
 Check 'scheduler files installed; config gets the queue defaults' ((Test-Path (Join-Path $inst 'scheduler.cs')) -and (Test-Path (Join-Path $inst 'queue.cs')) -and $c.toastOnQueue -eq $true -and $c.queueHistoryDays -eq 30 -and $c.queueAllowApiBilling -eq $false)
@@ -1968,6 +1991,8 @@ $null = & $winPs -NoProfile -ExecutionPolicy Bypass -File (Join-Path $inst3 'uni
 $s3 = Get-Content $sp3 -Raw | ConvertFrom-Json
 Check 'uninstall restores your own status line exactly' ($s3.statusLine.command -eq 'echo my-own-line' -and $s3.statusLine.padding -eq 2 -and $s3.statusLine.type -eq 'command' -and -not (Test-Path $inst3))
 
+. (Join-Path $PSScriptRoot 'git-tests.ps1')
+
 # ======================================================================================
 Section 'Privacy / no-network audit (static)'
 # ======================================================================================
@@ -1982,8 +2007,8 @@ Check 'phone page: no sounds, vibration, speech, other storage or outside URLs; 
 $pushCs = Get-Content (Join-Path $src 'push.cs') -Raw
 Check 'push.cs: its only network call is the POST to a validated push endpoint; it never listens' ((@([regex]::Matches($pushCs, 'WebRequest\.Create\((\w+)\)') | ForEach-Object { $_.Groups[1].Value }) -join ',') -eq 'u' -and $pushCs -match 'var u = new Uri\(sub\.Endpoint\)' -and $pushCs -notmatch 'TcpListener|HttpListener|WebClient|HttpClient|Socket')
 $storage = @([regex]::Matches($pjs, 'localStorage\.\w+\([^)]*\)') | ForEach-Object { $_.Value })
-Check 'phone page stores only the List / Creatures, Show usage / expanded, Compact / Show context and notifications on-off / expanded choices' ($storage.Count -eq 14 -and @($storage | Where-Object { $_ -notmatch '^localStorage\.(getItem|setItem)\((VIEW_KEY(, view)?|USAGE_KEY(, .*)?|USAGE_OPEN_KEY(, .*)?|COMPACT_KEY(, .*)?|CONTEXT_KEY(, .*)?|NOTIFY_KEY(, v)?|NOTIFY_OPEN_KEY(, .*)?)\)$' }).Count -eq 0 -and $pjs -match "NOTIFY_OPEN_KEY = 'claudeStatus\.notifyOpen', NOTIFY_KEY = 'claudeStatus\.notify'" -and $pjs -match "COMPACT_KEY = 'claudeStatus\.compact', CONTEXT_KEY = 'claudeStatus\.context'" -and $pjs -match "VIEW_KEY = 'claudeStatus\.view'" -and $pjs -match "USAGE_KEY = 'claudeStatus\.usage', USAGE_OPEN_KEY = 'claudeStatus\.usageOpen'") ($storage -join '; ')
-Check 'phone page only calls its own relative API' ((([regex]::Matches($pjs, "'(api/[a-z-]*)") | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique) -join ',') -eq 'api/board,api/dismiss,api/focus,api/push,api/usage-refresh' -and $pjs -cnotmatch 'XMLHttpRequest|WebSocket|EventSource|sendBeacon|fetch\(\s*[''"](?!api/)')
+Check 'phone page stores only the List / Creatures, Show usage / expanded, Compact / Show context, notifications on-off / expanded choices, hidden commit offers and the running commit''s id' ($storage.Count -eq 19 -and @($storage | Where-Object { $_ -notmatch '^localStorage\.(getItem|setItem|removeItem)\((VIEW_KEY(, view)?|USAGE_KEY(, .*)?|USAGE_OPEN_KEY(, .*)?|COMPACT_KEY(, .*)?|CONTEXT_KEY(, .*)?|NOTIFY_KEY(, v)?|NOTIFY_OPEN_KEY(, .*)?|GIT_SEEN_KEY(, JSON\.stringify\(gitSeen)?|GIT_JOB_KEY(, JSON\.stringify\(v)?)\)$' }).Count -eq 0 -and $pjs -match "GIT_SEEN_KEY = 'claudeStatus\.gitSeen', GIT_JOB_KEY = 'claudeStatus\.gitJob'" -and $pjs -match "NOTIFY_OPEN_KEY = 'claudeStatus\.notifyOpen', NOTIFY_KEY = 'claudeStatus\.notify'" -and $pjs -match "COMPACT_KEY = 'claudeStatus\.compact', CONTEXT_KEY = 'claudeStatus\.context'" -and $pjs -match "VIEW_KEY = 'claudeStatus\.view'" -and $pjs -match "USAGE_KEY = 'claudeStatus\.usage', USAGE_OPEN_KEY = 'claudeStatus\.usageOpen'") ($storage -join '; ')
+Check 'phone page only calls its own relative API' ((([regex]::Matches($pjs, "'(api/[a-z-]*)") | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique) -join ',') -eq 'api/board,api/dismiss,api/focus,api/git,api/push,api/usage-refresh' -and $pjs -cnotmatch 'XMLHttpRequest|WebSocket|EventSource|sendBeacon|fetch\(\s*[''"](?!api/)')
 $usageSrc = (Get-Content (Join-Path $src 'usage.cs') -Raw) + (Get-Content (Join-Path $src 'statusline.ps1') -Raw)
 Check 'usage: never reads Claude credentials or tokens, never calls Anthropic' ($usageSrc -notmatch '(?i)\.credentials|accessToken|refreshToken|api/oauth|anthropic\.com|Authorization|Bearer')
 Check 'statusline.ps1 only uses rate_limits, context_window and session_id from the session data' ((Get-Content (Join-Path $src 'statusline.ps1') -Raw) -notmatch '\$in\.(cwd|transcript_path|model|cost|workspace|output_style|prompt_id|prompt_cache)')

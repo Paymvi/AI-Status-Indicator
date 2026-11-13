@@ -4,5 +4,5 @@
 # Usually started via start-indicator.vbs (no console window). Only one instance runs at a time.
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
-Add-Type -Path (Join-Path $root 'indicator.cs'), (Join-Path $root 'phone.cs'), (Join-Path $root 'usage.cs'), (Join-Path $root 'push.cs'), (Join-Path $root 'scheduler.cs'), (Join-Path $root 'queue.cs'), (Join-Path $root 'vscode.cs') -ReferencedAssemblies System.Windows.Forms, System.Drawing, System.Web.Extensions, System.Core, System.Security, System.Numerics
+Add-Type -Path (Join-Path $root 'indicator.cs'), (Join-Path $root 'phone.cs'), (Join-Path $root 'usage.cs'), (Join-Path $root 'push.cs'), (Join-Path $root 'scheduler.cs'), (Join-Path $root 'queue.cs'), (Join-Path $root 'vscode.cs'), (Join-Path $root 'git.cs') -ReferencedAssemblies System.Windows.Forms, System.Drawing, System.Web.Extensions, System.Core, System.Security, System.Numerics
 [ClaudeStatus.IndicatorForm]::Run($root)

@@ -249,7 +249,34 @@
     return g;
   }
 
-  if (typeof module === 'object' && module.exports) module.exports = { clock: clock, span: span, ago: ago, statusText: statusText, HATS: HATS, BODIES: BODIES, creatureLayers: creatureLayers, countdown: countdown, percentText: percentText, remainingText: remainingText, isAsleep: isAsleep, SLEEP_MS: SLEEP_MS, contextInfo: contextInfo, schedGroups: schedGroups };
+  // ---------- Commit & push (git.cs): the same rules as Git.Commands / Git.SelectionProblem ----------
+  // The exact commands Send runs for these files (review d, picked files in review order); the laptop
+  // rebuilds this list itself and refuses to run anything that differs from what was shown here.
+  function gitCommands(d, picked) {
+    var add = ['git', '--literal-pathspecs', 'add', '--'];
+    picked.forEach(function (f) { if (f.a) add.push(f.p); });
+    var cmds = add.length > 4 ? [add] : [];
+    cmds.push(['git', 'commit', '--cleanup=verbatim', '--file=-']);
+    cmds.push(['git', 'push', d.remote, 'refs/heads/' + d.branch + ':' + d.merge]);
+    return cmds;
+  }
+  function fileNames(list) { return list.slice(0, 5).map(function (f) { return f.p; }).join(', ') + (list.length > 5 ? ' and ' + (list.length - 5) + ' more' : ''); }
+  // Why Send stays disabled ('' = it can be sent).
+  function gitProblem(d, picked, msg) {
+    if (d.block && d.block.length) return d.block[0];
+    if (!picked.length) return 'Select at least one file.';
+    var on = {};
+    picked.forEach(function (f) { on[f.p] = true; });
+    var other = d.files.filter(function (f) { return f.st && !on[f.p]; });
+    if (other.length) return 'Already staged on the laptop but not selected: ' + fileNames(other) + '. Select them too, or unstage them on the laptop.';
+    if (!msg.trim()) return 'Write a commit message.';
+    if (msg.indexOf('\u0000') >= 0) return "The message can't contain a NUL character.";
+    return '';
+  }
+  // One argument for display only (nothing is ever run through a shell): quoted when it isn't plain.
+  function showArg(a) { return /^[A-Za-z0-9_.\/:=@+,-]+$/.test(a) ? a : "'" + a.replace(/'/g, "'\\''") + "'"; }
+
+  if (typeof module === 'object' && module.exports) module.exports = { clock: clock, span: span, ago: ago, statusText: statusText, HATS: HATS, BODIES: BODIES, creatureLayers: creatureLayers, countdown: countdown, percentText: percentText, remainingText: remainingText, isAsleep: isAsleep, SLEEP_MS: SLEEP_MS, contextInfo: contextInfo, schedGroups: schedGroups, gitCommands: gitCommands, gitProblem: gitProblem, showArg: showArg };
   if (typeof document === 'undefined') return;
 
   // ---------- connection ----------
@@ -258,7 +285,7 @@
   var $ = function (id) { return document.getElementById(id); };
   var boardEl = $('board'), connEl = $('conn'), summaryEl = $('summary'), rowsEl = $('rows'), noteEl = $('note');
   var bannerEl = $('banner'), bannerTitle = $('banner-title'), bannerWhen = $('banner-when'), bannerWhy = $('banner-why');
-  var creaturesEl = $('creatures'), petsEl = $('pets'), hintEl = $('pet-hint'), viewBtns = [$('view-list'), $('view-creatures'), $('view-sched')];
+  var creaturesEl = $('creatures'), petsEl = $('pets'), hintEl = $('pet-hint'), viewBtns = [$('view-list'), $('view-creatures'), $('view-sched'), $('view-git')];
   var schedEl = $('sched'), schedInfo = $('sched-info'), schedList = $('sched-list'), schedDetail = $('sched-detail'), schedBody = $('sched-body');
   var schedRefresh = $('sched-refresh'), schedBack = $('sched-back');
 
@@ -279,7 +306,7 @@
   // List (default) or Creatures; remembered in this browser only.
   var VIEW_KEY = 'claudeStatus.view';
   var view = 'list';
-  try { var v0 = localStorage.getItem(VIEW_KEY); if (v0 === 'creatures' || v0 === 'sched') view = v0; } catch (e) { }
+  try { var v0 = localStorage.getItem(VIEW_KEY); if (v0 === 'creatures' || v0 === 'sched' || v0 === 'git') view = v0; } catch (e) { }
 
   // Creatures view options, each remembered in this browser only and off unless turned on: Compact (three
   // columns instead of two; unrelated to the desktop's Compact view) and Show context (a context-window
@@ -334,6 +361,7 @@
     var was = conn;
     conn = 'live';
     render(changed || was !== 'live');
+    gitOnBoard();
   }
 
   function failed(e, aborted) {
@@ -414,7 +442,13 @@
       updateWhen();
     }
 
-    if (full && view === 'sched') {
+    if (full) renderOffers();
+    if (full && view === 'git') {
+      rowsEl.textContent = '';
+      rowEls = [];
+      clearPets();
+      if (!gitShown) renderGit(); else updatePreview();   // never rebuilt by a board update: open diffs and your typing stay
+    } else if (full && view === 'sched') {
       rowsEl.textContent = '';
       rowEls = [];
       clearPets();
@@ -765,12 +799,416 @@
     poll(false);   // the same read-only GET the page always makes; never an action
   });
 
+  // ---------- Commit view: review changes & commit (git.cs) ----------
+  // Looking only GETs (status, diffs) and never changes anything. The only actions are Send: Commit & Push
+  // and Retry Push, each a POST carrying a one-time id, so a double tap or a resend after a dropped
+  // connection gets the same operation back instead of a second one. The laptop re-checks everything you
+  // reviewed (branch, destination, staging, each selected file, the commands) before it runs anything.
+  var gitEl = $('git'), gitList = $('git-list'), gitDetail = $('git-detail'), gitBody = $('git-body'), gitBack = $('git-back'), gitRefresh = $('git-refresh'), offersEl = $('git-offers');
+  var GIT_SEEN_KEY = 'claudeStatus.gitSeen', GIT_JOB_KEY = 'claudeStatus.gitJob';
+  var OLD_LAPTOP = 'The laptop is running an older Claude Status without Commit. Re-run install.ps1 there and restart it.';
+  var gitSeen = {};   // repository path -> the status it had when you hid its "Review changes" item
+  try { gitSeen = JSON.parse(localStorage.getItem(GIT_SEEN_KEY) || '{}') || {}; } catch (e) { gitSeen = {}; }
+  var repos = null, reposErr = '', reposAt = 0, reposBusy = false, doneSig = null;
+  var gitOpen = '', gitShown = false;   // token of the repository on screen ('' = the list); built since the last view switch
+  var rv = null;                         // the review on screen: { r, d, sel: {path: true}, id, loading, err, sending }
+  var job = null, jobTimer = null, jobBusy = false;
+  var msgEl = el('textarea', 'git-msg');   // one element for the whole page, so re-renders never touch what you typed
+  msgEl.rows = 5; msgEl.placeholder = 'Write your commit message'; msgEl.setAttribute('aria-label', 'Your commit message'); msgEl.spellcheck = true;
+  msgEl.addEventListener('input', updatePreview);
+
+  function gitApi(q, body) {
+    var c = new AbortController(), timer = setTimeout(function () { c.abort(); }, 45000);
+    var opt = { cache: 'no-store', credentials: 'same-origin', signal: c.signal, headers: { Accept: 'application/json', 'X-Claude-Status': 'git' } };
+    if (body) { opt.method = 'POST'; opt.headers['Content-Type'] = 'application/json'; opt.body = JSON.stringify(body); }
+    return fetch('api/git' + (q ? '?' + q : ''), opt)
+      .then(function (r) { if (!r.ok) throw { status: r.status }; return r.json(); })
+      .then(function (j) { clearTimeout(timer); return j; }, function (e) { clearTimeout(timer); throw e; });
+  }
+  var enc = encodeURIComponent;
+  function newId() {
+    var b = new Uint8Array(16);
+    crypto.getRandomValues(b);
+    return btoa(String.fromCharCode.apply(null, b)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  }
+  function remember(v) { try { if (v) localStorage.setItem(GIT_JOB_KEY, JSON.stringify(v)); else localStorage.removeItem(GIT_JOB_KEY); } catch (e) { } }
+  function recall() { try { return JSON.parse(localStorage.getItem(GIT_JOB_KEY) || 'null'); } catch (e) { return null; } }
+  function saveSeen() {
+    var k = Object.keys(gitSeen);
+    if (k.length > 50) k.slice(0, k.length - 50).forEach(function (x) { delete gitSeen[x]; });
+    try { localStorage.setItem(GIT_SEEN_KEY, JSON.stringify(gitSeen)); } catch (e) { }
+  }
+
+  // Repositories (with change counts) are re-read when a worker finishes, and now and then while the
+  // Commit view's list is open; never more than the laptop's own short cache allows.
+  function gitOnBoard() {
+    var sig = visibleRows().filter(function (r) { return r.s === 'DONE'; }).map(function (r) { return r.k + r.t; }).join(',');
+    var age = Date.now() - reposAt;
+    if (sig !== doneSig || (view === 'git' && !gitOpen && age > 5000) || (sig && age > 30000)) { doneSig = sig; loadRepos(false); }
+  }
+
+  function loadRepos(fresh) {
+    if (reposBusy) return;
+    reposBusy = true;
+    gitApi('op=repos' + (fresh ? '&fresh=1' : ''))
+      .then(function (j) { repos = j.repos || []; reposErr = ''; }, function (e) { reposErr = e && e.status === 404 ? OLD_LAPTOP : "Couldn't reach the laptop."; })
+      .then(function () {
+        reposBusy = false; reposAt = Date.now();
+        renderOffers();
+        if (view === 'git' && !gitOpen) renderGit();
+      });
+  }
+
+  // "<Project> — Review changes & commit": only for a finished worker whose repository has changes, nobody
+  // is working in it, and you haven't hidden it for exactly this state of the repository.
+  function renderOffers() {
+    offersEl.textContent = '';
+    var items = [];
+    if (job) items.push(null);
+    (repos || []).forEach(function (r) {
+      var done = r.workers.filter(function (w) { return w.s === 'DONE'; });
+      if (r.n > 0 && !r.busy && done.length && gitSeen[r.path] !== r.sig && !(job && job.r === r.r)) items.push({ r: r, w: done[0] });
+    });
+    offersEl.hidden = !items.length || view === 'git' || view === 'sched';
+    items.forEach(function (it) {
+      var li = el('li', 'git-offer'), b = el('button', 'git-offer-open');
+      b.type = 'button';
+      if (!it) {
+        b.textContent = job.name + ' — ' + (job.state === 'running' ? 'Commit & Push running…' : 'Commit & Push result');
+        b.addEventListener('click', function () { gitOpen = job.r; setView('git', true); });
+        li.appendChild(b);
+        li.appendChild(el('span', 'xspace'));
+      } else {
+        b.textContent = it.w.n + ' — Review changes & commit';
+        b.addEventListener('click', function () { openReview(it.r.r); setView('git', true); });
+        var x = el('button', 'x', '×');
+        x.type = 'button';
+        x.setAttribute('aria-label', 'Hide until ' + it.r.name + ' changes again');
+        x.addEventListener('click', function () { gitSeen[it.r.path] = it.r.sig; saveSeen(); renderOffers(); });
+        li.appendChild(b); li.appendChild(x);
+      }
+      offersEl.appendChild(li);
+    });
+  }
+
+  function renderGit() {
+    gitShown = true;
+    gitList.hidden = !!gitOpen;
+    gitDetail.hidden = !gitOpen;
+    gitList.textContent = '';
+    gitBody.textContent = '';
+    if (gitOpen) { if (job && job.r === gitOpen) renderJob(); else renderReview(); return; }
+    var empty = function (t) { gitList.appendChild(el('p', 'sched-empty', t)); };
+    if (job) {
+      var jl = el('ul', 'qlist'), jb = el('button', 'qitem'), jli = el('li');
+      jb.type = 'button';
+      jb.appendChild(el('span', 'qtitle', job.name));
+      jb.appendChild(el('span', 'qstat c-' + jobHead(job)[1], jobHead(job)[0]));
+      jb.addEventListener('click', function () { gitOpen = job.r; renderGit(); });
+      jli.appendChild(jb); jl.appendChild(jli); gitList.appendChild(jl);
+    }
+    if (!repos) { empty(reposErr || 'Looking for repositories on the laptop…'); return; }
+    if (reposErr) gitList.appendChild(el('p', 'sched-warn', reposErr));
+    if (!repos.length) { empty('No Git repositories yet. This lists the repositories your Claude workers (and scheduled tasks) work in.'); return; }
+    gitList.appendChild(el('h2', 'sched-h', 'REPOSITORIES · ' + repos.length));
+    var ul = el('ul', 'qlist');
+    repos.forEach(function (r) {
+      var li = el('li'), b = el('button', 'qitem');
+      b.type = 'button';
+      b.appendChild(el('span', 'qtitle', r.name));
+      b.appendChild(el('span', 'qmeta', r.path));
+      var st = !r.ok ? ["Git couldn't read it", 'red'] : r.n ? [r.n + ' changed file' + (r.n === 1 ? '' : 's'), 'yellow'] : ['No changes', 'grey'];
+      var line = el('span', 'qstat');
+      line.appendChild(el('span', 'qword c-' + st[1], st[0]));
+      if (r.busy) line.appendChild(el('span', 'qwhen', DOT + 'a worker is busy here'));
+      b.appendChild(line);
+      if (r.workers.length) b.appendChild(el('span', 'qprev', r.workers.map(function (w) { return w.n; }).join(', ')));
+      b.addEventListener('click', function () { openReview(r.r); });
+      li.appendChild(b); ul.appendChild(li);
+    });
+    gitList.appendChild(ul);
+  }
+
+  function openReview(r) {
+    if (!rv || rv.r !== r) { msgEl.value = ''; rv = { r: r, d: null, sel: {} }; }
+    gitOpen = r;
+    loadReview();
+    window.scrollTo(0, gitEl.offsetTop);
+  }
+
+  function loadReview() {
+    var my = rv;
+    my.loading = true;
+    if (view === 'git') renderGit();
+    gitApi('op=review&r=' + enc(my.r)).then(function (d) {
+      if (rv !== my) return;
+      my.loading = false;
+      if (d.result !== 'ok') { my.d = null; my.err = d.result === 'unknown' ? 'The laptop no longer knows this repository (Claude Status may have restarted). Go back and pick it again.' : "Couldn't read the repository."; }
+      else {
+        var sel = {};   // a refresh keeps your picks of files that are still exactly as they were
+        if (my.d) d.files.forEach(function (f) { if (my.sel[f.p] && my.d.files.some(function (o) { return o.p === f.p && o.h === f.h; })) sel[f.p] = true; });
+        my.sel = sel; my.d = d; my.err = ''; my.id = newId(); my.sending = false;
+        if (d.job && (!job || job.id !== d.job)) checkJob(d.job, false);
+      }
+      if (view === 'git') renderGit();
+    }, function (e) {
+      if (rv !== my) return;
+      my.loading = false;
+      my.err = e && e.status === 404 ? OLD_LAPTOP : "Couldn't reach the laptop.";
+      if (view === 'git') renderGit();
+    });
+  }
+
+  var KIND = { modified: ['M', 'Modified'], added: ['A', 'Added'], deleted: ['D', 'Deleted'], untracked: ['U', 'Untracked (new)'], renamed: ['R', 'Renamed'], conflict: ['!', 'Conflict'] };
+  function fact(dl, k, v) { dl.appendChild(el('dt', '', k)); dl.appendChild(el('dd', '', v)); }
+  function picked() { return rv && rv.d ? rv.d.files.filter(function (f) { return rv.sel[f.p]; }) : []; }
+
+  function renderReview() {
+    if (!rv || (!rv.d && rv.loading)) { gitBody.appendChild(el('p', 'sched-empty', 'Reading the repository on the laptop…')); return; }
+    if (!rv.d) { gitBody.appendChild(el('p', 'sched-empty', rv.err || '')); return; }
+    var d = rv.d;
+    gitBody.appendChild(el('h2', 'qd-title', d.name));
+    var dl = el('dl', 'qd-facts');
+    fact(dl, 'Repository', d.path);
+    fact(dl, 'Branch', d.branch || '(detached HEAD)');
+    fact(dl, 'Push to', d.remote && d.merge ? d.remote + ' → ' + d.dest : 'No upstream');
+    if (d.url) fact(dl, 'Remote', d.url);
+    gitBody.appendChild(dl);
+    d.block.forEach(function (t) { gitBody.appendChild(el('p', 'git-block', t)); });
+    d.warn.forEach(function (t) { gitBody.appendChild(el('p', 'git-warn', t)); });
+    if (rv.loading) gitBody.appendChild(el('p', 'qd-note', 'Refreshing…'));
+
+    gitBody.appendChild(el('h3', 'qd-h', '1 · CHOOSE FILES'));
+    if (!d.files.length) gitBody.appendChild(el('p', 'qd-text', 'No changes to commit.'));
+    else {
+      var bar = el('div', 'git-selbar');
+      rv.countEl = el('span', 'git-count');
+      var all = el('button', 'usage-btn git-small', 'All'), none = el('button', 'usage-btn git-small', 'None');
+      all.type = none.type = 'button';
+      all.addEventListener('click', function () { d.files.forEach(function (f) { if (!f.cf) rv.sel[f.p] = true; }); renderGit(); });
+      none.addEventListener('click', function () { rv.sel = {}; renderGit(); });
+      bar.appendChild(rv.countEl); bar.appendChild(all); bar.appendChild(none);
+      gitBody.appendChild(bar);
+      var ul = el('ul', 'git-files');
+      d.files.forEach(function (f) { ul.appendChild(fileItem(f)); });
+      gitBody.appendChild(ul);
+    }
+
+    gitBody.appendChild(el('h3', 'qd-h', '2 · YOUR COMMIT MESSAGE'));
+    gitBody.appendChild(msgEl);
+
+    gitBody.appendChild(el('h3', 'qd-h', '3 · COMMANDS THAT WILL RUN'));
+    gitBody.appendChild(el('p', 'qd-note git-first', 'On the laptop, in ' + d.path + ', one at a time, stopping at the first failure. Each argument goes to Git exactly as shown (no shell; quotes only mark where an argument starts and ends).'));
+    rv.cmdEl = el('pre', 'git-cmds');
+    gitBody.appendChild(rv.cmdEl);
+    gitBody.appendChild(el('p', 'qd-note', 'Message given to git commit (on its input, exactly as written):'));
+    rv.msgShow = el('pre', 'git-cmds git-msgshow');
+    gitBody.appendChild(rv.msgShow);
+    rv.probEl = el('p', 'git-problem');
+    gitBody.appendChild(rv.probEl);
+    rv.sendBtn = el('button', 'git-send', 'Send: Commit & Push');
+    rv.sendBtn.type = 'button';
+    rv.sendBtn.addEventListener('click', send);
+    gitBody.appendChild(rv.sendBtn);
+    gitBody.appendChild(el('p', 'qd-note', 'Nothing is staged, committed or pushed until you press Send. Never: add ., force, amend, reset, clean, stash, pull, rebase, merge or skipping hooks.'));
+    updatePreview();
+  }
+
+  function fileItem(f) {
+    var li = el('li', 'git-file'), row = el('div', 'git-frow'), k = KIND[f.kind] || ['?', f.kind];
+    var lab = el('label', 'git-pick'), cb = el('input');
+    cb.type = 'checkbox'; cb.checked = !!rv.sel[f.p]; cb.disabled = !!f.cf;
+    cb.addEventListener('change', function () { if (cb.checked) rv.sel[f.p] = true; else delete rv.sel[f.p]; updatePreview(); });
+    lab.appendChild(cb);
+    lab.appendChild(el('span', 'git-badge k-' + f.kind, k[0]));
+    var txt = el('span', 'git-path', f.p);
+    if (f.o) txt.appendChild(el('span', 'git-orig', ' (from ' + f.o + ')'));
+    lab.appendChild(txt);
+    row.appendChild(lab);
+    var db = el('button', 'usage-btn git-small', 'Diff');
+    db.type = 'button';
+    db.setAttribute('aria-expanded', 'false');
+    row.appendChild(db);
+    li.appendChild(row);
+    li.appendChild(el('span', 'git-tags', k[1] + (f.st && f.un ? ' · staged and unstaged changes: the whole file is committed' : f.st ? ' · already staged' : '') + (f.sub ? ' · submodule' : '')));
+    var box = el('div', 'git-diff');
+    box.hidden = true;
+    li.appendChild(box);
+    db.addEventListener('click', function () { showDiff(f, box, db); });
+    return li;
+  }
+
+  function size(n) { return n < 1024 ? n + ' bytes' : n < 1048576 ? Math.round(n / 1024) + ' KB' : (n / 1048576).toFixed(1) + ' MB'; }
+
+  function showDiff(f, box, btn) {
+    box.hidden = !box.hidden;
+    btn.setAttribute('aria-expanded', String(!box.hidden));
+    if (box.hidden || box.dataset.loaded) return;
+    box.textContent = '';
+    box.appendChild(el('p', 'qd-note', 'Loading the diff…'));
+    var my = rv;
+    gitApi('op=diff&r=' + enc(my.r) + '&p=' + enc(f.p)).then(function (j) {
+      if (rv !== my) return;
+      box.textContent = '';
+      if (j.result !== 'ok') { box.appendChild(el('p', 'qd-note', j.result === 'gone' ? 'This file has no changes any more. Refresh the review.' : "Couldn't load the diff.")); return; }
+      box.dataset.loaded = '1';
+      if (j.h !== f.h) box.appendChild(el('p', 'git-block', 'This file changed after the review was loaded. Refresh before sending.'));
+      j.parts.forEach(function (p) {
+        box.appendChild(el('p', 'git-dh', p.t === 'staged' ? 'STAGED CHANGES' : p.t === 'unstaged' ? 'UNSTAGED CHANGES' : 'NEW FILE · ' + size(p.size || 0)));
+        if (p.err) box.appendChild(el('p', 'git-nopreview', p.err));
+        else if (p.bin) box.appendChild(el('p', 'git-nopreview', 'Binary file: it can’t be previewed here.'));
+        else if (!p.text) box.appendChild(el('p', 'qd-note', p.t === 'new' ? 'Empty file.' : 'No text changes (for example, only the file mode changed).'));
+        else box.appendChild(diffPre(p.text, p.t === 'new'));
+        if (p.trunc) box.appendChild(el('p', 'git-nopreview', 'Not fully previewed: only the first 256 KB is shown. See the rest on the laptop.'));
+      });
+    }, function () { if (rv !== my) return; box.textContent = ''; box.appendChild(el('p', 'qd-note', "Couldn't reach the laptop.")); });
+  }
+
+  function diffPre(text, isNew) {
+    var pre = el('pre', 'git-dpre');
+    text.replace(/\n$/, '').split('\n').forEach(function (line) {
+      var c = isNew ? 'add' : /^(\+\+\+ |--- |diff |index |new file|deleted file|similarity|rename |old mode|new mode)/.test(line) ? 'meta'
+        : line[0] === '+' ? 'add' : line[0] === '-' ? 'del' : line.slice(0, 2) === '@@' ? 'hunk' : 'ctx';
+      pre.appendChild(el('span', 'l-' + c, (isNew ? '+' : '') + line));
+    });
+    return pre;
+  }
+
+  function updatePreview() {
+    if (!rv || !rv.d || !rv.cmdEl || !rv.cmdEl.isConnected) return;
+    var d = rv.d, pk = picked(), msg = msgEl.value;
+    rv.cmdEl.textContent = d.remote && d.branch && d.merge ? gitCommands(d, pk).map(function (c) { return c.map(showArg).join(' '); }).join('\n') : '(nothing can be pushed from this branch)';
+    rv.msgShow.textContent = msg || '(write your message above)';
+    rv.msgShow.classList.toggle('empty', !msg);
+    if (rv.countEl) rv.countEl.textContent = pk.length + ' of ' + d.files.length + ' selected';
+    var prob = gitProblem(d, pk, msg);
+    if (!prob && conn !== 'live') prob = 'Not connected to the laptop.';
+    if (!prob && rv.sending) prob = 'Sending…';
+    rv.probEl.textContent = prob;
+    rv.probEl.hidden = !prob;
+    rv.sendBtn.disabled = !!prob;
+  }
+
+  function send() {
+    if (!rv || !rv.d || rv.sending || conn !== 'live') return;
+    var d = rv.d, pk = picked(), msg = msgEl.value, my = rv;
+    if (gitProblem(d, pk, msg)) return;
+    my.sending = true;
+    updatePreview();
+    remember({ id: my.id, r: d.r });
+    gitApi('', { op: 'commit', id: my.id, r: d.r, fp: d.fp, files: pk.map(function (f) { return { p: f.p, h: f.h }; }), msg: msg, cmds: gitCommands(d, pk) })
+      .then(function (j) {
+        if (j.result === 'job') { my.sending = false; setJob(j); return; }
+        my.sending = false;
+        remember(null);
+        note(j.msg || (j.result === 'unknown' ? 'The laptop no longer knows this repository. Refresh.' : 'Not sent.'));
+        updatePreview();
+      }, function () { checkJob(my.id, true); });   // it may have arrived: find out before another Send is possible
+  }
+
+  // Finds an operation by its id (after a dropped connection or a reload). sent: it's the Send just made.
+  function checkJob(id, sent) {
+    gitApi('op=job&id=' + enc(id)).then(function (j) {
+      if (j.result === 'job') { if (rv && rv.id === id) rv.sending = false; setJob(j); return; }
+      var s = recall();
+      if (s && s.id === id) remember(null);
+      if (sent && rv && rv.id === id) { rv.sending = false; note("The laptop didn't get that Send, so nothing ran. You can send again."); updatePreview(); }
+    }, function () { setTimeout(function () { checkJob(id, sent); }, 3000); });
+  }
+
+  function setJob(j) {
+    var first = !job || job.id !== j.id;
+    job = j;
+    remember({ id: j.id, r: j.r });
+    if (first && view === 'git' && (!gitOpen || gitOpen === j.r)) gitOpen = j.r;
+    clearTimeout(jobTimer);
+    if (j.state === 'running') jobTimer = setTimeout(function () { if (job && job.id === j.id) checkJob(j.id, false); }, 1000);
+    renderOffers();
+    if (view === 'git') renderGit();
+  }
+
+  var OUTCOME = { pushed: ['Commit and push succeeded', 'green'], push_failed: ['Commit succeeded, push failed', 'red'], commit_failed: ['Commit failed', 'red'], stale: ['Not sent: changed since your review', 'orange'], blocked: ['Not sent', 'orange'] };
+  function jobHead(j) {
+    if (j.state === 'running') return ['Running on the laptop…', 'yellow'];
+    if (j.outcome === 'attention') return [j.commit ? 'Commit succeeded; the push needs attention on the laptop' : 'Needs attention on the laptop', 'orange'];
+    return OUTCOME[j.outcome] || ['Finished', 'grey'];
+  }
+  var STEP = { waiting: 'Waiting', running: 'Running', ok: 'Done', failed: 'Failed', skipped: 'Skipped' };
+
+  function renderJob() {
+    var j = job, h = jobHead(j);
+    gitBody.appendChild(el('h2', 'qd-title', j.name + ' · Commit & Push'));
+    var s = el('p', 'qd-status');
+    s.appendChild(el('span', 'qword c-' + h[1], h[0]));
+    gitBody.appendChild(s);
+    if (j.commit) gitBody.appendChild(el('p', 'qd-text git-hash', 'Commit ' + j.commit));
+    if (j.msg) gitBody.appendChild(el('p', 'qd-text', j.msg));
+    if (j.state === 'running' && j.running > 8) gitBody.appendChild(el('p', 'git-warn', 'Still running. If a sign-in, passphrase or signing window opened on the laptop, finish it there.'));
+    var ol = el('ol', 'git-steps');
+    j.steps.forEach(function (st) {
+      var li = el('li', 'git-step s-' + st.st);
+      li.appendChild(el('span', 'git-sst', STEP[st.st] || st.st));
+      li.appendChild(el('code', 'git-scmd', st.c && st.c.length ? st.c.map(showArg).join(' ') : st.l));
+      if (st.out) li.appendChild(el('pre', 'git-out', st.out));
+      ol.appendChild(li);
+    });
+    gitBody.appendChild(ol);
+    if (j.retry && j.push) {
+      gitBody.appendChild(el('h3', 'qd-h', 'RETRY PUSH'));
+      gitBody.appendChild(el('p', 'qd-note git-first', 'Pushes the commit that already exists (no new commit). Command:'));
+      gitBody.appendChild(el('pre', 'git-cmds', j.push.map(showArg).join(' ')));
+      var rb = el('button', 'git-send', 'Retry Push');
+      rb.type = 'button';
+      rb.disabled = jobBusy || conn !== 'live';
+      rb.addEventListener('click', retryPush);
+      gitBody.appendChild(rb);
+    }
+    if (j.state !== 'running') {
+      var done = el('button', 'usage-btn', j.retry ? 'Close (keep the commit unpushed)' : 'Done');
+      done.type = 'button';
+      done.addEventListener('click', closeJob);
+      gitBody.appendChild(done);
+    }
+  }
+
+  function retryPush() {
+    if (!job || !job.retry || jobBusy || conn !== 'live') return;
+    jobBusy = true;
+    var id = job.id;
+    renderGit();
+    gitApi('', { op: 'push', id: id, n: job.n }).then(function (j) {
+      jobBusy = false;
+      if (j.result === 'job') setJob(j); else { note('The laptop no longer has this operation.'); renderGit(); }
+    }, function () { jobBusy = false; checkJob(id, false); });
+  }
+
+  function closeJob() {
+    var r = job.r, committed = !!job.commit;
+    job = null;
+    clearTimeout(jobTimer);
+    remember(null);
+    if (committed) { msgEl.value = ''; rv = null; }
+    renderOffers();
+    openReview(r);
+  }
+
+  gitBack.addEventListener('click', function () { gitOpen = ''; renderGit(); loadRepos(true); });
+  gitRefresh.addEventListener('click', function () {
+    if (gitOpen && job && job.r === gitOpen) checkJob(job.id, false);
+    else if (gitOpen && rv) loadReview();
+    else loadRepos(true);
+  });
+  (function () { var s = recall(); if (s && typeof s.id === 'string') checkJob(s.id, false); })();
+
   // ---------- view switch ----------
   function setView(v, remember) {
-    view = v === 'creatures' || v === 'sched' ? v : 'list';
+    view = v === 'creatures' || v === 'sched' || v === 'git' ? v : 'list';
     viewBtns.forEach(function (b) { b.setAttribute('aria-pressed', String(b.dataset.view === view)); });
     rowsEl.hidden = view !== 'list';
     schedEl.hidden = view !== 'sched';
+    gitEl.hidden = view !== 'git';
+    gitShown = false;
+    if (view === 'git' && !gitOpen && Date.now() - reposAt > 3000) loadRepos(false);
     creaturesEl.hidden = view !== 'creatures';
     petbarEl.hidden = view !== 'creatures';
     if (remember) try { localStorage.setItem(VIEW_KEY, view); } catch (e) { }
