@@ -1154,6 +1154,14 @@ namespace ClaudeStatus
         {
             if (phone == null) return;
             phone.Publish(ordered, CfgBool("showWorkerSummary", false), Board.Summary(ordered), LoadContexts());
+            PublishQueue();
+        }
+
+        // The scheduler's tasks for the phone's Scheduled view (read-only; unchanged data publishes nothing).
+        void PublishQueue()
+        {
+            if (phone == null || queue == null) return;
+            try { phone.PublishQueue(queue.Data, queue.Store.Warning); } catch { }
         }
 
         // Per-session context-window readings (state\context\<id>.json, written by statusline.ps1). Only read
@@ -1430,6 +1438,7 @@ namespace ClaudeStatus
         // Coalesces bursts of scheduler changes into one repaint of the board names (and the Queue view itself).
         void QueueChanged()
         {
+            PublishQueue();   // queue.Data is a fresh snapshot per change (never edited in place), so this is safe on any thread
             if (queueChangePending || !IsHandleCreated) return;
             queueChangePending = true;
             BeginInvoke((MethodInvoker)(() =>

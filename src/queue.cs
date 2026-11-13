@@ -471,7 +471,7 @@ namespace ClaudeStatus
         }
 
         // When a waiting task is due (MinValue: no particular time).
-        static DateTime NextTime(QueueTask t)
+        internal static DateTime NextTime(QueueTask t)
         {
             if (t.NextRetryUtc != DateTime.MinValue) return t.NextRetryUtc;
             if (t.Schedule == "at" && t.Attempts.Count == 0) return t.RunAtUtc;

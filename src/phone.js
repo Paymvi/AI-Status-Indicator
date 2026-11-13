@@ -234,7 +234,22 @@
     return { text: 'Context ' + percentText(p) + (x.o ? ' · old' : ''), p: p, old: !!x.o };
   }
 
-  if (typeof module === 'object' && module.exports) module.exports = { clock: clock, span: span, ago: ago, statusText: statusText, HATS: HATS, BODIES: BODIES, creatureLayers: creatureLayers, countdown: countdown, percentText: percentText, remainingText: remainingText, isAsleep: isAsleep, SLEEP_MS: SLEEP_MS, contextInfo: contextInfo };
+  // ---------- Scheduled prompts (the laptop's Queue, read-only) ----------
+  // Task kinds come from the desktop (QLook.Kind in queue.cs); each one belongs to one section here.
+  var Q_GROUP = { needs_you: 'attn', attention: 'attn', blocked: 'attn', starting: 'run', running: 'run', usage: 'up', waiting: 'up',
+    scheduled: 'up', ready: 'up', draft: 'up', done: 'past', failed: 'past', skipped: 'past', canceled: 'past' };
+  var Q_COLOR = { needs_you: 'red', attention: 'red', blocked: 'red', failed: 'red', starting: 'yellow', running: 'yellow', usage: 'orange',
+    waiting: 'blue', scheduled: 'blue', ready: 'blue', done: 'green' };
+  // Upcoming in the order they will run: ready now, then by time, then waiting on something with no time yet, then drafts.
+  function schedGroups(tasks) {
+    var g = { attn: [], run: [], up: [], past: [] };
+    (tasks || []).forEach(function (t) { (g[Q_GROUP[t.kd]] || g.up).push(t); });
+    var rank = function (t) { return t.kd === 'ready' ? 0 : t.kd === 'draft' ? 3 : t.at ? 1 : 2; };
+    g.up.sort(function (a, b) { return rank(a) - rank(b) || (a.at || 0) - (b.at || 0); });
+    return g;
+  }
+
+  if (typeof module === 'object' && module.exports) module.exports = { clock: clock, span: span, ago: ago, statusText: statusText, HATS: HATS, BODIES: BODIES, creatureLayers: creatureLayers, countdown: countdown, percentText: percentText, remainingText: remainingText, isAsleep: isAsleep, SLEEP_MS: SLEEP_MS, contextInfo: contextInfo, schedGroups: schedGroups };
   if (typeof document === 'undefined') return;
 
   // ---------- connection ----------
@@ -243,7 +258,9 @@
   var $ = function (id) { return document.getElementById(id); };
   var boardEl = $('board'), connEl = $('conn'), summaryEl = $('summary'), rowsEl = $('rows'), noteEl = $('note');
   var bannerEl = $('banner'), bannerTitle = $('banner-title'), bannerWhen = $('banner-when'), bannerWhy = $('banner-why');
-  var creaturesEl = $('creatures'), petsEl = $('pets'), hintEl = $('pet-hint'), viewBtns = [$('view-list'), $('view-creatures')];
+  var creaturesEl = $('creatures'), petsEl = $('pets'), hintEl = $('pet-hint'), viewBtns = [$('view-list'), $('view-creatures'), $('view-sched')];
+  var schedEl = $('sched'), schedInfo = $('sched-info'), schedList = $('sched-list'), schedDetail = $('sched-detail'), schedBody = $('sched-body');
+  var schedRefresh = $('sched-refresh'), schedBack = $('sched-back');
 
   var data = null;          // last board received from the laptop
   var skew = 0;             // laptop clock minus phone clock, so timers match the laptop's
@@ -262,7 +279,7 @@
   // List (default) or Creatures; remembered in this browser only.
   var VIEW_KEY = 'claudeStatus.view';
   var view = 'list';
-  try { if (localStorage.getItem(VIEW_KEY) === 'creatures') view = 'creatures'; } catch (e) { }
+  try { var v0 = localStorage.getItem(VIEW_KEY); if (v0 === 'creatures' || v0 === 'sched') view = v0; } catch (e) { }
 
   // Creatures view options, each remembered in this browser only and off unless turned on: Compact (three
   // columns instead of two; unrelated to the desktop's Compact view) and Show context (a context-window
@@ -305,6 +322,7 @@
   }
 
   function accept(b) {
+    if (schedAsked) { schedAsked = false; note('Schedule is up to date.'); }
     var present = {};
     b.rows.forEach(function (r) { present[r.k + '|' + r.d] = true; });
     Object.keys(dismissed).forEach(function (k) { if (!present[k]) delete dismissed[k]; });
@@ -319,6 +337,7 @@
   }
 
   function failed(e, aborted) {
+    if (schedAsked) { schedAsked = false; note("Couldn't refresh: no answer from the laptop."); }
     fails++;
     if (e && e.status === 421) why = "This address isn't one Claude Status accepts. Open the address shown by phone-setup.ps1.";
     else if (e && e.status >= 500) why = "The laptop is reachable, but Claude Status isn't answering. It may not be running, or the phone dashboard is turned off.";
@@ -395,7 +414,12 @@
       updateWhen();
     }
 
-    if (full && view === 'creatures') {
+    if (full && view === 'sched') {
+      rowsEl.textContent = '';
+      rowEls = [];
+      clearPets();
+      renderSched(false);
+    } else if (full && view === 'creatures') {
       rowsEl.textContent = '';
       rowEls = [];
       renderPets(rows);
@@ -602,13 +626,151 @@
       e.rest.textContent = s[1].split(DOT).map(function (p) { return p.replace(/ /g, ' '); }).join(DOT);
       if (e.x) e.x.disabled = conn !== 'live' || !!pending[e.r.k];
     });
+    if (view === 'sched') renderSched(true);
   }
+
+  // ---------- Scheduled prompts ----------
+  // Read-only: the only request this view makes is the same GET api/board as the rest of the page, so
+  // opening or refreshing it can never start, change or resubmit a task.
+  var schedOpen = '', schedPastOpen = false, schedSig = '', schedTimes = [], schedAsked = false, schedScroll = 0;
+  var tzName = '';
+  try { tzName = Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch (e) { }
+
+  function fullTime(ms) {
+    return new Date(ms).toLocaleString([], { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short' });
+  }
+  function rel(ms, now) { return ms > now ? 'in ' + countdown(ms - now) : ago(now - ms); }
+  function whenAt(ms, now) { return resetClock(ms, now) + ' (' + rel(ms, now) + ')'; }
+
+  // The one-line "when" of a task in the list, by section.
+  function schedWhen(t, now) {
+    var g = Q_GROUP[t.kd] || 'up';
+    if (g === 'past') return t.fi ? whenAt(t.fi, now) : '';
+    if (g === 'attn' && t.why) return t.why;
+    if (g === 'run' || g === 'attn') return t.sa ? 'started ' + whenAt(t.sa, now) : '';
+    if (t.kd === 'draft') return "won't run until it's queued on the laptop";
+    if (t.kd === 'ready') return 'next in line';
+    if (t.at) return (t.at <= now ? 'due ' : 'runs ') + whenAt(t.at, now);
+    if (t.sc === 'after') return t.af ? 'after “' + t.af + '” succeeds' : 'after its predecessor succeeds';
+    if (t.sc === 'usage') return 'when usage is available again';
+    return '';
+  }
+
+  function schedStatus(t, paused) {
+    var up = (Q_GROUP[t.kd] || 'up') === 'up' && t.kd !== 'draft';
+    return { text: paused && up ? 'Paused · ' + t.lb : t.lb, color: paused && up ? 'grey' : Q_COLOR[t.kd] || 'grey' };
+  }
+
+  function preview(p) { var l = (p || '').split('\n').map(function (s) { return s.trim(); }).filter(Boolean)[0] || ''; return l.length > 140 ? l.slice(0, 139) + '…' : l; }
+
+  function renderSched(timesOnly) {
+    var q = data && data.queue, now = data ? boardNow() : Date.now();
+    schedRefresh.disabled = schedAsked;
+    if (timesOnly) { schedTimes.forEach(function (x) { x.el.textContent = x.fn(now); }); return; }
+    var sig = JSON.stringify(q || null) + '|' + !!data + '|' + conn + '|' + schedPastOpen + '|' + schedOpen;
+    if (sig === schedSig) return;
+    schedSig = sig;
+    schedTimes = [];
+    schedInfo.textContent = 'Times in ' + (tzName ? tzName.replace(/_/g, ' ') : "this phone's time zone");
+    schedList.textContent = '';
+    schedBody.textContent = '';
+    schedList.hidden = !!schedOpen;
+    schedDetail.hidden = !schedOpen;
+    var empty = function (text) { var p = el('p', 'sched-empty', text); schedList.appendChild(p); };
+    if (!data) { if (schedOpen) schedBody.appendChild(el('p', 'sched-empty', 'Connecting to the laptop…')); empty(conn === 'offline' ? "Can't reach Claude Status on the laptop" : 'Connecting to the laptop…'); return; }
+    if (!q) { empty("The laptop didn't send its schedule. Restart Claude Status on the laptop after updating it."); if (schedOpen) schedBody.appendChild(el('p', 'sched-empty', 'Task details are unavailable.')); return; }
+    if (schedOpen) { renderDetail(q, now); return; }
+    if (q.warn) schedList.appendChild(el('p', 'sched-warn', q.warn));
+    if (q.paused) schedList.appendChild(el('p', 'sched-warn', 'The queue is paused on the laptop: nothing new starts until you resume it there.'));
+    var g = schedGroups(q.tasks);
+    if (!q.tasks.length) { empty('Nothing scheduled. Schedule prompts from the Queue view on the laptop.'); return; }
+    [['attn', 'NEEDS ATTENTION'], ['run', 'RUNNING'], ['up', 'UPCOMING']].forEach(function (s) {
+      if (!g[s[0]].length) return;
+      schedList.appendChild(el('h2', 'sched-h', s[1] + ' · ' + g[s[0]].length));
+      var ul = el('ul', 'qlist');
+      g[s[0]].forEach(function (t) { ul.appendChild(schedItem(t, q.paused)); });
+      schedList.appendChild(ul);
+    });
+    if (!g.up.length && !g.run.length && !g.attn.length) empty('Nothing upcoming.');
+    if (g.past.length) {
+      var ph = el('button', 'sched-h sched-past', 'PAST · ' + g.past.length + (schedPastOpen ? '  ▾' : '  ▸ show'));
+      ph.type = 'button';
+      ph.setAttribute('aria-expanded', String(schedPastOpen));
+      ph.addEventListener('click', function () { schedPastOpen = !schedPastOpen; renderSched(false); });
+      schedList.appendChild(ph);
+      if (schedPastOpen) {
+        var pl = el('ul', 'qlist past');
+        g.past.forEach(function (t) { pl.appendChild(schedItem(t, false)); });
+        schedList.appendChild(pl);
+      }
+    }
+  }
+
+  function schedItem(t, paused) {
+    var li = el('li'), b = el('button', 'qitem');
+    b.type = 'button';
+    var st = schedStatus(t, paused);
+    b.appendChild(el('span', 'qtitle', t.ti || preview(t.p) || 'Untitled'));
+    b.appendChild(el('span', 'qmeta', (t.pj || 'Unknown project') + DOT + 'Claude Code'));
+    var pv = preview(t.p);
+    if (pv) b.appendChild(el('span', 'qprev', pv));
+    var line = el('span', 'qstat'), word = el('span', 'qword c-' + st.color, st.text), when = el('span', 'qwhen');
+    line.appendChild(word); line.appendChild(when);
+    b.appendChild(line);
+    schedTimes.push({ el: when, fn: function (now) { var w = schedWhen(t, now); return w ? DOT + w : ''; } });
+    b.addEventListener('click', function () { schedScroll = window.scrollY; schedOpen = t.k; renderSched(false); window.scrollTo(0, schedEl.offsetTop); });
+    li.appendChild(b);
+    return li;
+  }
+
+  var SCHED_TEXT = { asap: 'As soon as possible', at: 'At a set time', after: 'After another task succeeds', usage: 'When usage is available again' };
+  function renderDetail(q, now) {
+    var t = q.tasks.filter(function (x) { return x.k === schedOpen; })[0];
+    if (!t) { schedBody.appendChild(el('p', 'sched-empty', "This task is no longer on the laptop's schedule. It may have been removed, or cleared from history.")); return; }
+    var st = schedStatus(t, q.paused);
+    schedBody.appendChild(el('h2', 'qd-title', t.ti || 'Untitled'));
+    var s = el('p', 'qd-status'); s.appendChild(el('span', 'qword c-' + st.color, st.text)); schedBody.appendChild(s);
+    var dl = el('dl', 'qd-facts');
+    var fact = function (k, v, live) {
+      if (!v && !live) return;
+      dl.appendChild(el('dt', '', k));
+      var dd = el('dd', '', live ? live(now) : v);
+      if (live) schedTimes.push({ el: dd, fn: live });
+      dl.appendChild(dd);
+    };
+    fact('Project', t.pj || 'Unknown');
+    fact('Runs with', 'Claude Code' + (t.md ? ' (' + t.md + ')' : '') + DOT + (t.rn === 'headless' ? 'in the background' : "in the project's VS Code window"));
+    fact('Schedule', (SCHED_TEXT[t.sc] || t.sc) + (t.sc === 'after' && t.af ? ': “' + t.af + '”' : ''));
+    if (t.sc === 'at' && t.ra) fact('Scheduled for', null, function () { return fullTime(t.ra); });
+    if (t.at && (Q_GROUP[t.kd] || 'up') === 'up') fact('Next run', null, function (n) { return fullTime(t.at) + ' (' + rel(t.at, n) + ')'; });
+    if (t.sc === 'at') fact('If missed', t.im === 'skip' ? 'Skip it' : 'Run when possible');
+    if (t.sa) fact('Last started', null, function (n) { return fullTime(t.sa) + ' (' + rel(t.sa, n) + ')'; });
+    if (t.fi) fact('Finished', null, function (n) { return fullTime(t.fi) + ' (' + rel(t.fi, n) + ')'; });
+    if (t.n) fact('Runs so far', String(t.n));
+    if (t.cr) fact('Created', null, function () { return fullTime(t.cr); });
+    schedBody.appendChild(dl);
+    if (t.why) { schedBody.appendChild(el('h3', 'qd-h', 'Status note')); schedBody.appendChild(el('p', 'qd-text', t.why)); }
+    if (t.sum) { schedBody.appendChild(el('h3', 'qd-h', 'Result summary')); schedBody.appendChild(el('p', 'qd-text', t.sum)); }
+    schedBody.appendChild(el('h3', 'qd-h', 'Prompt'));
+    schedBody.appendChild(el('div', 'qd-prompt', t.p || '(empty)'));
+    if (t.pc) schedBody.appendChild(el('p', 'qd-note', 'Shortened: the full prompt is on the laptop.'));
+    schedBody.appendChild(el('p', 'qd-note', 'View only. Change or run tasks from the Queue view on the laptop.'));
+  }
+
+  schedBack.addEventListener('click', function () { schedOpen = ''; renderSched(false); window.scrollTo(0, schedScroll); });
+  schedRefresh.addEventListener('click', function () {
+    if (schedAsked) return;
+    schedAsked = true;
+    schedRefresh.disabled = true;
+    poll(false);   // the same read-only GET the page always makes; never an action
+  });
 
   // ---------- view switch ----------
   function setView(v, remember) {
-    view = v === 'creatures' ? 'creatures' : 'list';
+    view = v === 'creatures' || v === 'sched' ? v : 'list';
     viewBtns.forEach(function (b) { b.setAttribute('aria-pressed', String(b.dataset.view === view)); });
     rowsEl.hidden = view !== 'list';
+    schedEl.hidden = view !== 'sched';
     creaturesEl.hidden = view !== 'creatures';
     petbarEl.hidden = view !== 'creatures';
     if (remember) try { localStorage.setItem(VIEW_KEY, view); } catch (e) { }

@@ -142,10 +142,11 @@ h1 { flex: 1 1 auto; margin: 0; font-size: 13.5px; font-weight: 700; color: var(
   -webkit-tap-highlight-color: transparent; touch-action: manipulation;
 }
 .seg:first-child { border-radius: 5px 0 0 5px; }
-.seg:last-child { border-radius: 0 5px 5px 0; border-left: 0; }
+.seg:last-child { border-radius: 0 5px 5px 0; }
+.seg + .seg { border-left: 0; }
 .seg[aria-pressed="true"] { background: #353535; color: #fff; }
 .seg:focus-visible { outline: 2px solid var(--name); outline-offset: 1px; position: relative; }
-.rows[hidden], .creatures[hidden], .hint[hidden] { display: none; }
+.rows[hidden], .creatures[hidden], .hint[hidden], .sched[hidden], .sched-detail[hidden], #sched-list[hidden] { display: none; }
 
 /* ---------- Claude Usage (account-wide; the same figures as the desktop's usage strip) ---------- */
 .usage { border-bottom: 1px solid var(--line); }
@@ -362,3 +363,56 @@ html.bg .px *, html.bg .sprite, .board.stale .px * { animation-play-state: pause
   .s-WORKING .px .legs-b, .s-WORKING .px .e-blink, .s-NEEDS_YOU .px .e-blink, .s-NEEDS_YOU .px .arm-r, .card.celebrate .px .fx-spark { display: none !important; }
   .asleep .px .e-blink { display: inline !important; }
 }
+
+/* ---------- Scheduled prompts (the laptop's Queue, read-only) ---------- */
+@media (max-width: 360px) { .seg { padding: 0 11px; } }
+.sched { padding: 0 0 10px; }
+.sched-bar { display: flex; align-items: center; gap: 10px; padding: 0 12px 0 14px; }
+.sched-bar .usage-btn { margin: 8px 0 0; flex: none; }
+.sched-info { flex: 1 1 auto; min-width: 0; padding-top: 8px; font-size: 12.5px; color: var(--muted); overflow-wrap: anywhere; }
+.sched-h {
+  display: block; width: 100%; margin: 12px 0 0; padding: 4px 14px;
+  border: 0; background: transparent; text-align: left;
+  font: inherit; font-size: 12.5px; font-weight: 700; color: var(--muted); letter-spacing: .01em;
+}
+button.sched-h { min-height: 40px; cursor: pointer; touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
+button.sched-h:focus-visible { outline: 2px solid var(--muted); outline-offset: -3px; }
+.sched-empty, .sched-warn { margin: 12px 14px 0; font-size: 14.5px; line-height: 1.4; color: var(--muted); }
+.sched-warn { padding: 8px 10px; border-left: 3px solid var(--orange); background: #262626; color: var(--name); }
+.qlist { list-style: none; margin: 4px 8px 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.qitem {
+  display: flex; flex-direction: column; gap: 3px; width: 100%; min-height: 48px; margin: 0; padding: 9px 12px;
+  background: #161616; border: 1px solid #2e2e2e; border-radius: 4px; color: inherit;
+  font: inherit; text-align: left; cursor: pointer;
+  -webkit-tap-highlight-color: transparent; touch-action: manipulation;
+}
+.qitem:active { background: var(--hover); }
+.qitem:focus-visible { outline: 2px solid var(--name); outline-offset: -2px; }
+.qtitle { font-size: 15.5px; font-weight: 600; line-height: 1.3; color: var(--name); overflow-wrap: anywhere; }
+.qmeta, .qwhen { font-size: 13.5px; color: var(--muted); }
+.qmeta { overflow-wrap: anywhere; }
+.qprev {
+  font-size: 14px; line-height: 1.35; color: #c8c8c8; overflow: hidden; overflow-wrap: anywhere;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2;
+}
+.qstat { font-size: 13.5px; line-height: 1.35; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.qword { font-weight: 700; }
+.c-red { color: var(--red); } .c-yellow { color: var(--yellow); } .c-green { color: var(--green); }
+.c-blue { color: var(--blue); } .c-orange { color: var(--orange); } .c-grey { color: var(--muted); }
+.qlist.past .qitem { background: transparent; }
+
+.sched-detail { padding: 8px 14px 0; }
+.sched-detail > .usage-btn { margin: 0; }
+.qd-title { margin: 14px 0 4px; font-size: 18px; line-height: 1.3; overflow-wrap: anywhere; }
+.qd-status { margin: 0 0 10px; font-size: 14.5px; }
+.qd-facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 6px 12px; margin: 0; font-size: 14px; line-height: 1.35; }
+.qd-facts dt { color: var(--muted); }
+.qd-facts dd { margin: 0; overflow-wrap: anywhere; }
+.qd-h { margin: 16px 0 6px; font-size: 12.5px; font-weight: 700; color: var(--muted); letter-spacing: .01em; }
+.qd-text { margin: 0; font-size: 14.5px; line-height: 1.4; white-space: pre-wrap; overflow-wrap: anywhere; }
+.qd-prompt {
+  padding: 10px 12px; background: #161616; border: 1px solid #2e2e2e; border-radius: 4px;
+  font-size: 14.5px; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word;
+}
+.qd-note { margin: 10px 0 0; font-size: 12.5px; color: var(--muted); }
+.board.stale .sched-list, .board.stale #sched-list, .board.stale .sched-detail { opacity: .55; }

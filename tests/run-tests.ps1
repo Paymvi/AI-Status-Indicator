@@ -644,8 +644,29 @@ Check 'error type is the desktop short form (authentication_failed -> auth)' ((R
 Check 'only DONE rows carry a dismiss token' (((Row $bd 'Website').d -match '^[A-Za-z0-9_-]{22}$') -and @($bd.rows | Where-Object { $_.s -ne 'DONE' -and $_.d -ne '' }).Count -eq 0)
 $rawJson = (Req $pp 'GET' '/api/board').Body
 $fields = ($bd.rows | ForEach-Object { ($_.PSObject.Properties.Name) -join ',' } | Sort-Object -Unique) -join ';'
-Check 'privacy: rows contain only k,n,s,t,e,d,c,x; board only v,now,summary,text,rows,usage' ($fields -eq 'k,n,s,t,e,d,c,x' -and (($bd.PSObject.Properties.Name) -join ',') -eq 'v,now,summary,text,rows,usage') "$fields"
+Check 'privacy: rows contain only k,n,s,t,e,d,c,x; board only v,now,summary,text,rows,usage,queue' ($fields -eq 'k,n,s,t,e,d,c,x' -and (($bd.PSObject.Properties.Name) -join ',') -eq 'v,now,summary,text,rows,usage,queue') "$fields"
 Check 'privacy: no session IDs, folder names, process IDs or paths in the phone data' ($rawJson -notmatch '"(ny|er|b1|b2|web)"' -and $rawJson -notmatch 'Toah_Nipi|Users|claude_pid|\\\\' -and $rawJson -notmatch "\b$PID\b")
+
+# --- Scheduled prompts: the desktop scheduler, read-only, on the same board ---
+Check 'scheduled: empty schedule is sent as an empty list (not missing)' ($bd.queue -and @($bd.queue.tasks).Count -eq 0 -and $bd.queue.paused -eq $false)
+$qproj = Join-Path $tmp 'Phone Sched Proj'; $null = New-Item -ItemType Directory -Force $qproj
+$mkq = { param($title, $min) $t = [ClaudeStatus.TaskEditor]::NewTask(); $t.Title = $title; $t.Project = $qproj; $t.Prompt = "Line one of $title`nSecond line, never run"; $t.Schedule = 'at'; $t.RunAtUtc = [DateTime]::UtcNow.AddMinutes($min); $t.State = 'Scheduled'; $t }
+$late = & $mkq 'Later task' 120; $soon = & $mkq 'Sooner task' 60
+$e1 = $f.Queue.Save($late, 0); $e2 = $f.Queue.Save($soon, 0)
+[System.Windows.Forms.Application]::DoEvents()
+$bd = Api $pp; $qt = @($bd.queue.tasks); $raw = (Req $pp 'GET' '/api/board').Body
+$ls = $qt | Where-Object { $_.ti -eq 'Sooner task' }
+Check 'scheduled: tasks saved on the desktop appear on the phone with project name, prompt, state and run time' (-not $e1 -and -not $e2 -and $qt.Count -eq 2 -and $ls.pj -eq 'Phone Sched Proj' -and $ls.p -match 'Second line' -and $ls.kd -eq 'scheduled' -and [Math]::Abs([long]$ls.at - [long]($soon.RunAtUtc - $epoch).TotalMilliseconds) -lt 1000) "$e1 $e2 $($qt.Count) $($ls | ConvertTo-Json -Compress)"
+Check 'scheduled: tokens, not task IDs; folder name, not path' ($ls.k -match '^[A-Za-z0-9_-]{22}$' -and $raw -notmatch $soon.Id -and $raw -notmatch [regex]::Escape($tmp.Replace('\', '\\')) -and $raw -notmatch 'Users')
+$v1 = $bd.v; $null = (Req $pp 'GET' '/api/board'); $null = (Req $pp 'GET' '/api/board')
+Check 'scheduled: reading the board never changes or starts a task' ((Api $pp).v -eq $v1 -and ($f.Queue.Data.Tasks | Where-Object { $_.State -ne 'Scheduled' -or $_.Attempts.Count }).Count -eq 0)
+$f.Queue.Cancel($soon.Id); [System.Windows.Forms.Application]::DoEvents()
+$bd = Api $pp; $ls = @($bd.queue.tasks) | Where-Object { $_.ti -eq 'Sooner task' }
+Check 'scheduled: a status change on the desktop reaches the phone (canceled -> past, with finish time)' ($bd.v -gt $v1 -and $ls.kd -eq 'canceled' -and [long]$ls.fi -gt 0) "$($ls.kd)"
+$f.Queue.SetPaused($true); [System.Windows.Forms.Application]::DoEvents()
+Check 'scheduled: pausing the queue is reflected' ((Api $pp).queue.paused -eq $true)
+$f.Queue.SetPaused($false); $f.Queue.Remove($soon.Id); $f.Queue.Remove($late.Id); [System.Windows.Forms.Application]::DoEvents()
+Check 'scheduled: removed tasks disappear from the phone' (@((Api $pp).queue.tasks).Count -eq 0)
 $f.SetSetting('workerSort', 'recent')
 $bd = Api $pp
 Check 'ordering setting (Most recent) applies to the phone too' ((($bd.rows | ForEach-Object { $_.n }) -join '|') -eq (($f.Workers | ForEach-Object { $_.DisplayName }) -join '|'))
@@ -1789,6 +1810,21 @@ else {
                     'wake'                { Put $root 'ps1' 'WORKING' 'Sleepy_Project' 0 298 $PID $me; $f.ReloadNow() }    # a new prompt
                     'ctx-update'          { PutCtx (Join-Path $root 'state\context') 'pb2' 18; PutCtx (Join-Path $root 'state\context') 'ps2' 64; $f.PublishContextNow() }
                     'pets-change'         { Put $root 'pb1' 'NEEDS_YOU' 'Toah_Nipi_Booking_Software' 1 30 $PID $me; Put $root 'px1' 'DONE' 'Side_Project_1' 0 61; $f.ReloadNow() }
+                    'sched-add'           {
+                        # safe test tasks: hours in the future (never due during the test), never run
+                        $sp = Join-Path $tmp 'Website_Redesign'; $null = New-Item -ItemType Directory -Force $sp
+                        $nt = { param($title, $prompt) $t = [ClaudeStatus.TaskEditor]::NewTask(); $t.Title = $title; $t.Project = $sp; $t.Prompt = $prompt; $t }
+                        $a = & $nt 'Later review' 'Review the open pull requests.'; $a.Schedule = 'at'; $a.RunAtUtc = [DateTime]::UtcNow.AddHours(5); $a.State = 'Scheduled'
+                        $long = 'Refactor the booking flow. ' + ('Keep every existing test passing and explain each change in the summary_with_a_very_long_unbroken_identifier_that_must_wrap_somewhere ' * 12)
+                        $b = & $nt 'Sooner refactor' $long; $b.Schedule = 'at'; $b.RunAtUtc = [DateTime]::UtcNow.AddHours(2); $b.State = 'Scheduled'
+                        $null = $f.Queue.Save($a, 0); $null = $f.Queue.Save($b, 0)
+                        $c2 = & $nt 'Follow-up docs' 'Update the README.'; $c2.Schedule = 'after'; $c2.After = $b.Id; $c2.State = 'Scheduled'; $null = $f.Queue.Save($c2, 0)
+                        $d2 = & $nt 'Idea draft' 'Maybe later.'; $d2.State = 'Draft'; $null = $f.Queue.Save($d2, 0)
+                        $script:schedIds = @{ later = $a.Id; sooner = $b.Id }
+                    }
+                    'sched-cancel'        { $f.Queue.Cancel($script:schedIds.sooner) }
+                    'sched-remove'        { $null = $f.Queue.Remove($script:schedIds.later) }
+                    'sched-clear'         { foreach ($t in @($f.Queue.Data.Tasks)) { $null = $f.Queue.Remove($t.Id) } }
                     'focus-log*'          { [IO.File]::WriteAllText((Join-Path $cdir 'focus-log.txt'), ($script:browserFocus -join ',')) }
                     'focus-clear*'        { $script:browserFocus.Clear() }
                     'check-pet-dismiss'   { Start-Sleep -Milliseconds 200; $script:petDismissedFile = -not (Test-Path (SessFile $root 'pd1')) -and (Test-Path (SessFile $root 'pd2')); $f.ReloadNow() }

@@ -19,7 +19,8 @@
 // a creature look number, that session's context-window percentage (and whether that reading is older than
 // its latest activity), and opaque tokens. No session IDs, process IDs, folder paths or window data.
 // The board also carries the account-wide Claude Usage figures (titles, percentages, reset times, status
-// text); never account IDs, credentials or file contents.
+// text); never account IDs, credentials or file contents. And the prompt scheduler's tasks, read-only
+// (title, prompt text, project folder name, state, times; see PublishQueue): the phone can't change or run them.
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -252,6 +253,8 @@ namespace ClaudeStatus
         FocusResult lastFocus;
         Dictionary<string, object> usageData;
         string usageSig = "";
+        Dictionary<string, object> queueData;   // null until the indicator publishes the scheduler
+        string queueSig = "";
         DateTime lastUsageRefreshUtc = DateTime.MinValue;
 
         // Asks the indicator to re-read Claude Usage now (null = not available).
@@ -363,6 +366,48 @@ namespace ClaudeStatus
                 Monitor.PulseAll(gate);
             }
         }
+
+        // Called by the indicator when the prompt scheduler changes (read-only: the phone never edits or runs tasks).
+        // Display data only: titles, prompts, the project folder's name (not its path), states and times.
+        public const int QueuePromptMax = 20000, QueuePastMax = 30;
+        public void PublishQueue(QueueData d, string warning)
+        {
+            var tasks = new List<object>();
+            var past = new List<QueueTask>();
+            foreach (var t in d.Tasks) if (QState.Finished(t.State)) past.Add(t); else tasks.Add(QueueRow(t, d));
+            past.Sort((a, b) => b.FinishedUtc.CompareTo(a.FinishedUtc));
+            for (int i = 0; i < past.Count && i < QueuePastMax; i++) tasks.Add(QueueRow(past[i], d));
+            var q = new Dictionary<string, object> { { "paused", d.Paused }, { "warn", warning ?? "" }, { "tasks", tasks } };
+            string sig = new JavaScriptSerializer { MaxJsonLength = int.MaxValue }.Serialize(q);
+            lock (gate)
+            {
+                if (sig == queueSig) return;
+                queueData = q; queueSig = sig;
+                if (!published) return;
+                version++;
+                Monitor.PulseAll(gate);
+            }
+        }
+
+        Dictionary<string, object> QueueRow(QueueTask t, QueueData d)
+        {
+            string kind = QLook.Kind(t), prompt = t.Prompt ?? "", project = "";
+            try { project = Path.GetFileName((t.Project ?? "").TrimEnd('\\', '/')); } catch { }
+            var a = t.Attempts.Count > 0 ? t.Attempts[t.Attempts.Count - 1] : null;
+            var pre = t.Schedule == "after" ? d.Find(t.After) : null;
+            return new Dictionary<string, object>
+            {
+                { "k", Token("q|" + t.Id) }, { "ti", t.Title }, { "pj", project },
+                { "p", prompt.Length > QueuePromptMax ? prompt.Substring(0, QueuePromptMax) : prompt }, { "pc", prompt.Length > QueuePromptMax },
+                { "kd", kind }, { "lb", QLook.Label(kind) }, { "sc", t.Schedule },
+                { "at", MsOr0(QueueView.NextTime(t)) }, { "ra", MsOr0(t.RunAtUtc) }, { "cr", MsOr0(t.CreatedUtc) },
+                { "sa", a == null ? 0 : MsOr0(a.StartedUtc) }, { "fi", MsOr0(t.FinishedUtc) },
+                { "why", t.Reason ?? "" }, { "sum", t.Summary ?? "" }, { "n", t.Attempts.Count },
+                { "rn", t.Runner }, { "md", t.Model ?? "" }, { "pm", t.PermissionMode }, { "af", pre == null ? "" : pre.Title }, { "im", t.IfMissed },
+            };
+        }
+
+        static long MsOr0(DateTime utc) { return utc == DateTime.MinValue ? 0 : Ms(utc.Kind == DateTimeKind.Local ? utc.ToUniversalTime() : utc); }
 
         // Each worker keeps its creature for as long as this process runs (also after a dismissal, so a worker
         // that comes back looks the same). A new worker starts from a look picked by its token and takes the
@@ -555,8 +600,8 @@ namespace ClaudeStatus
             var list = new List<object>();
             foreach (var r in rows)
                 list.Add(new Dictionary<string, object> { { "k", r.Key }, { "n", r.Name }, { "s", r.State }, { "t", r.Since }, { "e", r.Err }, { "d", r.Occ }, { "c", r.Look }, { "x", r.Ctx } });
-            var o = new Dictionary<string, object> { { "v", version }, { "now", Ms(DateTime.UtcNow) }, { "summary", summaryOn }, { "text", summaryOn ? summaryText : "" }, { "rows", list }, { "usage", usageData } };
-            return new JavaScriptSerializer().Serialize(o);
+            var o = new Dictionary<string, object> { { "v", version }, { "now", Ms(DateTime.UtcNow) }, { "summary", summaryOn }, { "text", summaryOn ? summaryText : "" }, { "rows", list }, { "usage", usageData }, { "queue", queueData } };
+            return new JavaScriptSerializer { MaxJsonLength = int.MaxValue }.Serialize(o);
         }
 
         // Cross-site protection for the action endpoints: a page on another site can't send these (JSON + a

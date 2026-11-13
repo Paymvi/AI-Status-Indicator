@@ -586,6 +586,65 @@ try {
   const petsEmpty = await waitFor(`${connText} === 'LIVE' && /No Claude workers/.test(document.getElementById('pets').textContent) && !!document.querySelector('#pets .placeholder.sleep svg')`, 8000);
   check('Creatures view, empty board: one sleeping creature and "No Claude workers"', petsEmpty);
   await shot('creatures-empty');
+
+  // ---------- Scheduled prompts (read-only view of the laptop's Queue) ----------
+  await phone(320, 700);
+  await c.send('Page.navigate', { url: base });
+  await waitFor(`${connText} === 'LIVE'`, 8000);
+  await tap('#view-sched');
+  const schedEmpty = await waitFor(`/Nothing scheduled/.test(document.getElementById('sched-list').textContent)`, 5000);
+  check('Scheduled view, empty schedule: says nothing is scheduled', schedEmpty, await ev(`document.getElementById('sched-list').textContent`));
+  await ev(`window.__acts = 0; (() => { const o = window.fetch; window.fetch = function (u, opt) { if (opt && opt.method && opt.method !== 'GET') window.__acts++; return o.apply(this, arguments); }; })(); true`);
+  await ask('sched-add');
+  const titles = `[...document.querySelectorAll('#sched-list .qtitle')].map(e => e.textContent)`;
+  const schedShown = await waitFor(`${titles}.length === 4`, 25000);
+  const order = await ev(`${titles}.join('|')`);
+  check('Scheduled view: tasks scheduled on the desktop appear by themselves, upcoming in run order', schedShown && order === 'Sooner refactor|Later review|Follow-up docs|Idea draft', order);
+  const first = await ev(`(() => { const b = document.querySelector('#sched-list .qitem'); return { meta: b.querySelector('.qmeta').textContent, word: b.querySelector('.qword').textContent, when: b.querySelector('.qwhen').textContent, prev: b.querySelector('.qprev').textContent }; })()`);
+  check('Scheduled view: card shows project, agent, prompt preview, status and local run time', first.meta === 'Website_Redesign · Claude Code' && first.word === 'Scheduled' && /runs (today|tomorrow) .*\(in 1h 5\dm\)/.test(first.when) && /^Refactor the booking flow/.test(first.prev), JSON.stringify(first));
+  const layout = await ev(`({ sw: document.documentElement.scrollWidth, w: innerWidth, minTap: Math.min(...[...document.querySelectorAll('#sched-list .qitem, #view-sched, #sched-refresh')].map(e => e.getBoundingClientRect().height)), segs: document.querySelector('.viewbar').scrollWidth <= document.querySelector('.viewbar').clientWidth, tz: document.getElementById('sched-info').textContent })`);
+  check('Scheduled view at 320 px: no horizontal scroll, tap targets >= 36 px, view switch fits, time zone named', layout.sw <= layout.w && layout.minTap >= 36 && layout.segs && /^Times in /.test(layout.tz), JSON.stringify(layout));
+  await shot('sched-320');
+  await tap('#sched-list .qitem');
+  const detail = await waitFor(`!document.getElementById('sched-detail').hidden && /summary_with_a_very_long/.test(document.querySelector('.qd-prompt')?.textContent || '')`, 3000);
+  const wrap = await ev(`(() => { const p = document.querySelector('.qd-prompt'); return { fits: p.scrollWidth <= p.clientWidth + 1, sw: document.documentElement.scrollWidth, w: innerWidth, facts: document.querySelector('.qd-facts').textContent }; })()`);
+  check('Scheduled details: full prompt wraps (no horizontal scroll) with schedule facts', detail && wrap.fits && wrap.sw <= wrap.w && /Scheduled for/.test(wrap.facts) && /Next run/.test(wrap.facts) && /If missed/.test(wrap.facts), JSON.stringify(wrap));
+  await shot('sched-detail-320');
+  await ask('sched-cancel');
+  const canceled = await waitFor(`document.querySelector('.qd-status')?.textContent === 'Canceled'`, 25000);
+  check('Scheduled details: a status change on the desktop shows up while open', canceled, await ev(`document.querySelector('.qd-status')?.textContent`));
+  await tap('#sched-back');
+  await waitFor(`/PAST · 1/.test(document.getElementById('sched-list').textContent)`, 3000);
+  const past = await ev(`({ up: ${titles}.join('|'), past: document.querySelector('.sched-past')?.textContent })`);
+  check('Scheduled view: finished tasks move to a collapsed Past section', !/Sooner refactor/.test(past.up) && /PAST · 1/.test(past.past || ''), JSON.stringify(past));
+  await sleep(2000);   // let the desktop's follow-on changes (e.g. the dependent task) settle before tapping
+  await tap('.sched-past');
+  const pastOpen = await waitFor(`${titles}.includes('Sooner refactor')`, 2000);
+  check('Scheduled view: Past expands on tap', pastOpen, await ev(`document.getElementById('sched').textContent.slice(0, 300)`));
+  await tap('#sched-refresh');
+  const schedRefreshed = await waitFor(`/up to date/.test(document.getElementById('note').textContent)`, 5000);
+  check('Scheduled view: Refresh re-reads the schedule', schedRefreshed, await ev(`document.getElementById('note').textContent`));
+  await ev(`[...document.querySelectorAll('#sched-list .qitem')].find(b => b.querySelector('.qtitle').textContent === 'Later review').setAttribute('data-t', 'later'); true`);
+  await tap('#sched-list .qitem[data-t="later"]');
+  await waitFor(`!document.getElementById('sched-detail').hidden`, 2000);
+  await ask('sched-remove');
+  const schedGone = await waitFor(`/no longer on the laptop's schedule/.test(document.getElementById('sched-body').textContent)`, 25000);
+  check('Scheduled details: a task removed on the desktop says it is no longer available', schedGone, await ev(`document.getElementById('sched-body').textContent`));
+  await tap('#sched-back');
+  check('Scheduled view never sent an action request (view / refresh / details are read-only)', (await ev('window.__acts')) === 0, await ev('window.__acts'));
+  mode = 'fail';
+  await c.send('Fetch.enable', { patterns: [{ urlPattern: '*api/*' }] });
+  await ev(`window.dispatchEvent(new Event('online')); true`);
+  const schedOff = await waitFor(`${connText} === 'OFFLINE' && document.getElementById('board').classList.contains('stale') && /Laptop unreachable/.test(document.getElementById('banner').textContent) && document.querySelectorAll('#sched-list .qitem').length > 0`, 12000);
+  check('Scheduled view, laptop disconnected: OFFLINE banner, list kept but marked stale', schedOff);
+  await shot('sched-offline');
+  mode = 'pass';
+  await c.send('Fetch.disable');
+  await waitFor(`${connText} === 'LIVE'`, 13000);
+  await tap('#view-creatures');
+  const backToPets = await waitFor(`!document.getElementById('creatures').hidden && document.getElementById('sched').hidden && document.getElementById('view-creatures').getAttribute('aria-pressed') === 'true'`, 3000);
+  check('switching from Scheduled back to Creatures works', backToPets);
+  await ask('sched-clear');
 } catch (e) {
   check('browser test script ran to completion', false, e.stack || e.message);
 } finally {
