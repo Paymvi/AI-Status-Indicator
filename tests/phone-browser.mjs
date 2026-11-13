@@ -601,7 +601,7 @@ try {
   const order = await ev(`${titles}.join('|')`);
   check('Scheduled view: tasks scheduled on the desktop appear by themselves, upcoming in run order', schedShown && order === 'Sooner refactor|Later review|Follow-up docs|Idea draft', order);
   const first = await ev(`(() => { const b = document.querySelector('#sched-list .qitem'); return { meta: b.querySelector('.qmeta').textContent, word: b.querySelector('.qword').textContent, when: b.querySelector('.qwhen').textContent, prev: b.querySelector('.qprev').textContent }; })()`);
-  check('Scheduled view: card shows project, agent, prompt preview, status and local run time', first.meta === 'Website_Redesign · Claude Code' && first.word === 'Scheduled' && /runs (today|tomorrow) .*\(in 1h 5\dm\)/.test(first.when) && /^Refactor the booking flow/.test(first.prev), JSON.stringify(first));
+  check('Scheduled view: card shows project, agent, prompt preview, status and local run time', first.meta === 'Website Redesign · Claude Code' && first.word === 'Scheduled' && /runs (today|tomorrow) .*\(in 1h 5\dm\)/.test(first.when) && /^Refactor the booking flow/.test(first.prev), JSON.stringify(first));
   const layout = await ev(`({ sw: document.documentElement.scrollWidth, w: innerWidth, minTap: Math.min(...[...document.querySelectorAll('#sched-list .qitem, #view-sched, #sched-refresh')].map(e => e.getBoundingClientRect().height)), segs: document.querySelector('.viewbar').scrollWidth <= document.querySelector('.viewbar').clientWidth, tz: document.getElementById('sched-info').textContent })`);
   check('Scheduled view at 320 px: no horizontal scroll, tap targets >= 36 px, view switch fits, time zone named', layout.sw <= layout.w && layout.minTap >= 36 && layout.segs && /^Times in /.test(layout.tz), JSON.stringify(layout));
   await shot('sched-320');
@@ -645,6 +645,162 @@ try {
   const backToPets = await waitFor(`!document.getElementById('creatures').hidden && document.getElementById('sched').hidden && document.getElementById('view-creatures').getAttribute('aria-pressed') === 'true'`, 3000);
   check('switching from Scheduled back to Creatures works', backToPets);
   await ask('sched-clear');
+
+  // ---------- Schedule a task from the phone (the laptop's own scheduler; temporary projects, mock Claude) ----------
+  let qv = 0;
+  const verify = async () => { await ask(`qs-verify-${++qv}`); return JSON.parse(fs.readFileSync(path.join(dir, 'qs.json'), 'utf8').replace(/^﻿/, '')); };
+  const formText = `document.getElementById('sched-form').textContent.replace(/\\s+/g, ' ')`;
+  const errText = `document.getElementById('sf-error').hidden ? '' : document.getElementById('sf-error').textContent`;
+  const pick = (name) => ev(`(() => { const s = document.getElementById('sf-project'); const o = [...s.options].find(o => o.textContent === ${JSON.stringify(name)}); if (!o) return false; s.value = o.value; s.dispatchEvent(new Event('change')); return true; })()`);
+  const typeIn = async (sel, text) => { await ev(`(() => { const e = document.querySelector(${JSON.stringify(sel)}); e.focus(); e.select && e.select(); return true; })()`); await c.send('Input.insertText', { text }); };
+  const setAt = (expr) => ev(`(() => { const a = document.getElementById('sf-at'); const d = new Date(${expr}); const p = n => String(n).padStart(2, '0'); a.value = d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + 'T' + p(d.getHours()) + ':' + p(d.getMinutes()); a.dispatchEvent(new Event('change')); return a.value; })()`);
+  await ask('qs-setup');
+  await phone(360, 740);
+  // the phone is in another time zone than the laptop: times must still mean the same instant
+  await c.send('Emulation.setTimezoneOverride', { timezoneId: 'Asia/Tokyo' });
+  await ev(`['new', 'edit'].forEach(m => localStorage.removeItem('claudeStatus.schedDraft.' + m)); localStorage.removeItem('claudeStatus.schedProject'); localStorage.setItem('claudeStatus.view', 'sched'); true`);
+  await c.send('Page.navigate', { url: base });
+  await waitFor(`${connText} === 'LIVE'`, 8000);
+  const nb = await ev(`(() => { const b = document.getElementById('sched-new'); const r = b.getBoundingClientRect(); return { shown: !b.hidden, text: b.textContent, h: r.height, w: r.width }; })()`);
+  check('Scheduled view: an obvious full-width "Schedule task" button', nb.shown && nb.text === '＋ Schedule task' && nb.h >= 44 && nb.w >= 300, JSON.stringify(nb));
+  await shot('sched-empty-new-360');
+  await tap('#sched-new');
+  const formUp = await waitFor(`!document.getElementById('sched-form').hidden && document.getElementById('sched-list').hidden && document.querySelectorAll('#sf-project option').length > 2`, 8000);
+  const fo = await ev(`({ opts: [...document.querySelectorAll('#sf-project option')].map(o => o.textContent), save: document.getElementById('sf-save').disabled, codex: [...document.querySelectorAll('.sf-ai .seg')].map(b => b.textContent + ':' + b.getAttribute('aria-pressed')).join(','), adv: document.getElementById('sf-adv').open })`);
+  check('form: projects by friendly name (no paths to type), Claude chosen, Codex shown as unavailable, Advanced folded', formUp && fo.opts.includes('Portal') && fo.opts.includes('Booking App') && !fo.opts.some(o => /[\\/]/.test(o)) && fo.save && fo.codex === 'Claude Code:true,Codex:false' && !fo.adv && /Codex isn't available/.test(await ev(formText)), JSON.stringify(fo));
+  await pick('Portal');
+  const prompt1 = 'Phone task: run the tests and summarise.\nSecond line — “quotes” & $HOME; rm -rf / # just text\n  indented 日本';
+  await typeIn('#sf-prompt', prompt1);
+  await setAt(`Date.now() - 3600e3`);
+  const qPast = await ev(`({ err: ${errText}, save: document.getElementById('sf-save').disabled })`);
+  check('invalid input: a time in the past is refused on the phone, Save disabled', /already passed/.test(qPast.err) && qPast.save, JSON.stringify(qPast));
+  await tap('.chip[data-min="60"]');
+  const rv1 = await ev(`({ review: document.getElementById('sf-review').textContent, err: ${errText}, save: document.getElementById('sf-save').disabled, at: document.getElementById('sf-at').value })`);
+  check('"In 1 hour": exact date and time with the phone\'s time zone, the laptop\'s own clock (other zone), and what happens if it\'s asleep', /^Runs .*\d{4}.*GMT\+9.* \(in (59m|1h 00m)\)/.test(rv1.review) && /Asia\/Tokyo \(this phone\)/.test(rv1.review) && /On the laptop .* that is /.test(rv1.review) && /asleep or off, the task runs once it's back/.test(rv1.review) && !rv1.save && !rv1.err, JSON.stringify(rv1));
+  const lay = await ev(`(() => { const f = document.getElementById('sched-form'); const small = [...f.querySelectorAll('input, select, textarea')].filter(e => e.offsetParent && parseFloat(getComputedStyle(e).fontSize) < 16).map(e => e.id); const taps = [...f.querySelectorAll('button, select, input, summary')].filter(e => e.offsetParent).map(e => [e.id || e.textContent.trim(), Math.round(e.getBoundingClientRect().height)]).filter(x => x[1] < 40); return { sw: document.documentElement.scrollWidth, w: innerWidth, small, taps }; })()`);
+  check('form at 360 px: no horizontal scroll, fields 16 px (no zoom on focus), tap targets >= 40 px', lay.sw <= lay.w && !lay.small.length && !lay.taps.length, JSON.stringify(lay));
+  await shot('sched-form-360');
+  // keyboard open: the visible height shrinks to ~half; the form keeps working and nothing goes sideways
+  await phone(360, 380);
+  await ev(`document.getElementById('sf-prompt').focus(); true`);
+  const kb = await ev(`(() => { const s = document.getElementById('sf-save'); s.scrollIntoView({ block: 'nearest' }); const r = s.getBoundingClientRect(); return { sw: document.documentElement.scrollWidth, w: innerWidth, saveVisible: r.top >= 0 && r.bottom <= innerHeight, pr: document.getElementById('sf-prompt').getBoundingClientRect().width }; })()`);
+  check('keyboard open (half-height screen): no horizontal scroll, Save reachable by scrolling, prompt full width', kb.sw <= kb.w && kb.saveVisible && kb.pr >= 300, JSON.stringify(kb));
+  await phone(360, 740);
+  await c.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Tab' }); await c.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Tab' });
+  const draft1 = await ev(`JSON.parse(localStorage.getItem('claudeStatus.schedDraft.new') || 'null')`);
+  check('the draft is kept on the phone while you type', draft1 && draft1.p === prompt1 && draft1.open === true && /^[A-Za-z0-9_-]{22}$/.test(draft1.id), JSON.stringify(draft1));
+  // 1) the connection drops before the request reaches the laptop
+  await ev(`window.__qposts = 0; (() => { const o = window.fetch; window.fetch = function (u, opt) { if (/api\\/queue/.test(u) && opt && opt.method === 'POST') window.__qposts++; return o.apply(this, arguments); }; })(); true`);
+  mode = 'fail';
+  await c.send('Fetch.enable', { patterns: [{ urlPattern: '*api/queue*', requestStage: 'Request' }] });
+  await tap('#sf-save');
+  const nc1 = await waitFor(`/Not confirmed/.test(${errText})`, 8000);
+  const v1 = await verify();
+  check('save fails (no connection): "Not confirmed", draft kept, nothing on the laptop', nc1 && v1.tasks.length === 0 && (await ev(`document.getElementById('sf-prompt').value`)) === prompt1, JSON.stringify(v1));
+  // 2) the laptop saves it but the answer is lost on the way back
+  mode = 'fail';
+  await c.send('Fetch.enable', { patterns: [{ urlPattern: '*api/queue*', requestStage: 'Response' }] });
+  await tap('#sf-save');
+  const nc2 = await waitFor(`/Not confirmed/.test(${errText}) && !document.getElementById('sf-save').disabled`, 8000);
+  const v2 = await verify();
+  check('answer lost after the laptop saved it: the phone still says "Not confirmed" (never claims success)', nc2 && v2.tasks.length === 1 && !(await ev(`!!document.querySelector('.sched-ok')`)), JSON.stringify(v2));
+  mode = 'pass';
+  await c.send('Fetch.disable');
+  // 3) reload the page: the draft comes back; sending it again doesn't make a second task
+  await c.send('Page.navigate', { url: base });
+  await waitFor(`${connText} === 'LIVE'`, 8000);
+  const restored = await waitFor(`!document.getElementById('sched-form').hidden && document.getElementById('sf-prompt').value === ${JSON.stringify(prompt1)} && document.getElementById('sf-project').selectedOptions[0]?.textContent === 'Portal'`, 8000);
+  check('page reload: the open draft comes back as it was (project, prompt, time)', restored, await ev(formText).catch((e) => e.message));
+  await waitFor(`!document.getElementById('sf-save').disabled`, 5000);
+  await tap('#sf-save');
+  const savedOk = await waitFor(`!!document.querySelector('.sched-ok') && /Scheduled on the laptop/.test(document.querySelector('.sched-ok').textContent)`, 10000);
+  const v3 = await verify();
+  const qT3 = v3.tasks[0] || {};
+  const pageAt = await ev(`(() => { const d = JSON.parse(localStorage.getItem('claudeStatus.schedDraft.new') || 'null'); return d; })()`);
+  check('Schedule again: confirmed only now, still one task on the laptop, draft cleared', savedOk && v3.tasks.length === 1 && pageAt === null, JSON.stringify(v3));
+  check('on the laptop: that project folder, the prompt exactly as typed, the same instant (phone in Tokyo)', qT3.pj === v3.p1 && qT3.p === prompt1 && qT3.st === 'Scheduled' && qT3.at === draft1.at - (draft1.at % 60000) && qT3.rn === 'vscode', JSON.stringify({ qT3, at: draft1.at }));
+  const conf = await ev(`({ ok: document.querySelector('.sched-ok').textContent, title: document.querySelector('.qd-title').textContent, facts: document.querySelector('.qd-facts').textContent, acts: [...document.querySelectorAll('.qd-actions button')].map(b => b.textContent).join('|'), laptop: /Laptop clock/.test(document.querySelector('.qd-facts').textContent) })`);
+  check('after saving: a clear confirmation and the new task, with Edit and Cancel, and the laptop\'s clock', /You can close this page/.test(conf.ok) && conf.title === 'Phone task: run the tests and summarise.' && conf.acts === 'Edit or reschedule|Cancel task' && conf.laptop, JSON.stringify(conf));
+  await shot('sched-saved-360');
+  await tap('#sched-back');
+  const inList = await waitFor(`[...document.querySelectorAll('#sched-list .qitem')].some(b => /Phone task/.test(b.textContent) && b.querySelector('.qmeta').textContent === 'Portal · Claude Code' && /Scheduled/.test(b.querySelector('.qword').textContent))`, 5000);
+  check('the list shows it under UPCOMING with project, AI and status', inList && /UPCOMING · 1/.test(await ev(`document.getElementById('sched-list').textContent`)), await ev(`document.getElementById('sched-list').textContent`));
+  await shot('sched-list-360');
+  // edit / reschedule
+  await tap('#sched-list .qitem');
+  await waitFor(`!!document.querySelector('.qd-actions')`, 3000);
+  await ev(`[...document.querySelectorAll('.qd-actions button')].find(b => b.textContent === 'Edit or reschedule').id = 'qa-edit'; true`);
+  await tap('#qa-edit');
+  const editUp = await waitFor(`!document.getElementById('sched-form').hidden && document.getElementById('sf-heading').textContent === 'Edit scheduled task' && document.getElementById('sf-prompt').value === ${JSON.stringify(prompt1)}`, 5000);
+  await typeIn('#sf-prompt', 'Edited on the phone');
+  await tap('.chip[data-min="180"]');
+  await tap('#sf-save');
+  const edited = await waitFor(`/Saved on the laptop/.test(document.querySelector('.sched-ok')?.textContent || '')`, 10000);
+  const v4 = await verify();
+  check('edit and reschedule from the phone: same task, new prompt and time on the laptop', editUp && edited && v4.tasks.length === 1 && v4.tasks[0].p === 'Edited on the phone' && Math.abs(v4.tasks[0].at - (Date.now() + 3 * 3600e3)) < 120e3, JSON.stringify(v4.tasks));
+  // a change on the desktop shows up on the phone by itself
+  await ask('qs-desktop-edit');
+  const synced = await waitFor(`document.querySelector('.qd-prompt')?.textContent === 'Edited on the desktop'`, 25000);
+  check('desktop edit appears on the phone while the task is open', synced, await ev(`document.querySelector('.qd-prompt')?.textContent`));
+  // cancel (not started)
+  await ev(`window.confirm = () => true; [...document.querySelectorAll('.qd-actions button')].find(b => b.textContent === 'Cancel task').id = 'qa-cancel'; true`);
+  const why = await ev(`document.querySelector('.qd-explain')?.textContent || ''`);
+  await tap('#qa-cancel');
+  const qCanceled = await waitFor(`document.querySelector('.qd-status')?.textContent === 'Canceled'`, 10000);
+  const v5 = await verify();
+  check('Cancel task (explained as "it just won\'t run"): canceled on the laptop, never ran', /won't run/.test(why) && qCanceled && v5.tasks[0].st === 'Canceled' && v5.tasks[0].n === 0, JSON.stringify(v5.tasks));
+  await tap('#sched-back');
+  // double tap on Schedule: one task
+  await tap('#sched-new');
+  await waitFor(`!document.getElementById('sched-form').hidden`, 3000);
+  const remembered = await ev(`document.getElementById('sf-project').selectedOptions[0]?.textContent`);
+  await pick('Booking App');
+  await typeIn('#sf-prompt', 'Double tap test MOCK:sleep=60');
+  await ev(`document.getElementById('sf-adv').open = true; const r = document.getElementById('sf-runner'); r.value = 'headless'; r.dispatchEvent(new Event('change')); true`);
+  await setAt(`Date.now() + 60e3`);
+  await ev(`window.__qposts = 0; (() => { const o = window.fetch; window.fetch = function (u, opt) { if (String(u).indexOf('api/queue') >= 0 && opt && opt.method === 'POST') window.__qposts++; return o.apply(this, arguments); }; })(); true`);
+  await ev(`(() => { const f = document.getElementById('sched-form'); f.requestSubmit(); f.requestSubmit(); document.getElementById('sf-save').click(); return true; })()`);
+  await waitFor(`/Scheduled on the laptop/.test(document.querySelector('.sched-ok')?.textContent || '')`, 10000);
+  const v6 = await verify();
+  check('rapid repeated taps on Schedule: one request, one task', (await ev('window.__qposts')) === 1 && v6.tasks.filter((t) => /Double tap/.test(t.p)).length === 1 && remembered === 'Portal', `${await ev('window.__qposts')} ${JSON.stringify(v6.tasks)} ${remembered}`);
+  // running: Stop run (not Cancel)
+  await ask('qs-run');
+  const qRunning = await waitFor(`/Running|Starting/.test(document.querySelector('.qd-status')?.textContent || '') && [...document.querySelectorAll('.qd-actions button')].map(b => b.textContent).join('|') === 'Stop run'`, 15000);
+  const runWhy = await ev(`document.querySelector('.qd-explain')?.textContent || ''`);
+  check('a running task offers Stop run (no Edit or Cancel), explained as ending the run in progress', qRunning && /already in progress/.test(runWhy), await ev(`document.getElementById('sched-body').textContent.slice(0, 300)`));
+  await shot('sched-running-360');
+  await ev(`window.confirm = () => true; document.querySelector('.qd-actions button').id = 'qa-stop'; true`);
+  await tap('#qa-stop');
+  const stopped = await waitFor(`document.querySelector('.qd-status')?.textContent === 'Canceled'`, 15000);
+  const v7 = await verify();
+  const dt = v7.tasks.find((t) => /Double tap/.test(t.p)) || {};
+  check('Stop run: stopped on the laptop (Canceled); it ran once, in that project, with the mock', stopped && dt.st === 'Canceled' && dt.n === 1 && dt.pj === v7.p2 && v7.calls === 1, JSON.stringify(v7));
+  // disconnected: nothing can be saved, and the page says so
+  await tap('#sched-back');
+  await tap('#sched-new');
+  await waitFor(`!document.getElementById('sched-form').hidden`, 3000);
+  await typeIn('#sf-prompt', 'Offline draft');
+  await tap('.chip[data-min="30"]');
+  mode = 'fail';
+  await c.send('Fetch.enable', { patterns: [{ urlPattern: '*api/*' }] });
+  await ev(`window.dispatchEvent(new Event('online')); true`);
+  const offForm = await waitFor(`${connText} !== 'LIVE' && document.getElementById('sf-save').disabled && /Not connected to the laptop/.test(${errText})`, 12000);
+  check('disconnected: Save disabled with the reason, the draft stays', offForm && (await ev(`document.getElementById('sf-prompt').value`)) === 'Offline draft', await ev(errText));
+  await shot('sched-form-offline');
+  mode = 'pass';
+  await c.send('Fetch.disable');
+  await waitFor(`${connText} === 'LIVE' && !document.getElementById('sf-save').disabled`, 13000);
+  // 320 px
+  await phone(320, 640);
+  const l320 = await ev(`({ sw: document.documentElement.scrollWidth, w: innerWidth })`);
+  check('form at 320 px: no horizontal scroll', l320.sw <= l320.w, JSON.stringify(l320));
+  await shot('sched-form-320');
+  await ev(`window.confirm = () => true; true`);
+  await tap('#sf-discard');
+  const discarded = await waitFor(`document.getElementById('sched-form').hidden && !localStorage.getItem('claudeStatus.schedDraft.new')`, 3000);
+  check('Discard draft closes the form and forgets the draft', discarded);
+  await c.send('Emulation.setTimezoneOverride', { timezoneId: '' });
+  await ask('qs-clear');
 
   // ---------- Commit: review changes & commit (a temporary repository + local bare remote) ----------
   await phone(360, 800);

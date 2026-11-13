@@ -415,7 +415,49 @@ button.sched-h:focus-visible { outline: 2px solid var(--muted); outline-offset: 
   font-size: 14.5px; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word;
 }
 .qd-note { margin: 10px 0 0; font-size: 12.5px; color: var(--muted); }
-.board.stale .sched-list, .board.stale #sched-list, .board.stale .sched-detail { opacity: .55; }
+.board.stale .sched-list, .board.stale #sched-list, .board.stale .sched-detail:not(.sched-form) { opacity: .55; }
+
+/* ---------- Schedule a task from the phone (the laptop's own scheduler) ---------- */
+.sched-new[hidden], .sched-form[hidden], .sf-keep[hidden], .sf-note[hidden], .qd-actions[hidden] { display: none; }
+.git-send.sched-new { margin: 10px 14px 2px; width: calc(100% - 28px); }
+.sf-label { display: block; margin: 16px 0 6px; padding: 0; font-size: 12.5px; font-weight: 700; color: var(--muted); letter-spacing: .01em; }
+.sf-set { margin: 0; padding: 0; border: 0; min-width: 0; }
+.sf-field {
+  display: block; width: 100%; min-height: 44px; padding: 8px 10px; box-sizing: border-box;
+  background: #161616; color: var(--name); border: 1px solid #464646; border-radius: 4px;
+  font: inherit; font-size: 16px;   /* 16px: phones don't zoom into the field */
+  color-scheme: dark;
+}
+select.sf-field { text-overflow: ellipsis; }
+.sf-field:focus, .sf-prompt:focus { outline: 2px solid var(--blue); outline-offset: 0; }
+.sf-field[aria-invalid="true"], .sf-prompt[aria-invalid="true"] { border-color: var(--red); }
+.sf-prompt { min-height: 150px; box-sizing: border-box; }
+.sf-note { margin: 6px 0 0; font-size: 13px; line-height: 1.4; color: var(--muted); overflow-wrap: anywhere; }
+.sf-keep { color: var(--name); }
+.sf-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 8px; }
+.chip {
+  min-height: 40px; padding: 0 12px; border: 1px solid #464646; border-radius: 20px; background: #2c2c2c; color: var(--name);
+  font: inherit; font-size: 14px; touch-action: manipulation; -webkit-tap-highlight-color: transparent;
+}
+.chip:active { background: var(--hover); }
+.chip:focus-visible { outline: 2px solid var(--name); outline-offset: 1px; }
+.sf-ai { margin: 0; }
+.sf-ai .seg { min-height: 44px; }
+.sf-ai .seg:disabled { opacity: 1; }
+.sf-ai .seg:disabled[aria-pressed="false"] { opacity: .45; text-decoration: line-through; }
+.sf-adv { margin: 16px 0 0; border-top: 1px solid var(--line); padding-top: 4px; }
+.sf-adv summary { min-height: 44px; display: flex; align-items: center; font-size: 14.5px; color: var(--name); cursor: pointer; touch-action: manipulation; }
+.sf-adv summary:focus-visible { outline: 2px solid var(--muted); outline-offset: -2px; }
+.sf-review { margin: 16px 0 0; padding: 10px 12px; background: #161616; border: 1px solid #2e2e2e; border-left: 3px solid var(--blue); border-radius: 4px; font-size: 14.5px; line-height: 1.45; overflow-wrap: anywhere; }
+.sf-review:empty { display: none; }
+.sf-review strong { color: var(--name); }
+.sf-review .sf-note { margin-top: 6px; }
+.sf-discard { display: block; margin: 10px 0 0; }
+.sched-ok { margin: 12px 0 0; padding: 8px 10px; border-left: 3px solid var(--green); background: #1c261e; font-size: 14.5px; line-height: 1.4; overflow-wrap: anywhere; }
+.qd-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 14px 0 0; }
+.qd-actions .usage-btn { margin: 0; min-height: 44px; }
+.qd-actions .danger { border-color: #6e2b28; color: #ffaba8; }
+.qd-explain { margin: 6px 0 0; font-size: 13px; line-height: 1.4; color: var(--muted); }
 
 /* ---------- Commit: review changes & commit (git.cs) ---------- */
 /* four views (List, Creatures, Scheduled, Commit) in one row down to 320 px */

@@ -19,12 +19,16 @@
 //   POST /api/git {"op":"commit"|"push"}  YOUR explicit Send: commit the files you picked with your message
 //                                         and push, or retry the push (git.cs). Repositories are named by
 //                                         tokens; the review screen shows the repository's path and diffs.
+//   GET  /api/queue?op=projects           the projects a task can be scheduled in (friendly names + tokens)
+//   POST /api/queue {"op":"save"|"cancel"|"stop"}  schedule / edit a task, cancel one that hasn't started, or
+//                                         stop a running one: the desktop's own QueueEngine actions, run on its
+//                                         UI thread. Projects and tasks are named by tokens; never a path.
 // Only display data leaves the process: friendly name, state, when that state began, a short error type,
 // a creature look number, that session's context-window percentage (and whether that reading is older than
 // its latest activity), and opaque tokens. No session IDs, process IDs, folder paths or window data.
 // The board also carries the account-wide Claude Usage figures (titles, percentages, reset times, status
-// text); never account IDs, credentials or file contents. And the prompt scheduler's tasks, read-only
-// (title, prompt text, project folder name, state, times; see PublishQueue): the phone can't change or run them.
+// text); never account IDs, credentials or file contents. And the prompt scheduler's tasks (title, prompt text,
+// project folder name, state, times; see PublishQueue), which the phone can schedule, edit and cancel (QueuePost).
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -268,6 +272,17 @@ namespace ClaudeStatus
         // Git review / commit & push for the workers' repositories (git.cs).
         public readonly GitDesk GitOps;
         List<string> queueProjects = new List<string>();
+        // Scheduling from the phone (null Queue = not available). OnUi runs the engine action on the indicator's UI
+        // thread and waits (null result = it didn't answer in time); null OnUi = call directly (tests).
+        public QueueEngine Queue;
+        public Func<Func<object>, object> OnUi;
+        public IDictionary<string, object> Aliases;           // "projectAliases", for friendly project names
+        public string ClaudeProjectsDir = Sessions.ProjectsDir();
+        readonly object opsGate = new object();
+        readonly Dictionary<string, Dictionary<string, object>> queueOps = new Dictionary<string, Dictionary<string, object>>();   // request -> its answer (null = in progress)
+        readonly Queue<string> queueOpOrder = new Queue<string>();
+        List<string[]> projCache;   // [token, path, name]
+        DateTime projAt = DateTime.MinValue;
 
         public int Port { get { return port; } }
         public bool Running { get { return running; } }
@@ -382,7 +397,7 @@ namespace ClaudeStatus
         }
 
         // Called by the indicator when the prompt scheduler changes (read-only: the phone never edits or runs tasks).
-        // Display data only: titles, prompts, the project folder's name (not its path), states and times.
+        // Display data only: titles, prompts, the project's friendly name (alias or folder name; not its path), states and times.
         public const int QueuePromptMax = 20000, QueuePastMax = 30;
         public void PublishQueue(QueueData d, string warning)
         {
@@ -391,7 +406,11 @@ namespace ClaudeStatus
             foreach (var t in d.Tasks) if (QState.Finished(t.State)) past.Add(t); else tasks.Add(QueueRow(t, d));
             past.Sort((a, b) => b.FinishedUtc.CompareTo(a.FinishedUtc));
             for (int i = 0; i < past.Count && i < QueuePastMax; i++) tasks.Add(QueueRow(past[i], d));
-            var q = new Dictionary<string, object> { { "paused", d.Paused }, { "warn", warning ?? "" }, { "tasks", tasks } };
+            // The laptop's time zone (its name and current UTC offset), so the phone can say when its own clock differs.
+            var tz = TimeZoneInfo.Local;
+            DateTime nowLocal = DateTime.Now;
+            var q = new Dictionary<string, object> { { "paused", d.Paused }, { "warn", warning ?? "" }, { "tasks", tasks }, { "can", Queue != null },
+                { "tz", tz.IsDaylightSavingTime(nowLocal) ? tz.DaylightName : tz.StandardName }, { "tzo", (int)tz.GetUtcOffset(nowLocal).TotalMinutes } };
             string sig = new JavaScriptSerializer { MaxJsonLength = int.MaxValue }.Serialize(q);
             var projects = new List<string>();
             foreach (var t in d.Tasks) if (!string.IsNullOrEmpty(t.Project) && !projects.Exists(p => Sched.SamePath(p, t.Project))) projects.Add(t.Project);
@@ -409,7 +428,7 @@ namespace ClaudeStatus
         Dictionary<string, object> QueueRow(QueueTask t, QueueData d)
         {
             string kind = QLook.Kind(t), prompt = t.Prompt ?? "", project = "";
-            try { project = Path.GetFileName((t.Project ?? "").TrimEnd('\\', '/')); } catch { }
+            try { project = Board.FriendlyName(Path.GetFileName((t.Project ?? "").TrimEnd('\\', '/')), Aliases); } catch { }
             var a = t.Attempts.Count > 0 ? t.Attempts[t.Attempts.Count - 1] : null;
             var pre = t.Schedule == "after" ? d.Find(t.After) : null;
             return new Dictionary<string, object>
@@ -421,8 +440,16 @@ namespace ClaudeStatus
                 { "sa", a == null ? 0 : MsOr0(a.StartedUtc) }, { "fi", MsOr0(t.FinishedUtc) },
                 { "why", t.Reason ?? "" }, { "sum", t.Summary ?? "" }, { "n", t.Attempts.Count },
                 { "rn", t.Runner }, { "md", t.Model ?? "" }, { "pm", t.PermissionMode }, { "af", pre == null ? "" : pre.Title }, { "im", t.IfMissed },
+                // for editing from the phone: the project's token, the revision the edit is based on, whether it may be
+                // edited / canceled there (not started; full prompt known), and the run time on the laptop's own clock
+                { "pk", ProjectToken(t.Project) }, { "rv", t.Revision }, { "lt", t.Schedule == "at" ? t.RunAtLocal : "" },
+                { "ed", (QState.Pending(t.State) || t.State == QState.Draft) && prompt.Length <= QueuePromptMax },
+                { "cx", QState.Pending(t.State) || t.State == QState.Draft || t.State == QState.NeedsAttention },
+                { "cp", t.AllowCommit || t.AllowPush || t.AllowDelete },
             };
         }
+
+        string ProjectToken(string path) { return string.IsNullOrEmpty(path) ? "" : Token("p|" + Sched.NormPath(path).Normalize(NormalizationForm.FormC).ToLowerInvariant()); }
 
         static long MsOr0(DateTime utc) { return utc == DateTime.MinValue ? 0 : Ms(utc.Kind == DateTimeKind.Local ? utc.ToUniversalTime() : utc); }
 
@@ -526,15 +553,17 @@ namespace ClaudeStatus
                 }
                 if (req.Path == "/api/board") { BoardRequest(ns, req); return; }
                 if (req.Path == "/api/git") { GitGet(ns, req); return; }
+                if (req.Path == "/api/queue") { QueueGet(ns, req); return; }
                 Text(ns, 404, "Not found");
                 return;
             }
             if (req.Method == "POST" && req.Path == "/api/git") { GitPost(ns, req); return; }
+            if (req.Method == "POST" && req.Path == "/api/queue") { QueuePost(ns, req); return; }
             if (req.Method == "POST" && req.Path == "/api/dismiss") { DismissRequest(ns, req); return; }
             if (req.Method == "POST" && req.Path == "/api/focus") { FocusRequest(ns, req); return; }
             if (req.Method == "POST" && req.Path == "/api/usage-refresh") { UsageRefreshRequest(ns, req); return; }
             if (req.Method == "POST" && req.Path == "/api/push") { PushRequest(ns, req); return; }
-            if (req.Path == "/api/dismiss" || req.Path == "/api/focus" || req.Path == "/api/usage-refresh" || req.Path == "/api/push" || req.Path == "/api/git" || Pages.ContainsKey(req.Path) || req.Path == "/api/board") { Text(ns, 405, "Method not allowed"); return; }
+            if (req.Path == "/api/dismiss" || req.Path == "/api/focus" || req.Path == "/api/usage-refresh" || req.Path == "/api/push" || req.Path == "/api/git" || req.Path == "/api/queue" || Pages.ContainsKey(req.Path) || req.Path == "/api/board") { Text(ns, 405, "Method not allowed"); return; }
             Text(ns, 404, "Not found");
         }
 
@@ -574,7 +603,7 @@ namespace ClaudeStatus
             string cl;
             int len = 0;
             if (req.Headers.TryGetValue("Content-Length", out cl) && (!int.TryParse(cl, out len) || len < 0)) return null;
-            if (len > (req.Path == "/api/git" ? MaxGitBody : MaxBody)) { status = 413; return null; }   // a commit carries its message and file list
+            if (len > (req.Path == "/api/git" || req.Path == "/api/queue" ? MaxGitBody : MaxBody)) { status = 413; return null; }   // a commit / a task carries its message / prompt
             var body = new byte[len];
             int have = Math.Min(len, n - end - 4);
             Array.Copy(buf, end + 4, body, 0, have);
@@ -881,6 +910,243 @@ namespace ClaudeStatus
             }
             if (res == null) { Json(ns, 400, "{\"result\":\"bad_request\"}"); return; }
             Json(ns, 200, new JavaScriptSerializer { MaxJsonLength = int.MaxValue }.Serialize(res));
+        }
+
+        // ---------- scheduling from the phone (the desktop's QueueEngine; scheduler.cs) ----------
+        // The projects a task can run in: the scheduler's own projects plus the folders Claude Code worked in most
+        // recently (its transcripts' "cwd"), existing folders only. The phone gets friendly names and tokens.
+        public const int MaxProjects = 30;
+        List<string[]> KnownProjects(bool fresh)
+        {
+            lock (opsGate) if (!fresh && projCache != null && (DateTime.UtcNow - projAt).TotalSeconds < 30) return projCache;
+            var paths = new List<string>();
+            lock (gate) paths.AddRange(queueProjects);
+            foreach (var p in RecentCwds(ClaudeProjectsDir, MaxProjects)) if (!paths.Exists(x => Sched.SamePath(x, p))) paths.Add(p);
+            var list = new List<string[]>();
+            var aliases = Aliases;
+            foreach (var p in paths)
+            {
+                if (list.Count >= MaxProjects) break;
+                bool ok = false;
+                try { ok = Path.IsPathRooted(p) && Directory.Exists(p); } catch { }
+                if (!ok) continue;
+                string folder = Path.GetFileName(Sched.NormPath(p));
+                list.Add(new[] { ProjectToken(p), Sched.NormPath(p), Board.FriendlyName(folder, aliases) });
+            }
+            // Two folders with one friendly name: tell them apart by the folder above.
+            foreach (var a in list)
+                if (list.FindAll(b => b[2] == a[2]).Count > 1)
+                    try { a[2] += " (" + Path.GetFileName(Path.GetDirectoryName(a[1])) + ")"; } catch { }
+            lock (opsGate) { projCache = list; projAt = DateTime.UtcNow; }
+            return list;
+        }
+
+        // The working folders of the most recently used Claude Code conversations (one per transcript folder).
+        static List<string> RecentCwds(string projectsDir, int max)
+        {
+            var newest = new List<FileInfo>();
+            try
+            {
+                foreach (var d in new DirectoryInfo(projectsDir).GetDirectories())
+                {
+                    FileInfo n = null;
+                    try { foreach (var f in d.GetFiles("*.jsonl")) if (n == null || f.LastWriteTimeUtc > n.LastWriteTimeUtc) n = f; } catch { }
+                    if (n != null) newest.Add(n);
+                }
+            }
+            catch { }
+            newest.Sort((a, b) => b.LastWriteTimeUtc.CompareTo(a.LastWriteTimeUtc));
+            var list = new List<string>();
+            foreach (var f in newest)
+            {
+                if (list.Count >= max) break;
+                string cwd = FirstCwd(f.FullName);
+                if (cwd != null && !list.Exists(x => Sched.SamePath(x, cwd))) list.Add(cwd);
+            }
+            return list;
+        }
+
+        static readonly Regex CwdRx = new Regex("\"cwd\"\\s*:\\s*(\"(?:[^\"\\\\]|\\\\.)*\")");
+        static string FirstCwd(string file)
+        {
+            try
+            {
+                var buf = new byte[64 * 1024];
+                int n;
+                using (var fs = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete)) n = fs.Read(buf, 0, buf.Length);
+                var m = CwdRx.Match(Encoding.UTF8.GetString(buf, 0, n));
+                return m.Success ? new JavaScriptSerializer().Deserialize<string>(m.Groups[1].Value) : null;
+            }
+            catch { return null; }
+        }
+
+        // Looking needs the page's own header (like the Git view), though it only shows names.
+        void QueueGet(NetworkStream ns, Request req)
+        {
+            string marker, site;
+            if (!req.Headers.TryGetValue("X-Claude-Status", out marker) || marker != "queue" || (req.Headers.TryGetValue("Sec-Fetch-Site", out site) && site != "same-origin")) { Json(ns, 403, "{\"error\":\"forbidden\"}"); return; }
+            if (!req.Query.StartsWith("op=projects")) { Json(ns, 400, "{\"result\":\"bad_request\"}"); return; }
+            if (Queue == null) { Json(ns, 503, "{\"result\":\"unavailable\"}"); return; }
+            var list = new List<object>();
+            foreach (var p in KnownProjects(req.Query.Contains("fresh=1")))
+                list.Add(new Dictionary<string, object> { { "k", p[0] }, { "n", p[2] }, { "f", Path.GetFileName(p[1]) } });
+            Json(ns, 200, new JavaScriptSerializer().Serialize(new Dictionary<string, object> { { "projects", list } }));
+        }
+
+        // One request = one change. Each carries a one-time id from the page; a resend of the same request (a double
+        // tap, a retry after a dropped connection or a reload) gets the first answer instead of a second change. A new
+        // task's id comes from that request id, so even after a laptop restart a resend finds the task it already saved.
+        void QueuePost(NetworkStream ns, Request req)
+        {
+            if (!ActionAllowed(ns, req, "queue")) return;
+            Dictionary<string, object> d = null;
+            try { d = new JavaScriptSerializer { MaxJsonLength = MaxGitBody, RecursionLimit = 4 }.Deserialize<Dictionary<string, object>>(Encoding.UTF8.GetString(req.Body)); } catch { }
+            string op = Str(d, "op"), id = Str(d, "id");
+            if (id == null || !TokenRx.IsMatch(id) || (op != "save" && op != "cancel" && op != "stop")) { Json(ns, 400, "{\"result\":\"bad_request\",\"msg\":\"The laptop didn't understand that request.\"}"); return; }
+            if (Queue == null) { Json(ns, 503, "{\"result\":\"unavailable\",\"msg\":\"Scheduling isn't available on the laptop.\"}"); return; }
+            string key;
+            using (var sha = SHA256.Create()) key = id + "|" + Convert.ToBase64String(sha.ComputeHash(req.Body));
+            lock (opsGate)
+            {
+                Dictionary<string, object> prev;
+                if (queueOps.TryGetValue(key, out prev)) { Reply(ns, prev ?? Fail("pending", "The laptop is still saving it…")); return; }
+                queueOps[key] = null;
+                queueOpOrder.Enqueue(key);
+                while (queueOpOrder.Count > 300) queueOps.Remove(queueOpOrder.Dequeue());
+            }
+            Func<object> work = () =>
+            {
+                Dictionary<string, object> r;
+                try { r = QueueAction(op, id, d); }
+                catch (Exception e) { r = Fail("error", "The laptop couldn't do that: " + e.Message); }
+                // Only done changes are remembered; a refusal can be fixed and sent again.
+                lock (opsGate) { if (r.ContainsKey("task") && Str(r, "result") != null && !r.ContainsKey("msg")) queueOps[key] = r; else queueOps.Remove(key); }
+                return r;
+            };
+            object res;
+            try { res = OnUi != null ? OnUi(work) : work(); }
+            catch { lock (opsGate) queueOps.Remove(key); Json(ns, 503, "{\"result\":\"unavailable\",\"msg\":\"Claude Status on the laptop isn't ready.\"}"); return; }
+            // Not answered in time: it may still happen, so the slot stays and a resend asks again.
+            Reply(ns, res as Dictionary<string, object> ?? Fail("pending", "The laptop is busy. Checking again…"));
+        }
+
+        void Reply(NetworkStream ns, Dictionary<string, object> r)
+        {
+            string result = Str(r, "result");
+            int code = !r.ContainsKey("msg") ? 200 : result == "pending" ? 503 : result == "error" ? 500 : result == "bad_request" ? 400 : 409;
+            Json(ns, code, new JavaScriptSerializer { MaxJsonLength = int.MaxValue }.Serialize(r));
+        }
+
+        static string Str(Dictionary<string, object> d, string k) { object v; return d != null && d.TryGetValue(k, out v) ? v as string : null; }
+        static Dictionary<string, object> Fail(string result, string msg) { return new Dictionary<string, object> { { "result", result }, { "msg", msg } }; }
+
+        Dictionary<string, object> Done(string result, string taskId, bool created)
+        {
+            var eng = Queue;
+            var t = eng.Data.Find(taskId);
+            return new Dictionary<string, object> { { "result", result }, { "created", created }, { "task", t == null ? null : QueueRow(t, eng.Data) } };
+        }
+
+        public static readonly string[] PhoneModes = { "acceptEdits", "dontAsk", "plan" };
+
+        // Runs on the indicator's UI thread, like every other scheduler action. The engine re-checks state inside its
+        // own locked write (Save's revision check, CancelPending), so a task that started meanwhile is never changed.
+        Dictionary<string, object> QueueAction(string op, string opId, Dictionary<string, object> d)
+        {
+            var eng = Queue;
+            string k = Str(d, "k");
+            QueueTask cur = null;
+            if (k != null)
+            {
+                foreach (var t in eng.Data.Tasks) if (Token("q|" + t.Id) == k) cur = t;
+                if (cur == null) return Fail("gone", "This task is no longer on the laptop's schedule. It may have been removed there.");
+            }
+            else if (op != "save") return Fail("bad_request", "The laptop didn't understand that request.");
+
+            if (op == "cancel")
+            {
+                if (cur.State == QState.Canceled) return Done("canceled", cur.Id, false);
+                if (cur.State == QState.Running) return Fail("running", "It has already started, so it wasn't canceled. Use Stop run to stop it.");
+                if (QState.Finished(cur.State)) return Fail("finished", "It has already finished (" + QState.Label(cur.State) + ").");
+                return eng.CancelPending(cur.Id) ? Done("canceled", cur.Id, false) : Fail("changed", "It changed on the laptop, so it wasn't canceled. Check it and try again.");
+            }
+            if (op == "stop")
+            {
+                if (cur.State != QState.Running) return Fail("not_running", QState.Finished(cur.State) ? "It isn't running any more (" + QState.Label(cur.State) + ")." : "It hasn't started. Use Cancel task instead.");
+                eng.Cancel(cur.Id);
+                return Done("stopped", cur.Id, false);
+            }
+
+            // ---- save: a new task, or an edit of one that hasn't started ----
+            string prompt = Str(d, "p"), title = (Str(d, "ti") ?? "").Trim(), runner = Str(d, "rn") ?? "vscode", mode = Str(d, "pm") ?? "acceptEdits",
+                model = (Str(d, "md") ?? "").Trim(), missed = Str(d, "im") ?? "run", ai = Str(d, "ai") ?? "claude";
+            if (ai != "claude") return Fail("invalid", "Only Claude Code can run scheduled tasks on this laptop.");
+            if (runner != "vscode" && runner != "headless" || Array.IndexOf(PhoneModes, mode) < 0 || (missed != "run" && missed != "skip")) return Fail("bad_request", "The laptop didn't understand that request.");
+            if (prompt == null || prompt.Trim() == "") return Fail("invalid", "Write the prompt.");
+            if (prompt.Length > QueuePromptMax) return Fail("invalid", "The prompt is too long to schedule from the phone (at most " + QueuePromptMax.ToString("N0") + " characters). Schedule it on the laptop.");
+            if (prompt.IndexOf('\0') >= 0 || title.IndexOf('\0') >= 0) return Fail("invalid", "The prompt can't contain a NUL character.");
+            if (title.Length > 200) title = title.Substring(0, 200);
+
+            string path = null, pk = Str(d, "pj");
+            if (pk != null)
+                for (int pass = 0; pass < 2 && path == null; pass++)
+                    foreach (var p in KnownProjects(pass == 1)) if (p[0] == pk) path = p[1];
+            if (path == null) return Fail("project", "That project isn't on the laptop's list (any more). Choose the project again.");
+
+            object atv;
+            bool hasAt = d.TryGetValue("at", out atv) && atv != null && !(atv is string);
+            DateTime runAt = DateTime.MinValue, now = eng.Now();
+            if (hasAt)
+            {
+                double ms;
+                try { ms = Convert.ToDouble(atv, System.Globalization.CultureInfo.InvariantCulture); } catch { return Fail("bad_request", "The laptop didn't understand that time."); }
+                if (double.IsNaN(ms) || ms < 0 || ms > 32503680000000) return Fail("bad_request", "The laptop didn't understand that time.");
+                runAt = Epoch.AddMilliseconds(Math.Floor(ms / 60000) * 60000);   // whole minutes, like the desktop editor
+                if (runAt < now.AddMinutes(-2)) return Fail("time", "That time has already passed on the laptop (it's " + Sched.LocalText(now) + " there). Choose a later time.");
+                if (runAt > now.AddDays(366)) return Fail("time", "Choose a time within the next year.");
+            }
+
+            QueueTask t2;
+            int rev;
+            bool created = false;
+            if (cur == null)
+            {
+                // The task's id comes from the request id: sending this draft again updates the task it already saved.
+                string tid;
+                using (var sha = SHA256.Create()) tid = BitConverter.ToString(sha.ComputeHash(Encoding.UTF8.GetBytes("phone-task|" + opId))).Replace("-", "").Substring(0, 32).ToLowerInvariant();
+                var existing = eng.Data.Find(tid);
+                if (existing != null && !QState.Pending(existing.State) && existing.State != QState.Draft) return Done("saved", tid, false);   // already started: leave it alone
+                if (!hasAt) return Fail("time", "Choose when it should run.");
+                t2 = existing != null ? QueueStore.Clone(existing) : TaskEditor.NewTask();
+                t2.Id = tid;
+                rev = existing != null ? existing.Revision : 0;
+                created = existing == null;
+            }
+            else
+            {
+                if (cur.State == QState.Running) return Fail("running", "It has already started, so it can't be edited. Stop it, or duplicate it on the laptop.");
+                if (!QState.Pending(cur.State) && cur.State != QState.Draft) return Fail("finished", "It has already finished (" + QState.Label(cur.State) + "), so it can't be edited.");
+                if ((cur.Prompt ?? "").Length > QueuePromptMax) return Fail("invalid", "This task's prompt is too long to edit on the phone. Edit it on the laptop.");
+                object rv;
+                if (!d.TryGetValue("rv", out rv) || !(rv is int) || (int)rv != cur.Revision)
+                    return new Dictionary<string, object> { { "result", "changed" }, { "msg", "This task changed on the laptop after you opened it. Check the current version below, then edit again." }, { "task", QueueRow(cur, eng.Data) } };
+                t2 = QueueStore.Clone(cur);
+                rev = cur.Revision;
+            }
+
+            t2.Project = path;
+            t2.Prompt = prompt;
+            t2.Title = title != "" ? title : Sched.FirstLine(prompt, 60);
+            t2.Runner = runner; t2.PermissionMode = mode; t2.Model = model; t2.IfMissed = missed;
+            if (hasAt)
+            {
+                t2.Schedule = "at"; t2.After = ""; t2.UsageResetUtc = DateTime.MinValue;
+                t2.RunAtUtc = runAt; t2.TimeZone = TimeZoneInfo.Local.Id; t2.RunAtLocal = runAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm", System.Globalization.CultureInfo.InvariantCulture);
+            }
+            t2.State = QState.Scheduled;
+            string err = eng.Save(t2, rev);   // validated again and written (locked) before this returns
+            if (err != null) return Fail("invalid", err);
+            return Done("saved", t2.Id, created);
         }
 
         // ---------- allowed hosts / origins ----------

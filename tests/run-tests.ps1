@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Automated tests for Claude Status (hook lifecycle, Worker Board logic, layout/DPI, worker focusing,
     installer / update / uninstall, privacy).
@@ -1826,6 +1826,36 @@ else {
                     'sched-cancel'        { $f.Queue.Cancel($script:schedIds.sooner) }
                     'sched-remove'        { $null = $f.Queue.Remove($script:schedIds.later) }
                     'sched-clear'         { foreach ($t in @($f.Queue.Data.Tasks)) { $null = $f.Queue.Remove($t.Id) } }
+                    'qs-setup'            {
+                        # Scheduling from the phone: temporary projects, a fake Claude Code history naming them, and the
+                        # mock instead of claude.exe (a task that does start runs tests\mock-claude.ps1, never Claude).
+                        $script:qsCfg = Join-Path $tmp 'qs-claude'; $script:qsMock = Join-Path $tmp 'qs-mock'; $null = New-Item -ItemType Directory -Force $script:qsMock
+                        $script:qsP1 = Join-Path $tmp 'qs\Toah_Nipi_Portal'; $script:qsP2 = Join-Path $tmp 'qs\Booking App'
+                        foreach ($pth in $script:qsP1, $script:qsP2) {
+                            $null = New-Item -ItemType Directory -Force $pth
+                            $td = Join-Path $script:qsCfg ('projects\' + [ClaudeStatus.Sessions]::Mangle($pth)); $null = New-Item -ItemType Directory -Force $td
+                            [IO.File]::WriteAllText((Join-Path $td ([Guid]::NewGuid().ToString() + '.jsonl')), ((@{ type = 'user'; cwd = $pth } | ConvertTo-Json -Compress) + "`n"))
+                        }
+                        $script:qsOldEnv = @($env:CLAUDE_CONFIG_DIR, $env:MOCK_LOG_DIR)
+                        $env:CLAUDE_CONFIG_DIR = $script:qsCfg; $env:MOCK_LOG_DIR = $script:qsMock
+                        $f.Phone.ClaudeProjectsDir = Join-Path $script:qsCfg 'projects'
+                        $f.Queue.ClaudeCommand = @($winPs, '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $PSScriptRoot 'mock-claude.ps1'))
+                        $f.Queue.ProjectsDir = Join-Path $script:qsCfg 'projects'; $f.Queue.KeepAwake = $false; $f.Queue.Grace = [TimeSpan]::Zero
+                        $f.Queue.ActiveSessionsOverride = [Func[System.Collections.Generic.List[ClaudeStatus.ActiveSession]]] { , (New-Object 'System.Collections.Generic.List[ClaudeStatus.ActiveSession]') }
+                    }
+                    'qs-verify*'          {
+                        $o = @($f.Queue.Data.Tasks | ForEach-Object { @{ ti = $_.Title; pj = $_.Project; p = $_.Prompt; st = $_.State; at = [long]($_.RunAtUtc - $epoch).TotalMilliseconds; n = $_.Attempts.Count; rn = $_.Runner } })
+                        $calls = if (Test-Path (Join-Path $script:qsMock 'calls.jsonl')) { @(Get-Content (Join-Path $script:qsMock 'calls.jsonl') -Encoding UTF8 | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object { $_.args -contains '-p' }).Count } else { 0 }
+                        [IO.File]::WriteAllText((Join-Path $cdir 'qs.json'), (@{ tasks = $o; p1 = $script:qsP1; p2 = $script:qsP2; calls = $calls } | ConvertTo-Json -Compress -Depth 4), (New-Object Text.UTF8Encoding $false))
+                    }
+                    'qs-desktop-edit'     { $t = @($f.Queue.Data.Tasks | Where-Object { $_.State -eq 'Scheduled' })[0]; $c2 = [ClaudeStatus.QueueStore]::Clone($t); $c2.Prompt = 'Edited on the desktop'; $null = $f.Queue.Save($c2, $t.Revision) }
+                    'qs-run'              {
+                        # the engine's clock moves 2 minutes ahead, so the task due "now + 1 min" starts (with the mock)
+                        $f.Queue.Now = [Func[DateTime]] { [DateTime]::UtcNow.AddMinutes(2) }
+                        $sw = [Diagnostics.Stopwatch]::StartNew()
+                        while ($sw.Elapsed.TotalSeconds -lt 20 -and -not @($f.Queue.Data.Tasks | Where-Object { $_.State -eq 'Running' }).Count) { $f.Queue.Tick(); Start-Sleep -Milliseconds 100 }
+                    }
+                    'qs-clear'            { $f.Queue.Now = [Func[DateTime]] { [DateTime]::UtcNow }; foreach ($t in @($f.Queue.Data.Tasks)) { if ($t.State -eq 'Running') { $f.Queue.Cancel($t.Id) }; $null = $f.Queue.Remove($t.Id) }; $env:CLAUDE_CONFIG_DIR = $script:qsOldEnv[0]; $env:MOCK_LOG_DIR = $script:qsOldEnv[1] }
                     'focus-log*'          { [IO.File]::WriteAllText((Join-Path $cdir 'focus-log.txt'), ($script:browserFocus -join ',')) }
                     'focus-clear*'        { $script:browserFocus.Clear() }
                     'git-setup'           {
@@ -1992,6 +2022,7 @@ $s3 = Get-Content $sp3 -Raw | ConvertFrom-Json
 Check 'uninstall restores your own status line exactly' ($s3.statusLine.command -eq 'echo my-own-line' -and $s3.statusLine.padding -eq 2 -and $s3.statusLine.type -eq 'command' -and -not (Test-Path $inst3))
 
 . (Join-Path $PSScriptRoot 'git-tests.ps1')
+& { . (Join-Path $PSScriptRoot 'phone-schedule-tests.ps1') }   # own scope: its variables don't touch the rest
 
 # ======================================================================================
 Section 'Privacy / no-network audit (static)'
@@ -2008,7 +2039,7 @@ $pushCs = Get-Content (Join-Path $src 'push.cs') -Raw
 Check 'push.cs: its only network call is the POST to a validated push endpoint; it never listens' ((@([regex]::Matches($pushCs, 'WebRequest\.Create\((\w+)\)') | ForEach-Object { $_.Groups[1].Value }) -join ',') -eq 'u' -and $pushCs -match 'var u = new Uri\(sub\.Endpoint\)' -and $pushCs -notmatch 'TcpListener|HttpListener|WebClient|HttpClient|Socket')
 $storage = @([regex]::Matches($pjs, 'localStorage\.\w+\([^)]*\)') | ForEach-Object { $_.Value })
 Check 'phone page stores only the List / Creatures, Show usage / expanded, Compact / Show context, notifications on-off / expanded choices, hidden commit offers and the running commit''s id' ($storage.Count -eq 19 -and @($storage | Where-Object { $_ -notmatch '^localStorage\.(getItem|setItem|removeItem)\((VIEW_KEY(, view)?|USAGE_KEY(, .*)?|USAGE_OPEN_KEY(, .*)?|COMPACT_KEY(, .*)?|CONTEXT_KEY(, .*)?|NOTIFY_KEY(, v)?|NOTIFY_OPEN_KEY(, .*)?|GIT_SEEN_KEY(, JSON\.stringify\(gitSeen)?|GIT_JOB_KEY(, JSON\.stringify\(v)?)\)$' }).Count -eq 0 -and $pjs -match "GIT_SEEN_KEY = 'claudeStatus\.gitSeen', GIT_JOB_KEY = 'claudeStatus\.gitJob'" -and $pjs -match "NOTIFY_OPEN_KEY = 'claudeStatus\.notifyOpen', NOTIFY_KEY = 'claudeStatus\.notify'" -and $pjs -match "COMPACT_KEY = 'claudeStatus\.compact', CONTEXT_KEY = 'claudeStatus\.context'" -and $pjs -match "VIEW_KEY = 'claudeStatus\.view'" -and $pjs -match "USAGE_KEY = 'claudeStatus\.usage', USAGE_OPEN_KEY = 'claudeStatus\.usageOpen'") ($storage -join '; ')
-Check 'phone page only calls its own relative API' ((([regex]::Matches($pjs, "'(api/[a-z-]*)") | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique) -join ',') -eq 'api/board,api/dismiss,api/focus,api/git,api/push,api/usage-refresh' -and $pjs -cnotmatch 'XMLHttpRequest|WebSocket|EventSource|sendBeacon|fetch\(\s*[''"](?!api/)')
+Check 'phone page only calls its own relative API' ((([regex]::Matches($pjs, "'(api/[a-z-]*)") | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique) -join ',') -eq 'api/board,api/dismiss,api/focus,api/git,api/push,api/queue,api/usage-refresh' -and $pjs -cnotmatch 'XMLHttpRequest|WebSocket|EventSource|sendBeacon|fetch\(\s*[''"](?!api/)')
 $usageSrc = (Get-Content (Join-Path $src 'usage.cs') -Raw) + (Get-Content (Join-Path $src 'statusline.ps1') -Raw)
 Check 'usage: never reads Claude credentials or tokens, never calls Anthropic' ($usageSrc -notmatch '(?i)\.credentials|accessToken|refreshToken|api/oauth|anthropic\.com|Authorization|Bearer')
 Check 'statusline.ps1 only uses rate_limits, context_window and session_id from the session data' ((Get-Content (Join-Path $src 'statusline.ps1') -Raw) -notmatch '\$in\.(cwd|transcript_path|model|cost|workspace|output_style|prompt_id|prompt_cache)')

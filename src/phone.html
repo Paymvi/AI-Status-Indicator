@@ -96,11 +96,70 @@
       <span id="sched-info" class="sched-info"></span>
       <button type="button" id="sched-refresh" class="usage-btn">Refresh</button>
     </div>
+    <button type="button" id="sched-new" class="git-send sched-new">＋ Schedule task</button>
     <div id="sched-list"></div>
     <div id="sched-detail" class="sched-detail" hidden>
       <button type="button" id="sched-back" class="usage-btn">‹ Back</button>
       <div id="sched-body"></div>
     </div>
+    <form id="sched-form" class="sched-detail sched-form" hidden novalidate autocomplete="off">
+      <button type="button" id="sf-back" class="usage-btn">‹ Back</button>
+      <h2 id="sf-heading" class="qd-title">Schedule a task</h2>
+      <p id="sf-sub" class="sf-note">Runs on the laptop with Claude Code, in the project's VS Code window.</p>
+      <label class="sf-label" for="sf-project">Project</label>
+      <select id="sf-project" class="sf-field"></select>
+      <p id="sf-project-note" class="sf-note" hidden></p>
+      <label class="sf-label" for="sf-prompt">Prompt</label>
+      <textarea id="sf-prompt" class="git-msg sf-prompt" rows="7" spellcheck="true" placeholder="What should Claude do? Write it exactly as you'd type it to Claude."></textarea>
+      <p id="sf-count" class="sf-note"></p>
+      <fieldset class="sf-set">
+        <legend class="sf-label">When</legend>
+        <p id="sf-keep" class="sf-note sf-keep" hidden></p>
+        <div class="sf-chips" role="group" aria-label="Quick times">
+          <button type="button" class="chip" data-min="30">In 30 min</button>
+          <button type="button" class="chip" data-min="60">In 1 hour</button>
+          <button type="button" class="chip" data-min="180">In 3 hours</button>
+          <button type="button" class="chip" data-tomorrow="9">Tomorrow 9 AM</button>
+        </div>
+        <input type="datetime-local" id="sf-at" class="sf-field" aria-label="Date and time (this phone's time zone)">
+      </fieldset>
+      <fieldset class="sf-set">
+        <legend class="sf-label">AI</legend>
+        <div class="segs sf-ai" role="group" aria-label="AI">
+          <button type="button" class="seg" aria-pressed="true" disabled>Claude Code</button>
+          <button type="button" class="seg" aria-pressed="false" disabled>Codex</button>
+        </div>
+        <p class="sf-note">Codex isn't available: Claude Status's scheduler only runs Claude Code.</p>
+      </fieldset>
+      <details id="sf-adv" class="sf-adv">
+        <summary>Advanced</summary>
+        <label class="sf-label" for="sf-title">Title (optional)</label>
+        <input type="text" id="sf-title" class="sf-field" maxlength="200" placeholder="Defaults to the prompt's first line">
+        <label class="sf-label" for="sf-runner">Runs in</label>
+        <select id="sf-runner" class="sf-field">
+          <option value="vscode">The project's VS Code window (watch and answer it there)</option>
+          <option value="headless">Background, no window (Claude can't ask you anything)</option>
+        </select>
+        <label class="sf-label" for="sf-mode">Claude may</label>
+        <select id="sf-mode" class="sf-field">
+          <option value="acceptEdits">Edit files in the project + allowed commands</option>
+          <option value="dontAsk">Only the allowed commands (no file edits)</option>
+          <option value="plan">Read and plan only (no edits, no commands)</option>
+        </select>
+        <label class="sf-label" for="sf-model">Model</label>
+        <input type="text" id="sf-model" class="sf-field" maxlength="80" placeholder="Blank = your Claude Code default" autocapitalize="off" spellcheck="false">
+        <label class="sf-label" for="sf-missed">If the laptop is asleep or off at that time</label>
+        <select id="sf-missed" class="sf-field">
+          <option value="run">Run it when the laptop is back (after a 1-minute chance to skip)</option>
+          <option value="skip">Skip it</option>
+        </select>
+        <p class="sf-note">Allowed commands, and permission to commit, push or delete files, can only be changed on the laptop. Tasks scheduled here can't commit, push or delete.</p>
+      </details>
+      <div id="sf-review" class="sf-review"></div>
+      <p id="sf-error" class="git-problem" role="alert" hidden></p>
+      <button type="submit" id="sf-save" class="git-send">Schedule</button>
+      <button type="button" id="sf-discard" class="usage-btn sf-discard">Discard draft</button>
+    </form>
   </section>
   <section id="git" class="sched" aria-label="Review changes and commit" hidden>
     <div class="sched-bar">

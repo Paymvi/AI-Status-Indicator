@@ -1100,8 +1100,17 @@ namespace ClaudeStatus
                 Edit(id, x => { if (x.State != QState.Running) return false; Finish(x, QState.Canceled, "canceled", "Canceled. Partial output is kept below. File edits Claude already made are not undone."); return true; });
                 return;
             }
-            Edit(id, x => { if (!QState.Pending(x.State) && x.State != QState.Draft && x.State != QState.NeedsAttention) return false; Finish(x, QState.Canceled, "canceled", "Canceled before it ran."); return true; });
+            CancelPending(id);
+        }
+
+        // Cancels a task that hasn't started, decided inside the locked write: if it started meanwhile, nothing changes
+        // (false), so this can never stop a run. The phone's "Cancel task" uses only this.
+        public bool CancelPending(string id)
+        {
+            bool done = false;
+            Edit(id, x => { if (!QState.Pending(x.State) && x.State != QState.Draft && x.State != QState.NeedsAttention) return false; Finish(x, QState.Canceled, "canceled", "Canceled before it ran."); done = true; return true; });
             Tick();
+            return done;
         }
 
         // ---------- the scheduler loop ----------

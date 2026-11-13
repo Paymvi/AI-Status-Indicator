@@ -249,6 +249,33 @@
     return g;
   }
 
+  // ---------- Scheduling from the phone: time helpers and the form's checks (the laptop checks again) ----------
+  var PROMPT_MAX = 20000;   // PhoneServer.QueuePromptMax
+  function pad(n) { return (n < 10 ? '0' : '') + n; }
+  // ms <-> the value of an <input type="datetime-local"> (this phone's local time, whole minutes)
+  function localInput(ms) { var d = new Date(ms); return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + 'T' + pad(d.getHours()) + ':' + pad(d.getMinutes()); }
+  function parseLocalInput(s) {
+    var m = /^(\d{4})-(\d\d)-(\d\d)T(\d\d):(\d\d)/.exec(s || '');
+    return m ? new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5]).getTime() : NaN;
+  }
+  // "In 30 min" etc. count from the laptop's clock (now), rounded up to a whole minute; "Tomorrow 9 AM" is this phone's.
+  function quickTime(chip, now) {
+    if (chip.min) return Math.ceil((now + chip.min * 60000) / 60000) * 60000;
+    var n = new Date(now);
+    return new Date(n.getFullYear(), n.getMonth(), n.getDate() + 1, chip.tomorrow, 0).getTime();
+  }
+  // f: { pj, p, at (ms or null), keep (edit: leave the schedule as it is), timed (the time was set in this form) }
+  function schedProblem(f, now) {
+    if (!f.pj) return 'Choose the project.';
+    if (!f.p || !f.p.trim()) return 'Write the prompt.';
+    if (f.p.length > PROMPT_MAX) return 'The prompt is too long for the phone (at most 20,000 characters). Schedule it on the laptop.';
+    if (f.keep && !f.timed) return '';
+    if (!f.at || isNaN(f.at)) return 'Choose when it should run.';
+    if (f.at < now - 60000) return 'That time has already passed. Choose a later time.';
+    if (f.at > now + 366 * 86400000) return 'Choose a time within the next year.';
+    return '';
+  }
+
   // ---------- Commit & push (git.cs): the same rules as Git.Commands / Git.SelectionProblem ----------
   // The exact commands Send runs for these files (review d, picked files in review order); the laptop
   // rebuilds this list itself and refuses to run anything that differs from what was shown here.
@@ -276,7 +303,7 @@
   // One argument for display only (nothing is ever run through a shell): quoted when it isn't plain.
   function showArg(a) { return /^[A-Za-z0-9_.\/:=@+,-]+$/.test(a) ? a : "'" + a.replace(/'/g, "'\\''") + "'"; }
 
-  if (typeof module === 'object' && module.exports) module.exports = { clock: clock, span: span, ago: ago, statusText: statusText, HATS: HATS, BODIES: BODIES, creatureLayers: creatureLayers, countdown: countdown, percentText: percentText, remainingText: remainingText, isAsleep: isAsleep, SLEEP_MS: SLEEP_MS, contextInfo: contextInfo, schedGroups: schedGroups, gitCommands: gitCommands, gitProblem: gitProblem, showArg: showArg };
+  if (typeof module === 'object' && module.exports) module.exports = { clock: clock, span: span, ago: ago, statusText: statusText, HATS: HATS, BODIES: BODIES, creatureLayers: creatureLayers, countdown: countdown, percentText: percentText, remainingText: remainingText, isAsleep: isAsleep, SLEEP_MS: SLEEP_MS, contextInfo: contextInfo, schedGroups: schedGroups, localInput: localInput, parseLocalInput: parseLocalInput, quickTime: quickTime, schedProblem: schedProblem, gitCommands: gitCommands, gitProblem: gitProblem, showArg: showArg };
   if (typeof document === 'undefined') return;
 
   // ---------- connection ----------
@@ -664,9 +691,11 @@
   }
 
   // ---------- Scheduled prompts ----------
-  // Read-only: the only request this view makes is the same GET api/board as the rest of the page, so
-  // opening or refreshing it can never start, change or resubmit a task.
+  // Looking (the list, details, Refresh) only uses the same GET api/board as the rest of the page. Changes are
+  // explicit POSTs to api/queue (Schedule / Save, Cancel task, Stop run), each with a one-time id: see the form below.
   var schedOpen = '', schedPastOpen = false, schedSig = '', schedTimes = [], schedAsked = false, schedScroll = 0;
+  var schedNew = $('sched-new'), formEl = $('sched-form'), formOpen = false;
+  var schedSaved = null;   // { k, task }: the task just saved from here, shown with a confirmation until the board has it
   var tzName = '';
   try { tzName = Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch (e) { }
 
@@ -700,16 +729,21 @@
   function renderSched(timesOnly) {
     var q = data && data.queue, now = data ? boardNow() : Date.now();
     schedRefresh.disabled = schedAsked;
+    if (formOpen) updateForm();
     if (timesOnly) { schedTimes.forEach(function (x) { x.el.textContent = x.fn(now); }); return; }
-    var sig = JSON.stringify(q || null) + '|' + !!data + '|' + conn + '|' + schedPastOpen + '|' + schedOpen;
+    var sig = JSON.stringify(q || null) + '|' + !!data + '|' + conn + '|' + schedPastOpen + '|' + schedOpen + '|' + formOpen + '|' + JSON.stringify(schedSaved);
     if (sig === schedSig) return;
     schedSig = sig;
     schedTimes = [];
     schedInfo.textContent = 'Times in ' + (tzName ? tzName.replace(/_/g, ' ') : "this phone's time zone");
     schedList.textContent = '';
     schedBody.textContent = '';
-    schedList.hidden = !!schedOpen;
-    schedDetail.hidden = !schedOpen;
+    schedList.hidden = !!schedOpen || formOpen;
+    schedDetail.hidden = !schedOpen || formOpen;
+    formEl.hidden = !formOpen;
+    schedNew.hidden = !!schedOpen || formOpen || !(q && q.can);
+    schedNew.textContent = draftOf('new') ? '＋ Schedule task (draft saved)' : '＋ Schedule task';
+    if (formOpen) return;
     var empty = function (text) { var p = el('p', 'sched-empty', text); schedList.appendChild(p); };
     if (!data) { if (schedOpen) schedBody.appendChild(el('p', 'sched-empty', 'Connecting to the laptop…')); empty(conn === 'offline' ? "Can't reach Claude Status on the laptop" : 'Connecting to the laptop…'); return; }
     if (!q) { empty("The laptop didn't send its schedule. Restart Claude Status on the laptop after updating it."); if (schedOpen) schedBody.appendChild(el('p', 'sched-empty', 'Task details are unavailable.')); return; }
@@ -717,7 +751,7 @@
     if (q.warn) schedList.appendChild(el('p', 'sched-warn', q.warn));
     if (q.paused) schedList.appendChild(el('p', 'sched-warn', 'The queue is paused on the laptop: nothing new starts until you resume it there.'));
     var g = schedGroups(q.tasks);
-    if (!q.tasks.length) { empty('Nothing scheduled. Schedule prompts from the Queue view on the laptop.'); return; }
+    if (!q.tasks.length) { empty(q.can ? 'Nothing scheduled yet. Tap Schedule task to have Claude run a prompt on the laptop later.' : 'Nothing scheduled. Schedule prompts from the Queue view on the laptop.'); return; }
     [['attn', 'NEEDS ATTENTION'], ['run', 'RUNNING'], ['up', 'UPCOMING']].forEach(function (s) {
       if (!g[s[0]].length) return;
       schedList.appendChild(el('h2', 'sched-h', s[1] + ' · ' + g[s[0]].length));
@@ -760,10 +794,17 @@
   var SCHED_TEXT = { asap: 'As soon as possible', at: 'At a set time', after: 'After another task succeeds', usage: 'When usage is available again' };
   function renderDetail(q, now) {
     var t = q.tasks.filter(function (x) { return x.k === schedOpen; })[0];
+    if (!t && schedSaved && schedSaved.k === schedOpen) t = schedSaved.task;   // saved a moment ago; the board catches up
     if (!t) { schedBody.appendChild(el('p', 'sched-empty', "This task is no longer on the laptop's schedule. It may have been removed, or cleared from history.")); return; }
     var st = schedStatus(t, q.paused);
+    if (schedSaved && schedSaved.k === t.k) {
+      var ok = el('p', 'sched-ok', schedSaved.text);
+      ok.setAttribute('role', 'status');
+      schedBody.appendChild(ok);
+    }
     schedBody.appendChild(el('h2', 'qd-title', t.ti || 'Untitled'));
     var s = el('p', 'qd-status'); s.appendChild(el('span', 'qword c-' + st.color, st.text)); schedBody.appendChild(s);
+    if (q.can) taskActions(t, q);
     var dl = el('dl', 'qd-facts');
     var fact = function (k, v, live) {
       if (!v && !live) return;
@@ -776,6 +817,7 @@
     fact('Runs with', 'Claude Code' + (t.md ? ' (' + t.md + ')' : '') + DOT + (t.rn === 'headless' ? 'in the background' : "in the project's VS Code window"));
     fact('Schedule', (SCHED_TEXT[t.sc] || t.sc) + (t.sc === 'after' && t.af ? ': “' + t.af + '”' : ''));
     if (t.sc === 'at' && t.ra) fact('Scheduled for', null, function () { return fullTime(t.ra); });
+    if (t.sc === 'at' && t.lt && laptopZoneDiffers(q, t.ra)) fact('Laptop clock', laptopText(t.lt) + (q.tz ? ' (' + q.tz + ')' : ''));
     if (t.at && (Q_GROUP[t.kd] || 'up') === 'up') fact('Next run', null, function (n) { return fullTime(t.at) + ' (' + rel(t.at, n) + ')'; });
     if (t.sc === 'at') fact('If missed', t.im === 'skip' ? 'Skip it' : 'Run when possible');
     if (t.sa) fact('Last started', null, function (n) { return fullTime(t.sa) + ' (' + rel(t.sa, n) + ')'; });
@@ -788,10 +830,276 @@
     schedBody.appendChild(el('h3', 'qd-h', 'Prompt'));
     schedBody.appendChild(el('div', 'qd-prompt', t.p || '(empty)'));
     if (t.pc) schedBody.appendChild(el('p', 'qd-note', 'Shortened: the full prompt is on the laptop.'));
-    schedBody.appendChild(el('p', 'qd-note', 'View only. Change or run tasks from the Queue view on the laptop.'));
+    if (t.cp) schedBody.appendChild(el('p', 'qd-note', 'This task may also commit, push or delete files (set on the laptop). Editing it here keeps that.'));
+    if (!q.can) schedBody.appendChild(el('p', 'qd-note', 'View only. Change or run tasks from the Queue view on the laptop.'));
   }
 
-  schedBack.addEventListener('click', function () { schedOpen = ''; renderSched(false); window.scrollTo(0, schedScroll); });
+  // Edit / Cancel task (not started yet) and Stop run (already running) are different actions, said plainly.
+  var RUNNING = { starting: 1, running: 1, needs_you: 1 };
+  function taskActions(t, q) {
+    var live = conn === 'live', box = el('div', 'qd-actions'), btns = 0;
+    var add = function (text, cls, fn) {
+      var b = el('button', 'usage-btn' + (cls ? ' ' + cls : ''), text);
+      b.type = 'button'; b.disabled = !live || !!acting;
+      b.addEventListener('click', fn);
+      box.appendChild(b); btns++;
+    };
+    if (t.ed) add('Edit or reschedule', '', function () { openForm(t); });
+    if (t.cx && !RUNNING[t.kd]) add('Cancel task', 'danger', function () {
+      if (confirm('Cancel “' + (t.ti || 'this task') + '”?\n\nIt hasn\'t started, so it simply won\'t run. Tasks waiting for it will be blocked.')) taskAct('cancel', t);
+    });
+    if (RUNNING[t.kd]) add('Stop run', 'danger', function () {
+      if (confirm('Stop “' + (t.ti || 'this task') + '” now?\n\nClaude is stopped on the laptop' + (t.rn === 'headless' ? '' : ' (its VS Code terminal stays open so you can read it)') + '. Changes it already made to files are NOT undone. Tasks waiting for it will be blocked.')) taskAct('stop', t);
+    });
+    if (!btns) return;
+    schedBody.appendChild(box);
+    var why = RUNNING[t.kd] ? 'Stop run ends the run that is already in progress.' : t.cx ? 'Cancel task: it hasn\'t started, so it just won\'t run.' : '';
+    if (!live) why = 'Not connected to the laptop: actions are unavailable until it is LIVE again.';
+    if (why) schedBody.appendChild(el('p', 'qd-explain', why));
+  }
+
+  var acting = null;   // the cancel / stop request in flight (one at a time)
+  function taskAct(op, t) {
+    if (acting || conn !== 'live') return;
+    acting = { op: op, k: t.k, id: newId() };
+    schedSig = ''; renderSched(false);
+    var send = function (tries) {
+      queueApi('', { op: op, id: acting.id, k: t.k }).then(function (j) {
+        if (j.result === 'pending' && tries < 6) { setTimeout(function () { send(tries + 1); }, 2000); return; }
+        acting = null;
+        note(j.status === 200 ? (op === 'stop' ? 'Stopped on the laptop.' : "Canceled. It won't run.") : (j.msg || 'The laptop refused (' + j.status + ').'));
+        schedSig = ''; renderSched(false);
+      }, function () {
+        // The same request again is harmless (same id), so one quiet retry before giving up.
+        if (tries < 1) { setTimeout(function () { send(tries + 1); }, 1500); return; }
+        acting = null;
+        note("Not confirmed: the laptop didn't answer. Check the task's status when it's LIVE again.");
+        schedSig = ''; renderSched(false);
+      });
+    };
+    send(0);
+  }
+
+  function queueApi(q, body) {
+    var c = new AbortController(), timer = setTimeout(function () { c.abort(); }, 25000);
+    var opt = { cache: 'no-store', credentials: 'same-origin', signal: c.signal, headers: { Accept: 'application/json', 'X-Claude-Status': 'queue' } };
+    if (body) { opt.method = 'POST'; opt.headers['Content-Type'] = 'application/json'; opt.body = JSON.stringify(body); }
+    return fetch('api/queue' + (q ? '?' + q : ''), opt).then(function (r) {
+      clearTimeout(timer);
+      return r.json().catch(function () { return {}; }).then(function (j) { j = j && typeof j === 'object' ? j : {}; j.status = r.status; return j; });
+    }, function (e) { clearTimeout(timer); throw e; });
+  }
+
+  // The laptop's own clock: shown only when its time zone differs from this phone's at that moment.
+  function laptopZoneDiffers(q, ms) { return typeof q.tzo === 'number' && q.tzo !== -new Date(ms || Date.now()).getTimezoneOffset(); }
+  function laptopText(lt) {   // "2026-11-14 09:00" (the laptop's wall clock) -> "Sat, Nov 14, 9:00 AM"
+    var m = /^(\d{4})-(\d\d)-(\d\d) (\d\d):(\d\d)$/.exec(lt || '');
+    if (!m) return lt || '';
+    var d = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5]));
+    return d.toLocaleString([], { timeZone: 'UTC', weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+  }
+  function laptopAt(q, ms) { return new Date(ms + q.tzo * 60000).toLocaleString([], { timeZone: 'UTC', weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }); }
+
+  // ---------- the Schedule task form ----------
+  // The draft lives in this browser (localStorage) until the laptop confirms it saved the task, so a failed save,
+  // a dropped connection, a reload or closing the page never loses it. Its one-time id is kept with it: sending the
+  // same draft again (after "not confirmed", or a reload) updates the task the laptop already saved, never a second one.
+  var DRAFT_KEY = 'claudeStatus.schedDraft', LASTPROJ_KEY = 'claudeStatus.schedProject';
+  var fProject = $('sf-project'), fPrompt = $('sf-prompt'), fAt = $('sf-at'), fTitle = $('sf-title'), fRunner = $('sf-runner'), fMode = $('sf-mode');
+  var fModel = $('sf-model'), fMissed = $('sf-missed'), fAdv = $('sf-adv'), fReview = $('sf-review'), fError = $('sf-error'), fSave = $('sf-save');
+  var fHeading = $('sf-heading'), fSub = $('sf-sub'), fCount = $('sf-count'), fKeep = $('sf-keep'), fProjNote = $('sf-project-note');
+  var draft = null;          // the form's content: { mode, k, rv, id, pj, pjName, p, ti, at, timed, keep, keepText, rn, pm, md, im, open }
+  var projects = null, projErr = '', projBusy = false, saving = false, saveMsg = '', tried = false;
+
+  // Two slots: a new task's draft, and the latest edit, so editing a task never replaces an unsent new one.
+  function draftOf(mode) { try { return JSON.parse(localStorage.getItem(DRAFT_KEY + '.' + mode) || 'null'); } catch (e) { return null; } }
+  function storeDraft(mode) {
+    mode = mode || (draft && draft.mode);
+    try { if (draft && draft.mode === mode) localStorage.setItem(DRAFT_KEY + '.' + mode, JSON.stringify(draft)); else if (mode) localStorage.removeItem(DRAFT_KEY + '.' + mode); } catch (e) { }
+  }
+
+  function openForm(t) {
+    var saved = draftOf(t ? 'edit' : 'new');
+    if (saved && (!t || saved.k === t.k)) draft = saved;   // your unsent changes win
+    else if (t) draft = { mode: 'edit', k: t.k, rv: t.rv, id: newId(), pj: t.pk, pjName: t.pj, p: t.p, ti: t.ti, at: t.sc === 'at' ? t.ra : null, timed: false,
+      keepText: t.sc === 'at' ? '' : (SCHED_TEXT[t.sc] || t.sc) + (t.sc === 'after' && t.af ? ': “' + t.af + '”' : ''), rn: t.rn, pm: t.pm, md: t.md, im: t.im };
+    else {
+      var last = null; try { last = JSON.parse(localStorage.getItem(LASTPROJ_KEY) || 'null'); } catch (e) { }
+      draft = { mode: 'new', id: newId(), pj: last ? last.k : '', pjName: last ? last.n : '', p: '', ti: '', at: null, timed: false, rn: 'vscode', pm: 'acceptEdits', md: '', im: 'run' };
+    }
+    draft.open = true;
+    storeDraft();
+    formOpen = true; saveMsg = ''; tried = false; schedSaved = null;
+    fillForm();
+    schedSig = ''; renderSched(false);
+    window.scrollTo(0, schedEl.offsetTop);
+    loadProjects(false);
+  }
+
+  function closeForm(discard) {
+    formOpen = false;
+    var mode = draft && draft.mode;
+    if (draft) { draft.open = false; storeDraft(); }
+    if (discard) { draft = null; storeDraft(mode); }
+    schedSig = ''; renderSched(false);
+  }
+
+  function fillForm() {
+    var edit = draft.mode === 'edit';
+    fHeading.textContent = edit ? 'Edit scheduled task' : 'Schedule a task';
+    fSave.textContent = edit ? 'Save changes' : 'Schedule';
+    fPrompt.value = draft.p || '';
+    fTitle.value = draft.ti || '';
+    fAt.value = draft.at ? localInput(draft.at) : '';
+    fRunner.value = draft.rn || 'vscode'; fMode.value = draft.pm || 'acceptEdits'; fModel.value = draft.md || ''; fMissed.value = draft.im || 'run';
+    fAdv.open = edit && (draft.rn === 'headless' || draft.pm !== 'acceptEdits' || !!draft.md || draft.im === 'skip');
+    fillProjects();
+  }
+
+  function fillProjects() {
+    fProject.textContent = '';
+    var opts = (projects || []).slice();
+    if (draft.pj && !opts.some(function (p) { return p.k === draft.pj; })) {
+      // not on the laptop's list (yet): a stale token after a laptop restart, or a project whose folder is gone
+      var byName = opts.filter(function (p) { return draft.pjName && p.n === draft.pjName; })[0];
+      if (byName && projects) { draft.pj = byName.k; storeDraft(); }
+      else if (draft.mode === 'edit' || !projects) opts.unshift({ k: draft.pj, n: draft.pjName || 'Current project' });
+      else { draft.pj = ''; storeDraft(); }
+    }
+    var first = el('option', '', projects ? (opts.length ? 'Choose a project…' : 'No projects found') : projErr ? "Couldn't load the projects" : 'Loading projects…');
+    first.value = '';
+    fProject.appendChild(first);
+    opts.forEach(function (p) { var o = el('option', '', p.n); o.value = p.k; fProject.appendChild(o); });
+    fProject.value = draft.pj || '';
+    fProjNote.hidden = !(projErr || (projects && !opts.length));
+    fProjNote.textContent = projErr || 'No projects yet. Projects appear here once Claude Code has worked in them on the laptop, or once a task is scheduled for them there.';
+  }
+
+  function loadProjects(fresh) {
+    if (projBusy) return;
+    projBusy = true;
+    queueApi('op=projects' + (fresh ? '&fresh=1' : '')).then(function (j) {
+      if (j.status === 200 && Array.isArray(j.projects)) { projects = j.projects; projErr = ''; }
+      else projErr = j.status === 404 ? 'The laptop is running an older Claude Status. Re-run install.ps1 there.' : (j.msg || "Couldn't load the projects (" + j.status + ').');
+    }, function () { projErr = "Couldn't load the projects: no answer from the laptop."; })
+      .then(function () { projBusy = false; if (formOpen && draft) { fillProjects(); updateForm(); } });
+  }
+
+  function readForm() {
+    var at = parseLocalInput(fAt.value);
+    draft.pj = fProject.value;
+    var o = fProject.options[fProject.selectedIndex];
+    draft.pjName = draft.pj && o ? o.textContent : '';
+    draft.p = fPrompt.value; draft.ti = fTitle.value;
+    draft.rn = fRunner.value; draft.pm = fMode.value; draft.md = fModel.value.trim(); draft.im = fMissed.value;
+    if (!isNaN(at) && at !== draft.at) { draft.at = at; draft.timed = true; }
+    if (isNaN(at)) { draft.at = null; draft.timed = false; }
+    storeDraft();
+  }
+
+  // Everything that depends on the inputs, the connection and the clock; never touches what you typed.
+  function updateForm() {
+    if (!draft) return;
+    var q = data && data.queue, now = data ? boardNow() : Date.now(), live = conn === 'live';
+    var edit = draft.mode === 'edit';
+    fCount.textContent = draft.p ? draft.p.length.toLocaleString() + ' characters · sent to Claude exactly as written' + (draft.p.length > PROMPT_MAX ? ' · too long (max 20,000)' : '') : '';
+    fKeep.hidden = !(edit && draft.keepText && !draft.timed);
+    fKeep.textContent = 'Currently: ' + (draft.keepText || '') + '. Pick a time below only to change it.';
+    fSub.textContent = (draft.rn === 'headless' ? 'Runs on the laptop with Claude Code, in the background.' : "Runs on the laptop with Claude Code, in the project's VS Code window.");
+    // An edit keeps the task's time unless you set a new one here.
+    var problem = schedProblem({ pj: draft.pj, p: draft.p, at: draft.at, keep: edit, timed: draft.timed }, now);
+    // the exact time, its time zone, and what happens if the laptop isn't ready then (rebuilt only when it reads differently)
+    var rv = el('div');
+    if (draft.at) {
+      var line = el('div');
+      line.appendChild(document.createTextNode('Runs '));
+      line.appendChild(el('strong', '', fullTime(draft.at)));
+      line.appendChild(document.createTextNode(' (' + (draft.at > now ? 'in ' + countdown(draft.at - now) : 'now') + ')'));
+      rv.appendChild(line);
+      rv.appendChild(el('p', 'sf-note', 'Time zone: ' + (tzName ? tzName.replace(/_/g, ' ') : "this phone's") + ' (this phone).' +
+        (q && laptopZoneDiffers(q, draft.at) ? ' On the laptop' + (q.tz ? ' (' + q.tz + ')' : '') + ' that is ' + laptopAt(q, draft.at) + '.' : ' The laptop uses the same time.')));
+    } else if (edit && draft.keepText) rv.appendChild(el('div', '', 'Keeps its schedule: ' + draft.keepText + '.'));
+    if (rv.childNodes.length) {
+      rv.appendChild(el('p', 'sf-note', draft.im === 'skip'
+        ? "The laptop must be on, awake and running Claude Status then. If it isn't, the task is skipped."
+        : "The laptop must be on, awake and running Claude Status then. If it's asleep or off, the task runs once it's back (after a 1-minute chance to skip it)."));
+      rv.appendChild(el('p', 'sf-note', 'If Claude is already busy in this project, or your usage limit is reached, it waits until it can run.'));
+      if (q && q.paused) rv.appendChild(el('p', 'sf-note', 'The queue is paused on the laptop: nothing starts until you resume it there.'));
+    }
+    if (rv.textContent !== fReview.textContent) { fReview.textContent = ''; while (rv.firstChild) fReview.appendChild(rv.firstChild); }
+    var why = !data || !q ? 'Connecting to the laptop…' : !q.can ? 'The laptop is running an older Claude Status that can’t take tasks from the phone. Re-run install.ps1 there.' :
+      !live ? 'Not connected to the laptop, so nothing can be saved now. Your draft is kept on this phone.' : '';
+    fError.hidden = !(saveMsg || why || (problem && (tried || draft.p)));
+    fError.textContent = saveMsg || why || problem;
+    fSave.disabled = saving || !!why || !!problem;
+    if (saving) fSave.textContent = 'Saving on the laptop…';
+    else fSave.textContent = edit ? 'Save changes' : 'Schedule';
+    fPrompt.setAttribute('aria-invalid', String(tried && !draft.p.trim()));
+  }
+
+  function onInput() { if (!draft) return; readForm(); if (!saving) saveMsg = ''; updateForm(); }
+  [fProject, fPrompt, fAt, fTitle, fRunner, fMode, fModel, fMissed].forEach(function (x) { x.addEventListener('input', onInput); x.addEventListener('change', onInput); });
+  fProject.addEventListener('change', function () { if (draft && draft.pj) try { localStorage.setItem(LASTPROJ_KEY, JSON.stringify({ k: draft.pj, n: draft.pjName })); } catch (e) { } });
+  [].forEach.call(document.querySelectorAll('.chip'), function (c) {
+    c.addEventListener('click', function () {
+      if (!draft) return;
+      fAt.value = localInput(quickTime(c.dataset.min ? { min: +c.dataset.min } : { tomorrow: +c.dataset.tomorrow }, data ? boardNow() : Date.now()));
+      onInput();
+    });
+  });
+  $('sf-back').addEventListener('click', function () { closeForm(false); window.scrollTo(0, schedScroll); });
+  $('sf-discard').addEventListener('click', function () {
+    if (draft && (draft.p || '').trim() && !confirm('Discard this draft? Nothing was ' + (draft.mode === 'edit' ? 'changed' : 'scheduled') + '.')) return;
+    closeForm(true);
+  });
+  schedNew.addEventListener('click', function () { schedScroll = window.scrollY; openForm(null); fProject.value ? fPrompt.focus() : fProject.focus(); });
+
+  // Success is shown only after the laptop says it saved the task in its queue file.
+  formEl.addEventListener('submit', function (e) {
+    e.preventDefault();
+    if (!draft || saving) return;
+    readForm();
+    tried = true;
+    updateForm();
+    if (fSave.disabled) return;
+    var edit = draft.mode === 'edit', d = draft;
+    var body = { op: 'save', id: d.id, pj: d.pj, p: d.p, ti: d.ti.trim(), rn: d.rn, pm: d.pm, md: d.md, im: d.im, ai: 'claude' };
+    if (edit) { body.k = d.k; body.rv = d.rv; }
+    if (!edit || d.timed) body.at = d.at;
+    saving = true; saveMsg = '';
+    updateForm();
+    var finish = function (msg) { saving = false; saveMsg = msg; updateForm(); };
+    var send = function (tries) {
+      queueApi('', body).then(function (j) {
+        if (j.status === 200 && j.result === 'saved' && j.task) {
+          saving = false;
+          var t = j.task;
+          draft = null; storeDraft(d.mode);
+          formOpen = false;
+          schedSaved = { k: t.k, task: t, text: (edit ? 'Saved on the laptop. ' : 'Scheduled on the laptop. ') + (t.sc === 'at' && t.ra ? 'It runs ' + fullTime(t.ra) + '.' : 'It keeps its schedule.') + ' You can close this page: the laptop runs it.' };
+          schedOpen = t.k;
+          schedSig = ''; renderSched(false);
+          window.scrollTo(0, schedEl.offsetTop);
+          return;
+        }
+        if (j.result === 'pending' && tries < 8) { setTimeout(function () { send(tries + 1); }, 2000); return; }
+        if (j.result === 'changed' && j.task && edit) { d.rv = j.task.rv; storeDraft(); return finish('This task changed on the laptop after you opened it (now: ' + j.task.lb + '). Your version is kept here: Save again to replace the laptop\'s, or go Back to see it.'); }
+        if (j.result === 'project') { projects = null; loadProjects(true); }
+        finish(j.msg || 'The laptop didn\'t save it (' + j.status + '). Your draft is kept.');
+      }, function () {
+        finish("Not confirmed: the laptop didn't answer, so it may not have been saved. Your draft is kept. Tap " + (edit ? 'Save changes' : 'Schedule') + ' again when it’s LIVE: it won’t create a second task.');
+      });
+    };
+    send(0);
+  });
+
+  // A draft left open (reload, the browser closed it in the background) comes back where it was.
+  (function () {
+    var d = [draftOf('new'), draftOf('edit')].filter(function (x) { return x && x.open; })[0];
+    if (d && view === 'sched') { draft = d; formOpen = true; fillForm(); loadProjects(false); }
+  })();
+
+  schedBack.addEventListener('click', function () { schedOpen = ''; schedSaved = null; renderSched(false); window.scrollTo(0, schedScroll); });
   schedRefresh.addEventListener('click', function () {
     if (schedAsked) return;
     schedAsked = true;

@@ -1142,6 +1142,9 @@ namespace ClaudeStatus
                 var p = new PhoneServer(root, port, PhoneDismiss, PhoneFocus, null);
                 p.UsageRefresh = PhoneUsageRefresh;
                 p.Push = push;
+                p.Queue = queue;
+                p.OnUi = PhoneOnUi;
+                p.Aliases = CfgDict("projectAliases");
                 if (p.Start()) { phone = p; phoneError = ""; phoneFailedPort = 0; return; }
                 phoneError = p.Error;
             }
@@ -1153,6 +1156,7 @@ namespace ClaudeStatus
         void PublishPhone()
         {
             if (phone == null) return;
+            phone.Aliases = CfgDict("projectAliases");
             phone.Publish(ordered, CfgBool("showWorkerSummary", false), Board.Summary(ordered), LoadContexts());
             PublishQueue();
         }
@@ -1188,6 +1192,17 @@ namespace ClaudeStatus
             }
             contextKept = map;
             return map;
+        }
+
+        // Called on a server thread: runs a scheduler action from the phone on the UI thread, where every other
+        // scheduler action runs, and waits for it. null = no answer in time (it may still complete; work must not throw).
+        object PhoneOnUi(Func<object> work)
+        {
+            if (!IsHandleCreated || IsDisposed) throw new InvalidOperationException("not ready");
+            object result = null;
+            var done = new ManualResetEvent(false);
+            BeginInvoke((MethodInvoker)(() => { try { result = work(); } finally { done.Set(); } }));
+            return done.WaitOne(15000) ? result : null;
         }
 
         // Called on a server thread; the file-level check makes it safe without the UI thread.
