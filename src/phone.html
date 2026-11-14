@@ -28,6 +28,7 @@
         <button type="button" id="view-creatures" class="seg" data-view="creatures" aria-pressed="false">Creatures</button>
         <button type="button" id="view-sched" class="seg" data-view="sched" aria-pressed="false">Scheduled</button>
         <button type="button" id="view-git" class="seg" data-view="git" aria-pressed="false">Commit</button>
+        <button type="button" id="view-cal" class="seg" data-view="cal" aria-pressed="false">Calendar</button>
       </div>
       <button type="button" id="gear" class="gear" aria-label="Display settings" aria-expanded="false" aria-controls="settings">
         <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" fill-rule="evenodd" d="M19 9.5L21.8 10L21.8 14L19 14.5L18.7 15.2L20.3 17.5L17.5 20.3L15.2 18.7L14.5 19L14 21.8L10 21.8L9.5 19L8.8 18.7L6.5 20.3L3.7 17.5L5.3 15.2L5 14.5L2.2 14L2.2 10L5 9.5L5.3 8.8L3.7 6.5L6.5 3.7L8.8 5.3L9.5 5L10 2.2L14 2.2L14.5 5L15.2 5.3L17.5 3.7L20.3 6.5L18.7 8.8ZM12 15.3a3.3 3.3 0 1 1 0-6.6a3.3 3.3 0 1 1 0 6.6Z"/></svg>
@@ -160,6 +161,40 @@
       <button type="submit" id="sf-save" class="sf-send">Schedule</button>
       <button type="button" id="sf-discard" class="usage-btn sf-discard">Discard draft</button>
     </form>
+  </section>
+  <section id="cal" class="sched cal" aria-label="Calendar: when your AI workers worked" hidden>
+    <div class="cal-bar">
+      <button type="button" id="cal-prev" class="usage-btn cal-nav" aria-label="Previous day">‹</button>
+      <button type="button" id="cal-today" class="usage-btn">Today</button>
+      <button type="button" id="cal-next" class="usage-btn cal-nav" aria-label="Next day">›</button>
+      <span id="cal-range" class="cal-range" aria-live="polite"></span>
+      <div class="segs cal-span" role="group" aria-label="Show">
+        <button type="button" class="seg" data-span="day" aria-pressed="true">Day</button>
+        <button type="button" class="seg" data-span="week" aria-pressed="false">Week</button>
+      </div>
+    </div>
+    <div id="cal-days" class="cal-days" role="group" aria-label="Day of the week"></div>
+    <ul class="cal-legend" aria-label="Legend">
+      <li><span class="cal-key tn"></span>Toah Nipi</li>
+      <li><span class="cal-key other"></span>Other</li>
+      <li><span class="cal-key wait"></span>Waiting</li>
+      <li><span class="cal-key plan"></span>Planned</li>
+    </ul>
+    <p id="cal-zone" class="cal-zone"></p>
+    <p id="cal-notes" class="cal-notes" hidden></p>
+    <div id="cal-scroll" class="cal-scroll" tabindex="0" aria-label="Hours of the day">
+      <div id="cal-grid" class="cal-grid"></div>
+    </div>
+    <div id="cal-sheet" class="cal-sheet" role="dialog" aria-modal="false" aria-labelledby="cal-sh-title" hidden>
+      <div class="cal-sheet-head">
+        <h2 id="cal-sh-title" class="qd-title"></h2>
+        <button type="button" id="cal-sh-close" class="usage-btn" aria-label="Close details">✕</button>
+      </div>
+      <p id="cal-sh-status" class="qd-status"></p>
+      <dl id="cal-sh-facts" class="qd-facts"></dl>
+      <p id="cal-sh-note" class="qd-note" hidden></p>
+      <button type="button" id="cal-sh-open" class="usage-btn" hidden>Open in Scheduled</button>
+    </div>
   </section>
   <section id="git" class="sched" aria-label="Review changes and commit" hidden>
     <div class="sched-bar">

@@ -211,10 +211,16 @@ namespace ClaudeStatus
         string selected = "", shownActionsKey = "", shownOutputKey = "";
         bool splitSet, historyOpen, promptTab = true;
         TaskEditor editor;
+        // The Calendar tab (calendar.cs): null when no calendar source was given (the tests' plain Queue).
+        readonly CalendarView calendar;
+        readonly Button tasksTab, calendarTab;
+        readonly Control tasksArea, bannerArea;
 
         int S(float v) { return (int)Math.Round(v * scale); }
 
-        public QueueView(QueueEngine engine, float scale)
+        public QueueView(QueueEngine engine, float scale) : this(engine, scale, null) { }
+
+        public QueueView(QueueEngine engine, float scale, CalendarSource calendarSource)
         {
             eng = engine;
             this.scale = scale;
@@ -232,6 +238,13 @@ namespace ClaudeStatus
             var buttons = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(0) };
             newTask = QTheme.Primary(QTheme.Btn("+  New task", (s, e) => Edit(null)));
             pause = QTheme.Btn("⏸  Pause queue", (s, e) => eng.SetPaused(!eng.Data.Paused));
+            if (calendarSource != null)
+            {
+                tasksTab = QTheme.Btn("Tasks", (s, e) => ShowCalendar(false));
+                calendarTab = QTheme.Btn("Calendar", (s, e) => ShowCalendar(true));
+                tasksTab.Margin = new Padding(0, 0, 0, S(6)); calendarTab.Margin = new Padding(0, 0, S(14), S(6));
+                buttons.Controls.Add(tasksTab); buttons.Controls.Add(calendarTab);
+            }
             buttons.Controls.Add(newTask); buttons.Controls.Add(pause);
             var info = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.TopDown, WrapContents = false, Margin = new Padding(S(8), 0, 0, 0) };
             var line1 = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(0) };
@@ -312,11 +325,25 @@ namespace ClaudeStatus
             split.Panel2.Controls.Add(detail);
             split.Panel2.Controls.Add(empty);
 
+            tasksArea = split; bannerArea = bannerPanel;
+            if (calendarSource != null)
+            {
+                calendar = new CalendarView(calendarSource, scale) { Dock = DockStyle.Fill, Visible = false };
+                calendar.OpenTask = id => { ShowCalendar(false); SelectTask(id); };
+                Controls.Add(calendar);
+            }
             Controls.Add(split);
             Controls.Add(bannerPanel);
             Controls.Add(top);
             QTheme.Style(top); QTheme.Style(bannerPanel); QTheme.Style(tabs); QTheme.Style(emptyButtons);
             QTheme.Primary(newTask);
+            if (calendar != null)
+            {
+                // the shown tab is drawn bold: both get room for that, so nothing shifts when you switch
+                var tabFont = new Font(SystemFonts.MessageBoxFont, FontStyle.Bold);
+                foreach (var b in new[] { tasksTab, calendarTab }) b.MinimumSize = new Size(TextRenderer.MeasureText(b.Text, tabFont).Width + S(18), pause.PreferredSize.Height);
+                ShowCalendar(false);
+            }
             newTask.MinimumSize = new Size(0, pause.PreferredSize.Height);
             // The list keeps a fixed share of the width; a narrow window gives way in the list so details stay readable.
             Layout += (s, e) =>
@@ -355,6 +382,27 @@ namespace ClaudeStatus
         }
 
         QueueTask Selected() { return selected == "" ? null : eng.Data.Find(selected); }
+
+        public CalendarView Calendar { get { return calendar; } }
+        public bool CalendarShown { get { return calendar != null && calendar.Visible; } }
+
+        // Tasks (the list and details) or Calendar. Only what's shown changes; the queue keeps running either way.
+        public void ShowCalendar(bool on)
+        {
+            if (calendar == null) return;
+            calendar.Visible = on;
+            tasksArea.Visible = !on;
+            if (on) bannerArea.Visible = false; else RefreshView();
+            // the shown tab looks pressed (aria-pressed for screen readers comes from the name)
+            // (selected, not the accent: + New task stays the one primary button)
+            QTheme.Normal(tasksTab); QTheme.Normal(calendarTab);
+            var shown = on ? calendarTab : tasksTab;
+            shown.BackColor = QTheme.Select; shown.ForeColor = QTheme.SelectText; shown.FlatAppearance.BorderColor = QTheme.Focus;
+            shown.Font = new Font(SystemFonts.MessageBoxFont, FontStyle.Bold);
+            (on ? tasksTab : calendarTab).Font = SystemFonts.MessageBoxFont;
+            tasksTab.AccessibleName = "Tasks" + (on ? "" : " (shown)"); calendarTab.AccessibleName = "Calendar" + (on ? " (shown)" : "");
+            if (on) calendar.RefreshData();
+        }
 
         public void SelectTask(string id)
         {
@@ -433,7 +481,7 @@ namespace ClaudeStatus
                 bButton = "Install VS Code bridge"; bAct = InstallBridge;
             }
             else if (d.Paused && upcoming.Count > 0) { bText = "The queue is paused: nothing new starts. A task that is already running continues."; bButton = "▶  Resume queue"; bAct = () => eng.SetPaused(false); }
-            bp.Visible = bText != "";
+            bp.Visible = bText != "" && !CalendarShown;
             banner.Text = bText;
             bannerAction.Visible = bButton != ""; bannerAction.Text = bButton; bannerAction.Tag = bAct;
             bp.BackColor = eng.Store.Warning != "" ? QTheme.ErrorBg : QTheme.AttentionBg;

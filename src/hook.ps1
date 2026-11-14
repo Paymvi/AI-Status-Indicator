@@ -41,6 +41,33 @@ try {
     $cur = $null
     try { $cur = [IO.File]::ReadAllText($file) | ConvertFrom-Json } catch {}
 
+    # Calendar history: one line per prompt lifecycle event in state\activity\<UTC day>.jsonl (calendar.cs folds
+    # them into prompt runs). Same privacy as the state file: folder name and a short identifier only.
+    function Add-Activity([string]$e, [string]$d) {
+        $t = [DateTime]::UtcNow
+        $adir = Join-Path $root 'state\activity'
+        if ($e -eq 'tick') {
+            # at most one "still working" mark per session every 2 minutes (PostToolUse fires on every tool call)
+            $mark = Join-Path $adir ('tick\' + $sid)
+            if ((Test-Path -LiteralPath $mark) -and ($t - [IO.File]::GetLastWriteTimeUtc($mark)).TotalSeconds -lt 120) { return }
+            if (-not (Test-Path -LiteralPath (Split-Path $mark))) { $null = New-Item -ItemType Directory -Force -Path (Split-Path $mark) }
+            [IO.File]::WriteAllText($mark, '')
+        }
+        if (-not (Test-Path -LiteralPath $adir)) { $null = New-Item -ItemType Directory -Force -Path $adir }
+        $pj = ''
+        if ($in -and $in.cwd) { try { $pj = Split-Path -Leaf ([string]$in.cwd) } catch {} }
+        $line = ([ordered]@{ id = [Guid]::NewGuid().ToString('N'); p = 'claude'; s = $sid; e = $e; t = $t.ToString('o'); pj = $pj; d = $d } | ConvertTo-Json -Compress) + "`n"
+        $bytes = (New-Object System.Text.UTF8Encoding $false).GetBytes($line)
+        # AppendData-only access: Windows puts each write at the end of the file, so concurrent hooks never overwrite each other.
+        for ($i = 0; $i -lt 10; $i++) {
+            try {
+                $fs = New-Object IO.FileStream((Join-Path $adir ($t.ToString('yyyy-MM-dd') + '.jsonl')), [IO.FileMode]::Append, [Security.AccessControl.FileSystemRights]::AppendData, [IO.FileShare]::ReadWrite, 4096, [IO.FileOptions]::None)
+                try { $fs.Write($bytes, 0, $bytes.Length) } finally { $fs.Dispose() }
+                break
+            } catch { Start-Sleep -Milliseconds 15 }
+        }
+    }
+
     $state = $null; $detail = ''; $kept = $false
     switch ($Action) {
         'working'   { $state = 'WORKING' }
@@ -63,6 +90,17 @@ try {
             elseif (Test-Path -LiteralPath $file) { Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue }
         }
     }
+
+    try {
+        switch ($Action) {
+            'working'   { Add-Activity 'start' '' }
+            'done'      { Add-Activity 'done' '' }
+            'error'     { Add-Activity 'fail' $detail }
+            'needs_you' { Add-Activity 'wait' $detail }
+            'resume'    { if ($state) { Add-Activity 'resume' '' } elseif ($cur -and $cur.state -eq 'WORKING') { Add-Activity 'tick' '' } }
+            'end'       { Add-Activity 'end' '' }
+        }
+    } catch {}
 
     if ($state) {
         $now = (Get-Date).ToUniversalTime().ToString('o')

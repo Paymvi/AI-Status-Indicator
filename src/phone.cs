@@ -20,6 +20,8 @@
 //                                         and push, or retry the push (git.cs). Repositories are named by
 //                                         tokens; the review screen shows the repository's path and diffs.
 //   GET  /api/queue?op=projects           the projects a task can be scheduled in (friendly names + tokens)
+//   GET  /api/calendar?d=YYYY-MM-DD       the Calendar view: that week laid out exactly as the desktop shows it
+//                                         (calendar.cs; read-only, names, times and tokens only)
 //   POST /api/queue {"op":"save"|"cancel"|"stop"}  schedule / edit a task, cancel one that hasn't started, or
 //                                         stop a running one: the desktop's own QueueEngine actions, run on its
 //                                         UI thread. Projects and tasks are named by tokens; never a path.
@@ -35,6 +37,7 @@ using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
+using System.Globalization;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
@@ -277,6 +280,7 @@ namespace ClaudeStatus
         public QueueEngine Queue;
         public Func<Func<object>, object> OnUi;
         public IDictionary<string, object> Aliases;           // "projectAliases", for friendly project names
+        public CalendarSource Calendar;                       // the Calendar view's week (calendar.cs); null = not available
         public string ClaudeProjectsDir = Sessions.ProjectsDir();
         readonly object opsGate = new object();
         readonly Dictionary<string, Dictionary<string, object>> queueOps = new Dictionary<string, Dictionary<string, object>>();   // request -> its answer (null = in progress)
@@ -554,6 +558,7 @@ namespace ClaudeStatus
                 if (req.Path == "/api/board") { BoardRequest(ns, req); return; }
                 if (req.Path == "/api/git") { GitGet(ns, req); return; }
                 if (req.Path == "/api/queue") { QueueGet(ns, req); return; }
+                if (req.Path == "/api/calendar") { CalendarGet(ns, req); return; }
                 Text(ns, 404, "Not found");
                 return;
             }
@@ -563,7 +568,7 @@ namespace ClaudeStatus
             if (req.Method == "POST" && req.Path == "/api/focus") { FocusRequest(ns, req); return; }
             if (req.Method == "POST" && req.Path == "/api/usage-refresh") { UsageRefreshRequest(ns, req); return; }
             if (req.Method == "POST" && req.Path == "/api/push") { PushRequest(ns, req); return; }
-            if (req.Path == "/api/dismiss" || req.Path == "/api/focus" || req.Path == "/api/usage-refresh" || req.Path == "/api/push" || req.Path == "/api/git" || req.Path == "/api/queue" || Pages.ContainsKey(req.Path) || req.Path == "/api/board") { Text(ns, 405, "Method not allowed"); return; }
+            if (req.Path == "/api/dismiss" || req.Path == "/api/focus" || req.Path == "/api/usage-refresh" || req.Path == "/api/push" || req.Path == "/api/git" || req.Path == "/api/queue" || req.Path == "/api/calendar" || Pages.ContainsKey(req.Path) || req.Path == "/api/board") { Text(ns, 405, "Method not allowed"); return; }
             Text(ns, 404, "Not found");
         }
 
@@ -991,6 +996,63 @@ namespace ClaudeStatus
             foreach (var p in KnownProjects(req.Query.Contains("fresh=1")))
                 list.Add(new Dictionary<string, object> { { "k", p[0] }, { "n", p[2] }, { "f", Path.GetFileName(p[1]) } });
             Json(ns, 200, new JavaScriptSerializer().Serialize(new Dictionary<string, object> { { "projects", list } }));
+        }
+
+        // The Calendar view: the week containing ?d=YYYY-MM-DD (the laptop's dates and clock), exactly as the desktop
+        // lays it out. Display data only: friendly names, times, states and tokens (never session ids or paths).
+        void CalendarGet(NetworkStream ns, Request req)
+        {
+            string marker, site;
+            if (!req.Headers.TryGetValue("X-Claude-Status", out marker) || marker != "calendar" || (req.Headers.TryGetValue("Sec-Fetch-Site", out site) && site != "same-origin")) { Json(ns, 403, "{\"error\":\"forbidden\"}"); return; }
+            if (Calendar == null) { Json(ns, 503, "{\"result\":\"unavailable\"}"); return; }
+            var m = Regex.Match(req.Query, @"^d=(\d{4}-\d{2}-\d{2})$");
+            DateTime day;
+            if (req.Query == "") day = TimeZoneInfo.ConvertTimeFromUtc(Calendar.Now(), Calendar.Zone).Date;
+            else if (!m.Success || !DateTime.TryParseExact(m.Groups[1].Value, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out day) || day.Year < 2000 || day.Year > 2100) { Json(ns, 400, "{\"result\":\"bad_request\"}"); return; }
+            CalWeek w;
+            try { w = Calendar.Week(day); } catch { Json(ns, 500, "{\"result\":\"error\"}"); return; }
+            Json(ns, 200, new JavaScriptSerializer { MaxJsonLength = int.MaxValue }.Serialize(CalendarData(w)));
+        }
+
+        Dictionary<string, object> CalendarData(CalWeek w)
+        {
+            var tz = Calendar.Zone;
+            DateTime now = w.NowUtc;
+            var days = new List<object>(); var labels = new List<object>();
+            foreach (var d in w.Days) { days.Add(d.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)); labels.Add(d.ToString("ddd d", CultureInfo.CurrentCulture)); }
+            var blocks = new List<object>();
+            var info = new Dictionary<string, object>();
+            var queue = Calendar.Queue();
+            foreach (var b in w.Blocks)
+            {
+                var r = b.Run; var p = b.Plan;
+                string folder = p != null ? p.Project : r.Project, name = Calendar.Name(folder);
+                string k = Token("c|" + CalendarView.Key(b));
+                var waits = new List<object>();
+                foreach (var x in b.Waits) waits.Add(new[] { Math.Round(x[0], 2), Math.Round(x[1], 2) });
+                blocks.Add(new Dictionary<string, object>
+                {
+                    { "k", k }, { "d", b.Day }, { "s", Math.Round(b.StartMin, 2) }, { "e", Math.Round(b.EndMin, 2) }, { "c", b.Col }, { "n", b.Cols },
+                    { "cat", b.Cat }, { "pl", p != null }, { "pv", p != null ? "claude" : r.Provider }, { "nm", p != null && p.Title != "" ? p.Title : name }, { "l2", ClaudeStatus.Calendar.BlockLine(b, tz, now) },
+                    { "ti", ClaudeStatus.Calendar.Title(b) }, { "st", p != null ? p.Kind : r.Status }, { "fp", b.FromPrev }, { "tn", b.ToNext }, { "w", waits },
+                    { "unk", r != null && !r.EndKnown && !r.Live },
+                });
+                if (info.ContainsKey(k)) continue;
+                var facts = p != null ? ClaudeStatus.Calendar.Facts(p, name, b.Cat, tz) : ClaudeStatus.Calendar.Facts(r, name, b.Cat, now, tz);
+                string task = p != null ? p.TaskId : r.TaskId;
+                string title = ClaudeStatus.Calendar.Title(b);
+                info[k] = new Dictionary<string, object>
+                {
+                    { "h", title != "" ? title : name }, { "st", p != null ? "Planned · tentative" : ClaudeStatus.Calendar.StatusLabel(r, now) }, { "f", facts }, { "nt", ClaudeStatus.Calendar.Note(b) },
+                    { "q", task != "" && queue != null && queue.Find(task) != null ? Token("q|" + task) : "" },   // opens it in Scheduled
+                };
+            }
+            return new Dictionary<string, object>
+            {
+                { "days", days }, { "labels", labels }, { "today", w.Today }, { "nowMin", Math.Round(w.NowMin, 2) }, { "now", Ms(now) }, { "zone", w.Zone },
+                { "codex", w.CodexShown }, { "notes", ClaudeStatus.Calendar.Notes(w, tz) }, { "blocks", blocks }, { "info", info },
+                { "minV", ClaudeStatus.Calendar.MinVisual },
+            };
         }
 
         // One request = one change. Each carries a one-time id from the page; a resend of the same request (a double

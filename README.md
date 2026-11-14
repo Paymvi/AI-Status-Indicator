@@ -80,6 +80,7 @@ CLAUDE WORKERS
 
 - **Status** is the Worker Board described above: small, always on top, never takes keyboard focus.
 - **Queue** is a larger, normal window (you type prompts in it, so it can take focus and isn't always on top). It has a taskbar button and an Alt+Tab entry, so it can't get lost behind other windows. Drag its border to resize it.
+- The Queue window has two tabs: **Tasks** (the scheduling interface described below) and **[Calendar](#calendar)** (when your AI workers worked, and what's planned).
 - Each view remembers its own place: switching back to Status puts the board exactly where it was; the Queue window keeps its own size and position (`queue-window.txt`). Both are kept on a connected monitor.
 - Switching views never pauses the scheduler or a running task, and never loses session state.
 - The old **Compact** pill was removed. If it was your startup view, Claude Status now opens in **Status** (the setting is migrated automatically).
@@ -94,7 +95,8 @@ The ⚙ button (in the Status or Queue header) opens a small settings window. Ch
 - **Start Claude Status when I sign in to Windows:** adds or removes the Startup-folder shortcut (`autostart.ps1`). Scheduled prompts only run while Claude Status runs, so turn this on if you queue work overnight.
 - **Show usage:** on / off: the [Claude Usage](#claude-usage) strip under the heading (on by default). Off hides it completely; usage keeps being tracked, and the phone has its own switch.
 - **Phone dashboard (private, via Tailscale):** on / off (see [Phone dashboard](#phone-dashboard-optional))
-- **Edit project aliases (config.json)…** opens `config.json` in Notepad. Saved alias changes apply as soon as you save the file.
+- **Include Codex in the Calendar:** on (default) / off. Off hides Codex's prompts in the [Calendar](#calendar) on both screens and stops reading Codex's logs; what was already collected is kept.
+- **Edit project aliases and categories (config.json)…** opens `config.json` in Notepad. Saved changes apply as soon as you save the file.
 
 ### Clicking a worker
 
@@ -217,6 +219,53 @@ Each task has an explicit scope that **Claude Code enforces** (its own permissio
 
 Prompts, results and logs stay on this computer in `state\queue\` (`tasks.json`, plus `runs\<task>\` with each run's permission file and, for background runs, its log). The VS Code bridge's request and status files are in `state\vscode\`. The activity shown for VS Code runs is read from Claude Code's own saved conversation (best effort: that format isn't documented). Nothing is sent anywhere except what Claude Code itself sends to Anthropic. Finished tasks are deleted after `"queueHistoryDays"` (30) days; **Clear all history…** (under More on a finished task) deletes them now. A `tasks.json` that can't be read is kept as `tasks.json.unreadable-<time>`, never silently replaced. The phone dashboard shows the Queue and can schedule, edit, cancel and stop tasks in it (see [Schedule tasks from the phone](#schedule-tasks-from-the-phone)).
 
+## Calendar
+
+**Queue window → Calendar** (and **Calendar** on the phone) shows, Google Calendar style, **when your AI workers were working each day**: seven days across, the full 24 hours down the side, one block per prompt.
+
+```text
+        Sun 8   Mon 9        Tue 10   …
+ 9 AM          ┃Website ┃Velo┃
+               ┃Claude  ┃    ┃          ← simultaneous workers side by side
+10 AM          ┃▨WAITING┃    ┃          ← waiting for you, inside the same prompt
+               ┃        ┃
+11 PM                      ┃Portal      ← overnight: one prompt, drawn up to midnight…
+12 AM                      ┃Portal      ← …and on from midnight
+ 2 AM                       ┊Audit┊     ← planned (dashed, tentative)
+```
+
+- **One block = one prompt run.** It starts when the worker starts on the prompt and ends when that prompt finishes. A later prompt in the same conversation is a new block. An open terminal or conversation is never counted as work. Manual prompts and scheduled ones are both shown.
+- **Colors:** **green = Toah Nipi**, **yellow = every other project**. Waiting for you (a permission prompt or a question) is a **striped** part *inside* the same block, labelled **WAITING**; when you answer, the block carries on. A prompt can pause any number of times.
+- **Planned tasks** from the Queue are **dashed, faint and fading**: they're plans, not work. They sit at their scheduled start; their duration isn't known, so the block is a labelled 30-minute estimate and no finish time is shown. Once a task starts, its planned block disappears and the real run shows instead, with *Planned for 9:00 AM · started 3 min late* in its details. Missed, canceled and *didn't start* tasks stay visible as such, grey-dashed. The Queue is the source of truth: editing, rescheduling or removing a task moves or removes its block. Looking at the calendar never starts or reruns anything.
+- **Click (or tap) a block** for its details: project and category, Claude or Codex, the scheduled task's title (or Codex's own thread name), status, start and end, **elapsed** (including waiting), **active** (elapsed minus recorded waiting) and **waiting** (with the number of pauses). A planned block offers **Open in Queue** (phone: **Open in Scheduled**). **Count *project* as Toah Nipi / other** saves a category override (desktop).
+- **Controls:** ‹ / › (previous / next week), **Today**, a red current-time line, and the legend. Keyboard: PageUp / PageDown change week, Home is Today, Left / Right step through the blocks, Up / Down scroll, Esc closes the details.
+- **On the phone** it opens in **Day** view (one readable column, a row of day buttons with a dot on days with activity, ‹ › move a day). **Week** shows seven columns you scroll sideways inside the calendar. Tap a block for a details sheet.
+- **Times** are the laptop's clock, and the time zone is named above the grid (also on the phone). Daylight saving changes and midnight are handled: a run through midnight is one record drawn in two pieces; a run through the repeated fall-back hour keeps its real length.
+
+### Which projects are Toah Nipi
+
+A project is **Toah Nipi** when its folder name contains *Toah Nipi* (`Toah_Nipi_Website`, `Toah_Nipi_Booking_Software`, `Toah_Nipi_Portal`, `toah-nipi-staff-app`, …), or when `config.json` says so in `projectCategories`. Friendly names (aliases) never decide it, so an unrelated project called *Portal* stays yellow. The default config marks `Guest_Booking_Form` (its repository is *Toah_Nipi_Guest_Booking_Form*) as Toah Nipi. To fix one or add a future project, click any of its blocks and choose **Count … as Toah Nipi / other**, or edit:
+
+```json
+"projectCategories": { "Guest_Booking_Form": "toahnipi", "Some_Folder": "other" }
+```
+
+The same rule colors actual runs and planned tasks, on the desktop and the phone.
+
+### How activity is tracked
+
+| Source | What it gives |
+|---|---|
+| Claude Code hooks (`hook.ps1`) | `UserPromptSubmit` starts a prompt; `Notification` / `PermissionRequest` / `AskUserQuestion` start a wait; the next tool result ends it; `Stop` / `StopFailure` finish it; `SessionEnd` closes it; tool results also leave an "still working" mark at most every 2 minutes. |
+| Codex's own session logs (`%USERPROFILE%\.codex\sessions`) | Each turn's `task_started` / `task_complete` / `turn_aborted`. Reviewer sub-agent threads are skipped (they run inside a turn). Codex's logs don't mark waiting for approval, so Codex blocks say *waiting not recorded*. |
+| The Queue's run history | Links each scheduled run to the prompt it started; runs without lifecycle events (older history) are shown from the Queue's own start/end record. |
+
+**Endings are never invented.** A prompt that never reported finishing (Claude crashed, the terminal was killed, you pressed Esc, the laptop slept, Codex stopped writing) isn't shown as running forever: once its session is no longer working (or after `staleHours`), its block ends at the **last thing seen** for it, with a dotted bottom edge, *Ending not recorded* or *Interrupted*, and durations given as *at least …*. A block is only shown as running while its Claude session is verifiably WORKING / NEEDS YOU with its process alive (Codex: while its log keeps being written). Running blocks grow as the work continues (every 30 seconds, and at once when a worker changes state).
+
+**History.** Claude Code prompts are recorded **from the moment this version is installed** (the calendar says so for earlier weeks): Claude Code's own transcripts don't reliably record when a prompt finished, so older Claude activity isn't reconstructed. Exceptions: scheduled tasks (from the Queue's history, kept `queueHistoryDays`), and Codex, whose logs record every turn: its existing history is read once, in the background, then only new lines.
+
+**Storage.** `state\activity\<UTC day>.jsonl`, one short line per event: `{"id":"…","p":"claude","s":"<session id>","e":"start","t":"2026-11-14T15:02:11.123Z","pj":"Toah_Nipi_Website","d":""}` (`d` is only a short identifier such as `permission_prompt` or `Bash`). Every line has a unique id, so a line read or written twice never makes a second block; several hooks writing at once can't overwrite each other (append-only writes). Times are stored in UTC and shown in local time. `codex-index.json` remembers how far each Codex log was read; `since.txt` when tracking began. Nothing is ever sent anywhere, no AI calls are made for labels, and **prompt text is never stored** (manual Claude Code blocks say so instead of showing a title). The phone gets the same week from the laptop (`/api/calendar`, behind the same Tailscale-only access as the rest of the dashboard): friendly names, times, states and opaque tokens only.
+
 ## Claude Usage
 
 See your Claude plan's usage limits without opening Claude Code and running `/usage`. A one-line strip under the Worker Board heading shows the account's limits; click it for the full breakdown.
@@ -293,6 +342,7 @@ tailscale serve on the laptop  ── forwards to ──►  127.0.0.1:48521
 - **Honest connection state** (top right): **LIVE**, **CONNECTING…**, **RECONNECTING…** or **OFFLINE**. When the connection is lost, the page keeps the last board but dims it, freezes its timers, shows *Last update 11:55:07 (3s ago). The board below may be out of date.* and says why (laptop unreachable, or Claude Status not answering). Dismissing is disabled until it's LIVE again, and a dismiss is never queued for later. It reconnects by itself and refreshes as soon as the laptop answers again, including when you come back to the page after Android put it in the background.
 - **No phone notifications**: no sounds, vibration, notification prompts or background activity. (Desktop sounds and notifications are unchanged.)
 - **Scheduled** (third view): the laptop's Queue, plus **＋ Schedule task** to queue a prompt from the phone. See [Schedule tasks from the phone](#schedule-tasks-from-the-phone) below.
+- **Calendar** (fifth view): when your workers worked, day by day or by week, and what's planned. See [Calendar](#calendar).
 - **Commit** (fourth view): review a worker's Git changes and, only when you press **Send**, commit the files you picked with the message you wrote and push them. See [Review changes & commit](#review-changes--commit-git) below.
 - **Two views: List or Creatures** (switch at the top). Creatures has two options of its own, **Compact** (three columns) and **Show context** (per-worker context-window bars). See below.
 - **Claude Usage** (account-wide): a compact line above the workers (*5h 14% · Wk 57%*); tap it for the same breakdown as the desktop, with countdowns and a **Refresh** button. **Show usage** (next to List / Creatures) hides or shows it; each phone remembers its own choice, separately from the desktop's. The phone gets only the displayed figures and text: never account IDs, credentials or file contents.
@@ -587,6 +637,7 @@ The other files Claude Status writes, all on your computer only:
 
 - `state\context\<session-id>.json` (written by `statusline.ps1`, read only for the phone's *Show context*): `{"v":1,"pct":42.5,"size":200000,"at":"…"}`, that session's context-window percentage, size and when Claude Code reported it. A reading is removed a day after its session has left the board.
 - `state\windows.json`: for sessions in an app with several windows (e.g. two VS Code windows), the window that was in front when you last prompted that session: `{"<session-id>": {"hwnd": 67076, "pid": 21748, "started": "…"}}`. That's a window handle number plus the owning process ID and start time, with no window title or content. Entries are removed when their session disappears from the board.
+- `state\activity\` (the [Calendar](#calendar)'s history): one line per prompt lifecycle event with the session ID, project folder name, event, time and a short identifier; plus how far Codex's logs were read. No prompts or paths.
 - `position.txt` (window position), `config.json` (your settings), the `settings.json` backups the installer/uninstaller make next to your settings, and, only if you turn on debugging, `debug.log`.
 
 Nothing is sent anywhere. Older v1 state files from previous versions are read as-is (their timers start from their last update) and turn into v2 files the next time their session fires a hook; you never need to delete them.
@@ -595,6 +646,7 @@ Nothing is sent anywhere. Older v1 state files from previous versions are read a
 
 - **Worker Board** (default): one row per Claude session with friendly names, live timers, urgency or recency ordering, DONE rows that stay until dismissed, and click-to-focus
 - **Queue**: schedule prompts for Claude Code (at a time, after another task, or when usage is back), with explicit unattended permissions, conversation continuity, usage-limit waiting, recovery after sleep/restart, and readable results
+- **Calendar**: a week view of every prompt your Claude and Codex workers ran (green Toah Nipi, yellow other projects), waiting shown inside each prompt, and planned tasks as tentative blocks, on the desktop and the phone
 - True always-on-top windows (native `WS_EX_TOPMOST`, no polling) that **never steal keyboard focus** when anything changes
 - Auto-sizing to the number of workers; scrolls only the list once it reaches the bottom of the screen; DPI-aware (tested at 100/125/150/200 %)
 - Draggable anywhere; remembers its position
@@ -793,6 +845,8 @@ If the wizard says it can't find the file, use this instead: press **Win + R**, 
 | `showUsage` | `true` (default) shows the [Claude Usage](#claude-usage) strip on the Worker Board; `false` hides it (no space kept). Also in Settings. |
 | `phoneDashboard` | `true` runs the [phone dashboard](#phone-dashboard-optional) on 127.0.0.1. Default `false`. Also in Settings. |
 | `phonePort` | Its local port (default `48521`). |
+| `includeCodex` | `true` (default): the Calendar shows Codex's prompts next to Claude's (read from Codex's own session logs). `false` hides them and stops reading those logs; nothing collected is deleted. Also in Settings. |
+| `projectCategories` | Calendar colors: `"Folder_Name": "toahnipi"` (green) or `"other"` (yellow), matched case-insensitively against the project's folder name. Without an entry, folder names containing *Toah Nipi* are green. See [Which projects are Toah Nipi](#which-projects-are-toah-nipi). |
 | `projectAliases` | Friendly names: `"Folder_Name": "Friendly Name"`. The folder name is matched case-insensitively against the name of the folder Claude is working in. Folders without an alias get their underscores replaced with spaces. Several folders may share one alias; their workers are then numbered together. |
 
 Sounds and notifications are the same as before: one per state change, never duplicated per row. Notifications follow Windows' Do Not Disturb / Focus settings and appear as coming from "Windows PowerShell".
@@ -836,6 +890,7 @@ It does **not** delete your cloned repository, Claude Code, the `.claude` folder
 - **Claude Usage** only knows what Claude Code has reported on this computer. With no recent Claude Code activity it shows the last figures as *Stale*; usage on claude.ai or other devices appears once Claude Code reports again. The docs don't say whether the VS Code extension runs status line commands. If it doesn't, sessions there only update the `/usage` cache. The `/usage` cache is undocumented and may change with Claude Code updates.
 - **Phone context bars** need the status line, which the VS Code extension doesn't run: workers there show *Context unavailable*. In the CLI a reading arrives with each Claude reply, so it isn't updated mid-reply while a long tool call runs.
 - If a session ends abruptly without its Claude process exiting, its last WORKING / NEEDS YOU / ERROR state lingers until `staleHours` passes.
+- **Calendar:** Claude Code reports no event when you interrupt a prompt with Esc, so that block keeps "running" until your next prompt in that session (then it ends, marked *Interrupted*, at its last recorded activity) or the session closes. Waiting is only recorded where Claude Code fires its permission / question hooks (see the VS Code note above), and never for Codex. Claude Code prompts before this version was installed aren't shown (except scheduled tasks). Manual prompts have no title, because prompts are never stored.
 - Each hook call starts a short-lived `powershell.exe` (about 0.3–0.5 s). The blocking ones (`UserPromptSubmit`, `Stop`, `StopFailure`, `Notification`, `SessionEnd`) add that small delay; the rest run in the background.
 
 ## Troubleshooting
@@ -870,7 +925,9 @@ src/
   vscode.cs              the app side of the VS Code bridge: window registry, window choice, requests (files only)
   vscode-bridge/         the Claude Status Bridge VS Code extension (extension.js) and install-bridge.ps1 (.vsix + install)
   phone.cs               optional phone dashboard server (127.0.0.1 only) + race-safe DONE dismissal
-  phone.html/.css/.js    the phone page (List, Creatures, Scheduled and Commit views; the creature pixel art is drawn by phone.js)
+  phone.html/.css/.js    the phone page (List, Creatures, Scheduled, Commit and Calendar views; the creature pixel art is drawn by phone.js)
+  calendar.cs            the Calendar: activity log, prompt runs from lifecycle events, Codex log reader, week layout,
+                         and the desktop Calendar tab (the phone gets the same week from phone.cs /api/calendar)
   git.cs                 the phone's Commit view on the laptop: repository review, diffs, and the explicit commit & push
   usage.cs               Claude Usage: reads the status line data and Claude Code's /usage cache; details window
   statusline.ps1         Claude Code status line command: keeps only the rate_limits numbers for Claude Usage
@@ -891,6 +948,8 @@ tests/
   phone-schedule-tests.ps1  scheduling from the phone against the real app and mock-claude.ps1 (run by run-tests.ps1, or alone)
   worker-icons.mjs       draws src\'s favicon and notification images from phone.js's art (--check: are they current?)
   scheduler-tests.ps1    scheduler tests (run by run-tests.ps1) against mock-claude.ps1
+  calendar-tests.ps1     Calendar tests (run by run-tests.ps1): lifecycle, waits, categories, persistence, layout, Codex, phone API
+  calendar-browser.mjs   the phone's Calendar in headless Chrome (run-tests.ps1 -Browser)
   mock-claude.ps1        stand-in for claude.exe speaking Claude Code's stream-json (no real Claude calls)
   vscode-tests.ps1       VS Code runner tests in real VS Code windows (isolated profile) with mock-interactive-claude.cs
   vscode-driver/         test-only VS Code extension that types into terminals like a person (never installed for you)
@@ -909,6 +968,8 @@ powershell -ExecutionPolicy Bypass -File .\tests\run-tests.ps1 -Browser # + phon
 powershell -ExecutionPolicy Bypass -File .\tests\run-tests.ps1 -VSCode  # + real VS Code windows running scheduled tasks against a mock claude.exe (~5 min)
 powershell -ExecutionPolicy Bypass -File .\tests\vscode-smoke.ps1       # real Claude in VS Code (small haiku usage)
 ```
+
+The Calendar tests (`calendar-tests.ps1`) use fixture events in temporary folders, never your history. They cover: prompt lifecycles (start → waits → resume → Stop, several pauses, failures, session close, Esc then a new prompt, crashes and lost tracking ending at the last thing seen, stale runs that stop growing, async events after Stop), the real `hook.ps1` writing them (one throttled tick, privacy, six hooks appending at once), persistence (restart, the same events twice, half-written lines), Toah Nipi classification and overrides, layout (overlaps in columns, 3–18-second runs, overnight runs as one record in two pieces, empty days, the DST fall-back hour), scheduled tasks (linked to their run, late starts, planned / missed / canceled / didn't-start, edits and removals, viewing never running a task), Codex logs (turns, skipped reviewer threads, text that mentions `task_complete`, incremental reads, a lost index not duplicating anything), Include Codex, the phone API's protections, and performance with 90 days of busy history. They save `calendar-desktop-*.png` renders. `-Browser` drives the phone's Calendar at 320/360/412 px (Day and Week, no sideways page scroll, nothing covered, taps and details, *Open in Scheduled*) and saves `phone-cal-*.png`.
 
 The scheduler tests run the real engine against `mock-claude.ps1` (never real Claude): new and resumed conversations, dependency order and blocked predecessors, cycles, usage limits (reported reset, midway continuation without resending the prompt, backoff, global waiting), permission blocks, auth / network / crash / API-key cases, missed schedules, overdue grace, sleep/wake clock jumps, DST, restart reattach, crash → uncertain (never rerun), two instances + repeated ticks launching once, process-tree cancellation with partial output, exact multiline/Unicode prompt bytes on stdin, Windows paths with spaces and Unicode, persistence, view switching while a task runs, and the scheduled worker row. They also cover the hook lifecycle and privacy (run as real child processes with secret-laden inputs), aliases, numbering, both orderings, timers, v1 compatibility, DONE retention and dismissal, layout at 100–200 % DPI with 1/6/90 workers, worker → window identification (terminals, multi-window apps, closed windows, reused process IDs), focus stealing, and install → update → re-install → uninstall against a temporary Claude config folder. The phone dashboard tests cover desktop/phone parity, dismissal in both directions, the delayed-dismiss race and 400 randomized hook-write/dismiss interleavings, malformed and cross-site requests, Host/Origin checks, start/stop/port conflicts, and that phone.js formats timers exactly like the desktop. For the Creatures view they check that a tap reaches the desktop's own click-on-a-worker routine for exactly that worker (and that a desktop click uses the same routine), with window lookup and activation **mocked** so the tests never move your focus. They also check that rapid taps make one request, that taps and **×** never trigger each other, stale and malformed references, the action's request protections, and stable, distinct, mostly orange creature looks (the first always orange). Context bars: per-session readings for two workers of one project, a real 0%, missing / malformed / post-`/compact` (unknown) / lower-after-compaction / changed-capacity / old readings, and that a context update leaves state files, timer starts, order, looks and dismiss tokens untouched and never revives a dismissed worker. Sleeping uses a fixed clock for just before, exactly at and after 3 hours, and checks it never applies to WORKING / NEEDS YOU / ERROR. `-Browser` additionally drives the real page at 320/360/390/412 px widths in both views, with two columns and Compact's three, with and without context bars (equal columns, nothing overlapping or cut off, crisp centred sprites), the Compact / Show context switches (saved per phone, no reconnect or rebuild, List unaffected), a creature falling asleep by itself at the 3-hour mark, staying asleep across background / reload / view switch / reduced motion, and waking on a new prompt, through disconnects, a 502 from `tailscale serve`, resume and recovery, reduced motion, keyboard use and background pausing, saving `phone-*.png` screenshots. The Commit tests (`git-tests.ps1`) use temporary repositories with a local bare remote, never a real project. They cover: selected-file commits, pre-existing staged files, multi-line messages with special characters (byte for byte), stale reviews, double and simultaneous Sends, previews that don't match, hook-rejected commits, a successful commit followed by a rejected push and Retry Push, credentials hidden from the phone, worktrees, busy workers, detached HEAD, no upstream, conflicts and behind-upstream. `-Browser` also walks the Commit flow on the page, from the offer to the pushed result. The phone scheduling tests (`phone-schedule-tests.ps1`) use the real app with temporary projects and the mock, never real Claude. They cover: creating, editing and rescheduling a task, cancel vs. stop, resends, double taps and simultaneous sends (one task), conflicting desktop edits, server-side validation, request protections, a busy UI thread, and a phone task running exactly once in the right project. `-Browser` walks the same flow on the page with the phone in another time zone, including a failed save, an answer lost after the laptop saved, a reload with the draft restored, disconnection, and 320 px and keyboard-open layouts. These are emulated phones; Tailscale itself and a physical Android device are not part of the automated tests. `-RenderDir <folder>` saves PNG renders of the board for a visual check.
 

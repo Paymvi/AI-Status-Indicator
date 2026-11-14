@@ -605,6 +605,9 @@ namespace ClaudeStatus
             : this(sort, summary, startup, phoneOn, usageOn, false, null, set, editAliases) { }
 
         public SettingsForm(string sort, bool summary, string startup, bool phoneOn, bool usageOn, bool autostartOn, Action<bool> setAutostart, Action<string, object> set, Action editAliases)
+            : this(sort, summary, startup, phoneOn, usageOn, autostartOn, setAutostart, true, set, editAliases) { }
+
+        public SettingsForm(string sort, bool summary, string startup, bool phoneOn, bool usageOn, bool autostartOn, Action<bool> setAutostart, bool codexOn, Action<string, object> set, Action editAliases)
         {
             Text = "Claude Status Settings";
             FormBorderStyle = FormBorderStyle.FixedToolWindow;
@@ -650,7 +653,12 @@ namespace ClaudeStatus
             ph.CheckedChanged += (s, e) => set("phoneDashboard", ph.Checked);
             flow.Controls.Add(ph);
 
-            var link = new LinkLabel { Text = "Edit project aliases (config.json)…", AutoSize = true, Margin = new Padding(3, 10, 3, 3) };
+            // Calendar: Codex's prompts next to Claude's. Off hides them (and stops reading Codex's logs); nothing is deleted.
+            var cx = new CheckBox { Text = "Include Codex in the Calendar", Checked = codexOn, AutoSize = true, Margin = new Padding(3, 4, 3, 3) };
+            cx.CheckedChanged += (s, e) => set("includeCodex", cx.Checked);
+            flow.Controls.Add(cx);
+
+            var link = new LinkLabel { Text = "Edit project aliases and categories (config.json)…", AutoSize = true, Margin = new Padding(3, 10, 3, 3) };
             link.LinkClicked += (s, e) => editAliases();
             flow.Controls.Add(link);
 
@@ -753,6 +761,13 @@ namespace ClaudeStatus
         Rectangle queueBounds;
         PowerModeChangedEventHandler powerChanged;
         EventHandler timeChanged;
+        // Calendar (calendar.cs): the activity history, Codex's logs (read in the background) and which Claude sessions
+        // are verifiably on a prompt right now (rebuilt by every Reload; read from the phone server's thread too).
+        readonly CalendarSource calendar;
+        readonly CodexWatch codex;
+        readonly System.Windows.Forms.Timer codexTimer;
+        volatile HashSet<string> liveClaude = new HashSet<string>();
+        int codexBusy;
         bool queueChangePending, quitConfirmed;
 
         protected override bool ShowWithoutActivation { get { return true; } }
@@ -859,7 +874,7 @@ namespace ClaudeStatus
             cfgWatcher.Changed += ch; cfgWatcher.Created += ch;
             cfgWatcher.Renamed += (s, e) => { cfgDebounce.Stop(); cfgDebounce.Start(); };
             cfgDebounce = new System.Windows.Forms.Timer { Interval = 250 };
-            cfgDebounce.Tick += (s, e) => { cfgDebounce.Stop(); bool ok; cfg = LoadConfig(cfgPath, out ok); cfgOk = ok; ApplyQueueConfig(); Reload(); };
+            cfgDebounce.Tick += (s, e) => { cfgDebounce.Stop(); bool ok; cfg = LoadConfig(cfgPath, out ok); cfgOk = ok; ApplyQueueConfig(); Reload(); RefreshCalendar(); };
 
             // Context-window readings (phone only) republish the phone board without re-reading any session.
             ctxWatcher = new FileSystemWatcher(contextDir, "*.json") { SynchronizingObject = this, IncludeSubdirectories = false,
@@ -893,6 +908,16 @@ namespace ClaudeStatus
             queueTimer = new System.Windows.Forms.Timer { Interval = 10000 };
             queueTimer.Tick += (s, e) => QueueTick();
 
+            string actDir = Path.Combine(root, "state\\activity");
+            calendar = new CalendarSource
+            {
+                Log = new ActivityLog(actDir), Queue = () => queue.Data, Config = () => cfg, ClaudeLive = sid => liveClaude.Contains(sid),
+                SincePath = Path.Combine(actDir, "since.txt"), CodexHome = testMode ? "" : CodexWatch.DefaultHome(),
+            };
+            if (!testMode) codex = new CodexWatch(calendar.CodexHome, calendar.Log, Path.Combine(actDir, "codex-index.json"));
+            codexTimer = new System.Windows.Forms.Timer { Interval = 15000 };
+            codexTimer.Tick += (s, e) => PollCodex();
+
             Reload();
             // Settings from the removed Compact view open in Status (the regular board).
             if (string.Equals(CfgStr("startupView", ""), "compact", StringComparison.OrdinalIgnoreCase)) SetCfg("startupView", "workerBoard");
@@ -913,6 +938,9 @@ namespace ClaudeStatus
                 try { ctxWatcher.EnableRaisingEvents = true; } catch { }
                 slow.Start();
                 tick.Start();
+                calendar.Since();   // tracking of Claude Code prompts starts now (if it hadn't before)
+                PollCodex();
+                codexTimer.Start();
                 displayChanged = (s, e) => { try { BeginInvoke((MethodInvoker)UpdateLayout); } catch { } };
                 SystemEvents.DisplaySettingsChanged += displayChanged;
             }
@@ -925,6 +953,7 @@ namespace ClaudeStatus
         public bool IsQueue { get { return !board; } }
         public QueueEngine Queue { get { return queue; } }
         public QueueView QueueViewControl { get { return queueView; } }
+        public CalendarSource Calendar { get { return calendar; } }
         public void ShowQueue(bool on) { SetView(!on); }
         public List<SessionInfo> Workers { get { return new List<SessionInfo>(ordered); } }
         public SessionInfo Surfaced { get { return current; } }
@@ -1015,9 +1044,15 @@ namespace ClaudeStatus
                     }
                 }
 
+            bool moved = next.Count != sessions.Count;
+            foreach (var si in next.Values) { SessionInfo was; if (!sessions.TryGetValue(si.Id, out was) || was.Updated != si.Updated || was.State != si.State) moved = true; }
+            var live = new HashSet<string>();
+            foreach (var si in next.Values) if (si.State == Board.Working || si.State == Board.NeedsYou) live.Add(si.Id);
+            liveClaude = live;
             sessions = next;
             ordered = list;
             initialized = true;
+            if (moved) RefreshCalendar();
             PruneAnchors();
             ApplyPhone();
             PublishPhone();
@@ -1145,6 +1180,7 @@ namespace ClaudeStatus
                 p.Queue = queue;
                 p.OnUi = PhoneOnUi;
                 p.Aliases = CfgDict("projectAliases");
+                p.Calendar = calendar;
                 if (p.Start()) { phone = p; phoneError = ""; phoneFailedPort = 0; return; }
                 phoneError = p.Error;
             }
@@ -1366,7 +1402,12 @@ namespace ClaudeStatus
             tip.SetToolTip(this, null); tipText = "";
             if (!board)
             {
-                if (queueView == null) { queueView = new QueueView(queue, scale) { Dock = DockStyle.Fill }; Controls.Add(queueView); }
+                if (queueView == null)
+                {
+                    queueView = new QueueView(queue, scale, calendar) { Dock = DockStyle.Fill };
+                    queueView.Calendar.SetCategory = SetCategory;
+                    Controls.Add(queueView);
+                }
                 Padding = new Padding(S(Edge), S(HeadH), S(Edge), S(Edge));
                 queueView.Visible = true;
                 queueView.RefreshView();
@@ -1463,6 +1504,7 @@ namespace ClaudeStatus
                 bool changed = false;
                 foreach (var si in ordered) { string before = si.Name; NameScheduled(new[] { si }); if (si.Name != before) changed = true; }
                 if (changed) Invalidate();
+                RefreshCalendar();   // the Queue decides planned blocks (edits, cancellations, starts)
             }));
         }
 
@@ -2017,7 +2059,7 @@ namespace ClaudeStatus
         {
             if (settingsForm != null && !settingsForm.IsDisposed) { settingsForm.Activate(); return; }
             settingsForm = new SettingsForm(CfgStr("workerSort", "urgency"), CfgBool("showWorkerSummary", false), CfgStr("startupView", "workerBoard"),
-                CfgBool("phoneDashboard", false), CfgBool("showUsage", true), AutostartOn(), SetAutostart, SetCfg, () => { try { Process.Start("notepad.exe", "\"" + cfgPath + "\""); } catch { } });
+                CfgBool("phoneDashboard", false), CfgBool("showUsage", true), AutostartOn(), SetAutostart, CfgBool("includeCodex", true), SetCfg, () => { try { Process.Start("notepad.exe", "\"" + cfgPath + "\""); } catch { } });
             settingsForm.Load += (s, e) =>
             {
                 Rectangle wa = Screen.FromControl(this).WorkingArea;
@@ -2088,7 +2130,7 @@ namespace ClaudeStatus
 
         protected override void Dispose(bool disposing)
         {
-            if (disposing) { StopPhone(); if (usage != null) usage.Dispose(); if (queue != null) queue.Dispose(); if (queueTimer != null) queueTimer.Dispose(); }
+            if (disposing) { StopPhone(); if (usage != null) usage.Dispose(); if (queue != null) queue.Dispose(); if (queueTimer != null) queueTimer.Dispose(); if (codexTimer != null) codexTimer.Dispose(); if (codex != null) codex.Stop(); }
             base.Dispose(disposing);
         }
 
@@ -2138,7 +2180,37 @@ namespace ClaudeStatus
             cfg = fresh; cfgOk = true;
             try { Json.WriteAtomic(cfgPath, Json.Pretty(new JavaScriptSerializer().Serialize(fresh))); } catch { }
             Reload();
+            RefreshCalendar();
         }
+
+        // The Calendar's "Count <project> as …": a saved projectCategories entry for that folder.
+        void SetCategory(string folder, string cat)
+        {
+            var cats = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
+            var old = CfgDict("projectCategories");
+            if (old != null) foreach (var kv in old) cats[kv.Key] = kv.Value;
+            foreach (var k in new List<string>(cats.Keys)) if (string.Equals(k, folder, StringComparison.OrdinalIgnoreCase)) cats.Remove(k);
+            cats[folder] = cat;
+            SetCfg("projectCategories", cats);
+        }
+
+        // Codex's session logs, read in the background (the first time that's all of its history). Only while Include
+        // Codex is on; what was already collected stays either way.
+        void PollCodex()
+        {
+            if (codex == null || !CfgBool("includeCodex", true)) { if (codex != null) codex.Stop(); return; }
+            codex.Watch(this);
+            if (System.Threading.Interlocked.CompareExchange(ref codexBusy, 1, 0) != 0) return;
+            System.Threading.ThreadPool.QueueUserWorkItem(_ =>
+            {
+                int added = 0;
+                try { added = codex.Poll(DateTime.UtcNow); } catch { }
+                System.Threading.Interlocked.Exchange(ref codexBusy, 0);
+                if (added > 0) try { BeginInvoke((MethodInvoker)RefreshCalendar); } catch { }
+            });
+        }
+
+        void RefreshCalendar() { if (queueView != null && queueView.CalendarShown) queueView.Calendar.RefreshData(); }
 
         bool CfgBool(string k, bool def) { object v; return cfg.TryGetValue(k, out v) && v is bool ? (bool)v : def; }
         double CfgNum(string k, double def) { object v; try { return cfg.TryGetValue(k, out v) ? Convert.ToDouble(v, CultureInfo.InvariantCulture) : def; } catch { return def; } }

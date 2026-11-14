@@ -16,6 +16,10 @@
   "queueHistoryDays": 30,
   "queueKeepAwake": true,
   "queueAllowApiBilling": false,
+  "includeCodex": true,
+  "projectCategories": {
+    "Guest_Booking_Form": "toahnipi"
+  },
   "projectAliases": {
     "Toah_Nipi_Booking_Software": "Booking Software",
     "Toah_Nipi_Website": "Website",

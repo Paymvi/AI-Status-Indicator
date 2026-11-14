@@ -303,7 +303,10 @@
   // One argument for display only (nothing is ever run through a shell): quoted when it isn't plain.
   function showArg(a) { return /^[A-Za-z0-9_.\/:=@+,-]+$/.test(a) ? a : "'" + a.replace(/'/g, "'\\''") + "'"; }
 
-  if (typeof module === 'object' && module.exports) module.exports = { clock: clock, span: span, ago: ago, statusText: statusText, HATS: HATS, BODIES: BODIES, creatureLayers: creatureLayers, countdown: countdown, percentText: percentText, remainingText: remainingText, isAsleep: isAsleep, SLEEP_MS: SLEEP_MS, contextInfo: contextInfo, schedGroups: schedGroups, localInput: localInput, parseLocalInput: parseLocalInput, quickTime: quickTime, schedProblem: schedProblem, gitCommands: gitCommands, gitProblem: gitProblem, showArg: showArg };
+  // Calendar dates are the laptop's ("2026-11-14"), so they're moved by whole days without any time zone involved.
+  function addDays(ymd, n) { var d = new Date(ymd + 'T12:00:00Z'); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); }
+
+  if (typeof module === 'object' && module.exports) module.exports = { addDays: addDays, clock: clock, span: span, ago: ago, statusText: statusText, HATS: HATS, BODIES: BODIES, creatureLayers: creatureLayers, countdown: countdown, percentText: percentText, remainingText: remainingText, isAsleep: isAsleep, SLEEP_MS: SLEEP_MS, contextInfo: contextInfo, schedGroups: schedGroups, localInput: localInput, parseLocalInput: parseLocalInput, quickTime: quickTime, schedProblem: schedProblem, gitCommands: gitCommands, gitProblem: gitProblem, showArg: showArg };
   if (typeof document === 'undefined') return;
 
   // ---------- connection ----------
@@ -312,7 +315,7 @@
   var $ = function (id) { return document.getElementById(id); };
   var boardEl = $('board'), connEl = $('conn'), summaryEl = $('summary'), rowsEl = $('rows'), noteEl = $('note');
   var bannerEl = $('banner'), bannerTitle = $('banner-title'), bannerWhen = $('banner-when'), bannerWhy = $('banner-why');
-  var creaturesEl = $('creatures'), petsEl = $('pets'), hintEl = $('pet-hint'), viewBtns = [$('view-list'), $('view-creatures'), $('view-sched'), $('view-git')];
+  var creaturesEl = $('creatures'), petsEl = $('pets'), hintEl = $('pet-hint'), viewBtns = [$('view-list'), $('view-creatures'), $('view-sched'), $('view-git'), $('view-cal')];
   var schedEl = $('sched'), schedInfo = $('sched-info'), schedList = $('sched-list'), schedDetail = $('sched-detail'), schedBody = $('sched-body');
   var schedRefresh = $('sched-refresh'), schedBack = $('sched-back');
 
@@ -333,7 +336,7 @@
   // List (default) or Creatures; remembered in this browser only.
   var VIEW_KEY = 'claudeStatus.view';
   var view = 'list';
-  try { var v0 = localStorage.getItem(VIEW_KEY); if (v0 === 'creatures' || v0 === 'sched' || v0 === 'git') view = v0; } catch (e) { }
+  try { var v0 = localStorage.getItem(VIEW_KEY); if (v0 === 'creatures' || v0 === 'sched' || v0 === 'git' || v0 === 'cal') view = v0; } catch (e) { }
 
   // Creatures view options, each remembered in this browser only and off unless turned on: Compact (three
   // columns instead of two; unrelated to the desktop's Compact view) and Show context (a context-window
@@ -389,6 +392,7 @@
     conn = 'live';
     render(changed || was !== 'live');
     gitOnBoard();
+    if (view === 'cal' && changed && Date.now() - calAt > 3000) loadCal();   // a worker changed: its block did too
   }
 
   function failed(e, aborted) {
@@ -470,7 +474,12 @@
     }
 
     if (full) renderOffers();
-    if (full && view === 'git') {
+    if (full && view === 'cal') {
+      rowsEl.textContent = '';
+      rowEls = [];
+      clearPets();
+      calLive();   // the week itself comes from api/calendar (loadCal); here only the connection state changes
+    } else if (full && view === 'git') {
       rowsEl.textContent = '';
       rowEls = [];
       clearPets();
@@ -1510,7 +1519,10 @@
 
   // ---------- view switch ----------
   function setView(v, remember) {
-    view = v === 'creatures' || v === 'sched' || v === 'git' ? v : 'list';
+    view = v === 'creatures' || v === 'sched' || v === 'git' || v === 'cal' ? v : 'list';
+    calEl.hidden = view !== 'cal';
+    if (view !== 'cal') calSheet.hidden = true;
+    if (view === 'cal' && Date.now() - calAt > 3000) loadCal();
     viewBtns.forEach(function (b) { b.setAttribute('aria-pressed', String(b.dataset.view === view)); });
     rowsEl.hidden = view !== 'list';
     schedEl.hidden = view !== 'sched';
@@ -1523,6 +1535,169 @@
     render(true);   // same data, same connection: only the presentation changes
   }
   viewBtns.forEach(function (b) { b.addEventListener('click', function () { if (b.dataset.view !== view) setView(b.dataset.view, true); }); });
+
+  // ---------- Calendar: one block per prompt run, planned tasks dashed (laid out by the laptop: api/calendar) ----------
+  var calEl = $('cal'), calGrid = $('cal-grid'), calScroll = $('cal-scroll'), calRange = $('cal-range'), calDays = $('cal-days');
+  var calZone = $('cal-zone'), calNotes = $('cal-notes'), calSheet = $('cal-sheet');
+  var calSpanBtns = [].slice.call(document.querySelectorAll('.cal-span .seg'));
+  var HOUR = 44;            // px per hour (--hh in phone.css)
+  var cal = null;           // the week from the laptop
+  var calDate = '';         // the laptop date being looked at ('' = its today)
+  var calSpan = 'day';      // day (one column, readable) | week (seven columns, scrolls sideways)
+  var calOpen = '', calAt = 0, calBusy = false, calErr = '', calScrolled = '';
+
+  function calApi(d) {
+    var c = new AbortController(), timer = setTimeout(function () { c.abort(); }, 15000);
+    return fetch('api/calendar' + (d ? '?d=' + encodeURIComponent(d) : ''), { cache: 'no-store', credentials: 'same-origin', signal: c.signal, headers: { Accept: 'application/json', 'X-Claude-Status': 'calendar' } })
+      .then(function (r) { clearTimeout(timer); if (!r.ok) throw { status: r.status }; return r.json(); }, function (e) { clearTimeout(timer); throw e; });
+  }
+
+  function loadCal() {
+    if (calBusy) return;
+    calBusy = true; calAt = Date.now();
+    var want = calDate;
+    calApi(want).then(function (w) {
+      if (!w || !Array.isArray(w.days) || w.days.length !== 7 || !Array.isArray(w.blocks)) throw { status: 0 };
+      calErr = '';
+      w.got = Date.now();   // the now line moves on from here (phone clock), like the desktop's
+      if (want === calDate) { cal = w; if (!calDate) calDate = w.today >= 0 ? w.days[w.today] : w.days[0]; }
+    }, function (e) {
+      calErr = e && e.status === 503 ? "The laptop's Claude Status is too old for the Calendar: update it and restart it." : e && e.status ? 'The laptop answered with an error (' + e.status + ').' : "Couldn't load the calendar: no answer from the laptop.";
+    }).then(function () { calBusy = false; if (view === 'cal') renderCal(); if (want !== calDate) loadCal(); });
+  }
+  setInterval(function () { if (view === 'cal' && !document.hidden && conn === 'live' && Date.now() - calAt > 30000) loadCal(); }, 5000);
+
+  function calLive() { if (view === 'cal') renderCal(); }
+
+  function calIndex() { return cal ? cal.days.indexOf(calDate) : -1; }
+  function dayName(ymd, opts) { return new Date(ymd + 'T12:00:00Z').toLocaleDateString([], Object.assign({ timeZone: 'UTC' }, opts)); }
+
+  function calGo(n) {
+    calDate = addDays(calDate || (cal ? cal.days[0] : ''), n);
+    calOpen = ''; calSheet.hidden = true;
+    if (cal && cal.days.indexOf(calDate) >= 0) renderCal(); else { calScrolled = ''; renderCal(); loadCal(); }
+  }
+
+  function renderCal() {
+    var week = calSpan === 'week';
+    calSpanBtns.forEach(function (b) { b.setAttribute('aria-pressed', String(b.dataset.span === calSpan)); });
+    $('cal-prev').setAttribute('aria-label', week ? 'Previous week' : 'Previous day');
+    $('cal-next').setAttribute('aria-label', week ? 'Next week' : 'Next day');
+    calGrid.textContent = ''; calDays.textContent = '';
+    var i = calIndex();
+    if (!cal || i < 0) {
+      calRange.textContent = calDate ? dayName(calDate, { weekday: 'short', month: 'short', day: 'numeric' }) : '';
+      calZone.textContent = '';
+      calNotes.hidden = false;
+      calNotes.textContent = calErr || (conn === 'offline' ? "Can't reach Claude Status on the laptop." : 'Loading the calendar…');
+      return;
+    }
+    calRange.textContent = week ? dayName(cal.days[0], { month: 'short', day: 'numeric' }) + ' – ' + dayName(cal.days[6], { month: 'short', day: 'numeric' })
+      : dayName(calDate, { weekday: 'long', month: 'short', day: 'numeric' });
+    calZone.textContent = 'Times on the laptop’s clock (' + cal.zone + ')' + (calBusy ? ' · updating…' : '');
+    var notes = (cal.notes || []).slice();
+    if (calErr) notes.unshift(calErr);
+    if (conn !== 'live') notes.unshift('Not live: showing what the laptop last sent.');
+    calNotes.hidden = !notes.length;
+    calNotes.textContent = notes.join(' ');
+
+    // day chips (Day view): the whole week at a glance, a dot on days with activity
+    calDays.hidden = week;
+    var busy = {};
+    cal.blocks.forEach(function (b) { busy[b.d] = true; });
+    cal.days.forEach(function (d, k) {
+      var c = el('button', 'cal-day' + (k === cal.today ? ' today' : '') + (busy[k] ? ' busy' : ''));
+      c.type = 'button';
+      c.setAttribute('aria-pressed', String(k === i));
+      c.setAttribute('aria-label', dayName(d, { weekday: 'long', month: 'long', day: 'numeric' }) + (k === cal.today ? ', today' : '') + (busy[k] ? ', has activity' : ''));
+      c.appendChild(document.createTextNode(dayName(d, { weekday: 'short' })));
+      c.appendChild(el('b', '', dayName(d, { day: 'numeric' })));
+      c.addEventListener('click', function () { calDate = d; calOpen = ''; calSheet.hidden = true; renderCal(); });
+      calDays.appendChild(c);
+    });
+
+    var cols = week ? [0, 1, 2, 3, 4, 5, 6] : [i];
+    calGrid.style.setProperty('--days', cols.length);
+    calGrid.style.setProperty('--colw', week ? '112px' : '0px');
+    calGrid.style.width = week ? (44 + 7 * 112) + 'px' : '';   // as wide as its columns, so the hour labels can stay put while it scrolls sideways
+    calGrid.appendChild(el('div', 'cal-head cal-corner'));
+    cols.forEach(function (k) { calGrid.appendChild(el('div', 'cal-head' + (k === cal.today ? ' today' : ''), cal.labels[k])); });
+    var gut = el('div', 'cal-gut');
+    for (var h = 1; h < 24; h++) {
+      var lab = el('span', 'cal-hour', new Date(2000, 0, 1, h).toLocaleTimeString([], { hour: 'numeric' }));
+      lab.style.top = (h * HOUR) + 'px';
+      gut.appendChild(lab);
+    }
+    calGrid.appendChild(gut);
+    var nowMin = cal.nowMin + (conn === 'live' ? (Date.now() - cal.got) / 60000 : 0);
+    cols.forEach(function (k) {
+      var col = el('div', 'cal-col' + (k === cal.today ? ' today' : ''));
+      cal.blocks.forEach(function (b) { if (b.d === k) col.appendChild(calBlock(b)); });
+      if (k === cal.today && nowMin < 1440) { var nl = el('div', 'cal-now'); nl.style.top = (nowMin / 60 * HOUR) + 'px'; col.appendChild(nl); }
+      calGrid.appendChild(col);
+    });
+    // open at something worth seeing: two hours before now (today) or the first block of the day / week
+    var key = calSpan + '|' + (week ? cal.days[0] : calDate);
+    if (calScrolled !== key) {
+      calScrolled = key;
+      var first = 1440;
+      cal.blocks.forEach(function (b) { if (cols.indexOf(b.d) >= 0 && b.s < first) first = b.s; });
+      var at = cols.indexOf(cal.today) >= 0 ? Math.max(0, nowMin - 120) : first < 1440 ? Math.max(0, first - 30) : 8 * 60;
+      calScroll.scrollTop = at / 60 * HOUR;
+      if (week) calScroll.scrollLeft = cal.today >= 0 ? Math.max(0, cal.today * 112 - 40) : 0;
+    }
+    if (calOpen) showCalSheet();
+  }
+
+  function calBlock(b) {
+    var cls = 'cal-b ' + (b.cat === 'toahnipi' ? 'tn' : 'other') + (b.pl ? ' plan' : '') + (b.st === 'running' || b.st === 'waiting' ? ' live' : '') +
+      (b.unk ? ' unk' : '') + (b.fp ? ' fp' : '') + (b.tn ? ' tnx' : '') + (b.pl && /^(missed|canceled|skipped|nostart)$/.test(b.st) ? ' bad' : '') + (b.k === calOpen ? ' sel' : '');
+    var x = el('button', cls);
+    x.type = 'button';
+    var top = b.s / 60 * HOUR, height = Math.max(b.e - b.s, cal.minV || 12) / 60 * HOUR;
+    x.style.top = top + 'px';
+    x.style.height = Math.max(8, height - 1) + 'px';
+    x.style.left = 'calc(' + (b.c / b.n * 100) + '% + 2px)';
+    x.style.width = 'calc(' + (100 / b.n) + '% - 4px)';
+    (b.w || []).forEach(function (w) {
+      var wt = el('span', 'cal-w');
+      wt.style.top = ((w[0] - b.s) / 60 * HOUR) + 'px';
+      wt.style.height = Math.max(2, (w[1] - w[0]) / 60 * HOUR) + 'px';
+      if ((w[1] - w[0]) / 60 * HOUR >= 16) wt.appendChild(el('span', '', 'WAITING'));
+      x.appendChild(wt);
+    });
+    x.appendChild(el('span', 'cal-t1', b.nm));
+    if (height >= 30) x.appendChild(el('span', 'cal-t2', b.l2));
+    if (b.ti && height >= 46) x.appendChild(el('span', 'cal-t3', b.ti));
+    x.setAttribute('aria-label', b.nm + ', ' + (b.cat === 'toahnipi' ? 'Toah Nipi' : 'other project') + ', ' + b.l2 + (b.ti ? ', ' + b.ti : ''));
+    x.addEventListener('click', function () { calOpen = b.k; renderCal(); });
+    return x;
+  }
+
+  function showCalSheet() {
+    var d = cal && cal.info ? cal.info[calOpen] : null;
+    if (!d) { calSheet.hidden = true; calOpen = ''; return; }
+    $('cal-sh-title').textContent = d.h;
+    $('cal-sh-status').textContent = d.st;
+    var dl = $('cal-sh-facts');
+    dl.textContent = '';
+    (d.f || []).forEach(function (f) { dl.appendChild(el('dt', '', f[0])); dl.appendChild(el('dd', '', f[1])); });
+    $('cal-sh-note').hidden = !d.nt;
+    $('cal-sh-note').textContent = d.nt || '';
+    var open = $('cal-sh-open');
+    open.hidden = !d.q;
+    open.onclick = function () { schedOpen = d.q; calOpen = ''; setView('sched', true); window.scrollTo(0, schedEl.offsetTop); };
+    var was = calSheet.hidden;
+    calSheet.hidden = false;
+    if (was) $('cal-sh-close').focus();
+  }
+
+  $('cal-sh-close').addEventListener('click', function () { calOpen = ''; calSheet.hidden = true; renderCal(); });
+  $('cal-prev').addEventListener('click', function () { calGo(calSpan === 'week' ? -7 : -1); });
+  $('cal-next').addEventListener('click', function () { calGo(calSpan === 'week' ? 7 : 1); });
+  $('cal-today').addEventListener('click', function () { calDate = ''; calOpen = ''; calSheet.hidden = true; calScrolled = ''; cal = null; renderCal(); loadCal(); });
+  calSpanBtns.forEach(function (b) { b.addEventListener('click', function () { if (calSpan !== b.dataset.span) { calSpan = b.dataset.span; calScrolled = ''; renderCal(); } }); });
+  document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !calSheet.hidden) { calOpen = ''; calSheet.hidden = true; renderCal(); } });
 
   // ---------- display settings popover (gear) ----------
   var gearBtn = $('gear'), settingsEl = $('settings');

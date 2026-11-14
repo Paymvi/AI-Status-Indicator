@@ -1724,6 +1724,8 @@ const m1 = { v: 1, id: 'AAAAAAAAAAAAAAAAAAAAAA', s: 'DONE', title: 'Claude finis
     Check 'service worker: shows a transition once, drops a resent copy, shows the next transition, ignores bad data' ($shown -and $shown.Count -eq 6 -and $shown[0][0] -eq 'Claude finished a task' -and $shown[0][1] -eq 'Website' -and $shown[0][2] -eq 'claude-BBBBBBBBBBBBBBBBBBBBBB') $out
 } else { Skip 'service worker duplicate filter' 'node not found' }
 
+& { . (Join-Path $PSScriptRoot 'calendar-tests.ps1') }   # own scope; reuses the hook and phone helpers above
+
 # ======================================================================================
 Section 'Phone page in a real browser (headless Chrome emulating Android phones)'
 # ======================================================================================
@@ -1934,8 +1936,9 @@ $inst = Join-Path $cd 'status-indicator'
 $oldRepo = Join-Path $tmp 'old-repo'; $null = New-Item -ItemType Directory -Force (Join-Path $oldRepo 'src')
 $haveGit = [bool](Get-Command git -ErrorAction SilentlyContinue)
 if ($haveGit) {
-    foreach ($fn in @('install.ps1') + @(git -C $repo ls-tree --name-only HEAD src/)) {
+    foreach ($fn in @('install.ps1') + @(git -C $repo ls-tree -r --name-only HEAD src/)) {
         $content = git -C $repo show "HEAD:$fn" | Out-String
+        $null = New-Item -ItemType Directory -Force (Split-Path (Join-Path $oldRepo $fn))
         [IO.File]::WriteAllText((Join-Path $oldRepo $fn), $content)
     }
     $out = & $winPs -NoProfile -ExecutionPolicy Bypass -File (Join-Path $oldRepo 'install.ps1') -ClaudeDir $cd -NoStart 2>&1
@@ -1979,7 +1982,7 @@ $out = & $winPs -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repo 'insta
 Check 're-running the installer is a no-op for settings.json and config.json' ((Get-Content (Join-Path $inst 'config.json') -Raw) -eq $cfgText -and (($out | Out-String) -match 'already up to date'))
 Check 'upgrade (re-running the installer) keeps phone notification registrations (state\push.dat)' ((Test-Path $pushDat) -and (([IO.File]::ReadAllBytes($pushDat)) -join ',') -eq '7,7,7')
 Check 'phone dashboard files installed; config gets phoneDashboard=false, phonePort=48521' ((@('phone.cs', 'phone.html', 'phone.css', 'phone.js', 'phone-setup.ps1', 'push.cs', 'sw.js', 'workers.png', 'favicon.ico', 'worker-192.png', 'apple-touch-icon.png') | Where-Object { -not (Test-Path (Join-Path $inst $_)) }).Count -eq 0 -and $c.phoneDashboard -eq $false -and $c.phonePort -eq 48521)
-$out = & $winPs -NoProfile -Command "Add-Type -Path '$inst\indicator.cs', '$inst\phone.cs', '$inst\usage.cs', '$inst\push.cs', '$inst\scheduler.cs', '$inst\queue.cs', '$inst\vscode.cs', '$inst\git.cs' -ReferencedAssemblies System.Windows.Forms, System.Drawing, System.Web.Extensions, System.Core, System.Security, System.Numerics; 'ok'" 2>&1
+$out = & $winPs -NoProfile -Command "Add-Type -Path '$inst\indicator.cs', '$inst\phone.cs', '$inst\usage.cs', '$inst\push.cs', '$inst\scheduler.cs', '$inst\queue.cs', '$inst\vscode.cs', '$inst\git.cs', '$inst\calendar.cs' -ReferencedAssemblies System.Windows.Forms, System.Drawing, System.Web.Extensions, System.Core, System.Security, System.Numerics; 'ok'" 2>&1
 Check 'installed indicator compiles with Windows PowerShell 5.1' (($out | Out-String).Trim() -eq 'ok') ($out | Out-String)
 Check 'VS Code runner files installed (vscode.cs and the bridge extension with its installer)' ((@('vscode.cs', 'vscode-bridge\package.json', 'vscode-bridge\extension.js', 'vscode-bridge\install-bridge.ps1') | Where-Object { -not (Test-Path (Join-Path $inst $_)) }).Count -eq 0)
 Check 'scheduler files installed; config gets the queue defaults' ((Test-Path (Join-Path $inst 'scheduler.cs')) -and (Test-Path (Join-Path $inst 'queue.cs')) -and $c.toastOnQueue -eq $true -and $c.queueHistoryDays -eq 30 -and $c.queueAllowApiBilling -eq $false)
@@ -2041,7 +2044,7 @@ $pushCs = Get-Content (Join-Path $src 'push.cs') -Raw
 Check 'push.cs: its only network call is the POST to a validated push endpoint; it never listens' ((@([regex]::Matches($pushCs, 'WebRequest\.Create\((\w+)\)') | ForEach-Object { $_.Groups[1].Value }) -join ',') -eq 'u' -and $pushCs -match 'var u = new Uri\(sub\.Endpoint\)' -and $pushCs -notmatch 'TcpListener|HttpListener|WebClient|HttpClient|Socket')
 $storage = @([regex]::Matches($pjs, 'localStorage\.\w+\([^)]*\)') | ForEach-Object { $_.Value })
 Check 'phone page stores only the List / Creatures, Show usage / expanded, Compact / Show context, notifications on-off / expanded choices, hidden commit offers and the running commit''s id' ($storage.Count -eq 19 -and @($storage | Where-Object { $_ -notmatch '^localStorage\.(getItem|setItem|removeItem)\((VIEW_KEY(, view)?|USAGE_KEY(, .*)?|USAGE_OPEN_KEY(, .*)?|COMPACT_KEY(, .*)?|CONTEXT_KEY(, .*)?|NOTIFY_KEY(, v)?|NOTIFY_OPEN_KEY(, .*)?|GIT_SEEN_KEY(, JSON\.stringify\(gitSeen)?|GIT_JOB_KEY(, JSON\.stringify\(v)?)\)$' }).Count -eq 0 -and $pjs -match "GIT_SEEN_KEY = 'claudeStatus\.gitSeen', GIT_JOB_KEY = 'claudeStatus\.gitJob'" -and $pjs -match "NOTIFY_OPEN_KEY = 'claudeStatus\.notifyOpen', NOTIFY_KEY = 'claudeStatus\.notify'" -and $pjs -match "COMPACT_KEY = 'claudeStatus\.compact', CONTEXT_KEY = 'claudeStatus\.context'" -and $pjs -match "VIEW_KEY = 'claudeStatus\.view'" -and $pjs -match "USAGE_KEY = 'claudeStatus\.usage', USAGE_OPEN_KEY = 'claudeStatus\.usageOpen'") ($storage -join '; ')
-Check 'phone page only calls its own relative API' ((([regex]::Matches($pjs, "'(api/[a-z-]*)") | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique) -join ',') -eq 'api/board,api/dismiss,api/focus,api/git,api/push,api/queue,api/usage-refresh' -and $pjs -cnotmatch 'XMLHttpRequest|WebSocket|EventSource|sendBeacon|fetch\(\s*[''"](?!api/)')
+Check 'phone page only calls its own relative API' ((([regex]::Matches($pjs, "'(api/[a-z-]*)") | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique) -join ',') -eq 'api/board,api/calendar,api/dismiss,api/focus,api/git,api/push,api/queue,api/usage-refresh' -and $pjs -cnotmatch 'XMLHttpRequest|WebSocket|EventSource|sendBeacon|fetch\(\s*[''"](?!api/)')
 $usageSrc = (Get-Content (Join-Path $src 'usage.cs') -Raw) + (Get-Content (Join-Path $src 'statusline.ps1') -Raw)
 Check 'usage: never reads Claude credentials or tokens, never calls Anthropic' ($usageSrc -notmatch '(?i)\.credentials|accessToken|refreshToken|api/oauth|anthropic\.com|Authorization|Bearer')
 Check 'statusline.ps1 only uses rate_limits, context_window and session_id from the session data' ((Get-Content (Join-Path $src 'statusline.ps1') -Raw) -notmatch '\$in\.(cwd|transcript_path|model|cost|workspace|output_style|prompt_id|prompt_cache)')
