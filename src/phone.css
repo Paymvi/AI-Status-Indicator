@@ -418,8 +418,8 @@ button.sched-h:focus-visible { outline: 2px solid var(--muted); outline-offset: 
 .board.stale .sched-list, .board.stale #sched-list, .board.stale .sched-detail:not(.sched-form) { opacity: .55; }
 
 /* ---------- Schedule a task from the phone (the laptop's own scheduler) ---------- */
-.sched-new[hidden], .sched-form[hidden], .sf-keep[hidden], .sf-note[hidden], .qd-actions[hidden] { display: none; }
-.git-send.sched-new { margin: 10px 14px 2px; width: calc(100% - 28px); }
+.sched-new[hidden], .sched-form[hidden], .sf-keep[hidden], .sf-note[hidden], .sf-problem[hidden], .qd-actions[hidden] { display: none; }
+.sf-send.sched-new { margin: 10px 14px 2px; width: calc(100% - 28px); }
 .sf-label { display: block; margin: 16px 0 6px; padding: 0; font-size: 12.5px; font-weight: 700; color: var(--muted); letter-spacing: .01em; }
 .sf-set { margin: 0; padding: 0; border: 0; min-width: 0; }
 .sf-field {
@@ -431,7 +431,7 @@ button.sched-h:focus-visible { outline: 2px solid var(--muted); outline-offset: 
 select.sf-field { text-overflow: ellipsis; }
 .sf-field:focus, .sf-prompt:focus { outline: 2px solid var(--blue); outline-offset: 0; }
 .sf-field[aria-invalid="true"], .sf-prompt[aria-invalid="true"] { border-color: var(--red); }
-.sf-prompt { min-height: 150px; box-sizing: border-box; }
+textarea.sf-prompt { min-height: 150px; box-sizing: border-box; }
 .sf-note { margin: 6px 0 0; font-size: 13px; line-height: 1.4; color: var(--muted); overflow-wrap: anywhere; }
 .sf-keep { color: var(--name); }
 .sf-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 8px; }
@@ -510,20 +510,20 @@ select.sf-field { text-overflow: ellipsis; }
 .git-cmds { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--name); }
 .git-msgshow.empty { color: var(--muted); font-style: italic; }
 .git-first { margin-top: 0; margin-bottom: 6px; }
-.git-msg {
+.git-msg, .sf-prompt {
   display: block; width: 100%; min-height: 110px; padding: 10px 12px; resize: vertical;
   background: #161616; color: var(--name); border: 1px solid #464646; border-radius: 4px;
   font: inherit; font-size: 16px; line-height: 1.4;   /* 16px: phones don't zoom into the field */
 }
 .git-msg:focus { outline: 2px solid var(--blue); outline-offset: 0; }
-.git-problem { margin: 12px 0 0; font-size: 14px; color: var(--orange); }
-.git-send {
+.git-problem, .sf-problem { margin: 12px 0 0; font-size: 14px; color: var(--orange); }
+.git-send, .sf-send {
   display: block; width: 100%; min-height: 48px; margin: 12px 0 0; padding: 0 16px;
   border: 1px solid #2f81f7; border-radius: 5px; background: #1f6feb; color: #fff;
   font: inherit; font-size: 16px; font-weight: 700; touch-action: manipulation;
 }
-.git-send:disabled { background: #2c2c2c; border-color: #464646; color: var(--muted); }
-.git-send:focus-visible { outline: 2px solid var(--name); outline-offset: 2px; }
+.git-send:disabled, .sf-send:disabled { background: #2c2c2c; border-color: #464646; color: var(--muted); }
+.git-send:focus-visible, .sf-send:focus-visible { outline: 2px solid var(--name); outline-offset: 2px; }
 .git-hash { font-family: ui-monospace, "Cascadia Mono", Consolas, Menlo, monospace; font-size: 13.5px; margin-bottom: 6px; overflow-wrap: anywhere; }
 .git-steps { list-style: none; margin: 12px 0 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
 .git-step { padding: 8px 10px; background: #161616; border: 1px solid #2e2e2e; border-left-width: 3px; border-radius: 4px; }

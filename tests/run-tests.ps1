@@ -1854,6 +1854,8 @@ else {
                         $f.Queue.Now = [Func[DateTime]] { [DateTime]::UtcNow.AddMinutes(2) }
                         $sw = [Diagnostics.Stopwatch]::StartNew()
                         while ($sw.Elapsed.TotalSeconds -lt 20 -and -not @($f.Queue.Data.Tasks | Where-Object { $_.State -eq 'Running' }).Count) { $f.Queue.Tick(); Start-Sleep -Milliseconds 100 }
+                        # and the mock has really started (logged its call) before the phone stops it
+                        while ($sw.Elapsed.TotalSeconds -lt 30 -and -not (Test-Path (Join-Path $script:qsMock 'calls.jsonl'))) { $f.Queue.Tick(); Start-Sleep -Milliseconds 100 }
                     }
                     'qs-clear'            { $f.Queue.Now = [Func[DateTime]] { [DateTime]::UtcNow }; foreach ($t in @($f.Queue.Data.Tasks)) { if ($t.State -eq 'Running') { $f.Queue.Cancel($t.Id) }; $null = $f.Queue.Remove($t.Id) }; $env:CLAUDE_CONFIG_DIR = $script:qsOldEnv[0]; $env:MOCK_LOG_DIR = $script:qsOldEnv[1] }
                     'focus-log*'          { [IO.File]::WriteAllText((Join-Path $cdir 'focus-log.txt'), ($script:browserFocus -join ',')) }

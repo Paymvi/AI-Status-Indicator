@@ -795,6 +795,7 @@ try {
   const l320 = await ev(`({ sw: document.documentElement.scrollWidth, w: innerWidth })`);
   check('form at 320 px: no horizontal scroll', l320.sw <= l320.w, JSON.stringify(l320));
   await shot('sched-form-320');
+  await waitFor(`document.getElementById('note').hidden`, 6000);   // the earlier "Stopped" notice can cover the button
   await ev(`window.confirm = () => true; true`);
   await tap('#sf-discard');
   const discarded = await waitFor(`document.getElementById('sched-form').hidden && !localStorage.getItem('claudeStatus.schedDraft.new')`, 3000);
