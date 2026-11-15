@@ -946,7 +946,7 @@ tests/
   phone-browser.mjs      phone page checks in headless Chrome/Edge (run-tests.ps1 -Browser)
   git-tests.ps1          Commit & push against temporary repositories and a local bare remote (run by run-tests.ps1, or alone)
   phone-schedule-tests.ps1  scheduling from the phone against the real app and mock-claude.ps1 (run by run-tests.ps1, or alone)
-  worker-icons.mjs       draws src\'s favicon and notification images from phone.js's art (--check: are they current?)
+  worker-icons.mjs       draws src\'s favicon, shortcut icon (clawde.ico) and notification images from phone.js's art (--check: are they current?)
   scheduler-tests.ps1    scheduler tests (run by run-tests.ps1) against mock-claude.ps1
   calendar-tests.ps1     Calendar tests (run by run-tests.ps1): lifecycle, waits, categories, persistence, layout, Codex, phone API
   calendar-browser.mjs   the phone's Calendar in headless Chrome (run-tests.ps1 -Browser)

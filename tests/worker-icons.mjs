@@ -1,8 +1,9 @@
 // Draws the static worker images in src\ from the creature art in phone.js, so they can't become a second design.
 //   node tests/worker-icons.mjs           write them
 //   node tests/worker-icons.mjs --check   exit 1 if a file's pixels differ from the art (run-tests.ps1 does this)
-// Files: favicon.ico, worker-192.png, apple-touch-icon.png (the default worker), and workers.png, the sheet
-// phone.cs crops notification images from: every look in every pose, one 16x16 cell each.
+// Files: favicon.ico, worker-192.png, apple-touch-icon.png (the default worker), workers.png, the sheet
+// phone.cs crops notification images from: every look in every pose, one 16x16 cell each, and clawde.ico,
+// the app's shortcut icon: the tray's plain Clawde (WorkerArt.Tray: hat cut out, body moved up 2 rows).
 import fs from 'node:fs';
 import path from 'node:path';
 import zlib from 'node:zlib';
@@ -44,6 +45,13 @@ function draw(c, look, pose, x, y, s) {
   return c;
 }
 const worker = (size, fill, margin = 0) => draw(canvas(size, size, fill), DEFAULT_LOOK, 0, margin, margin, (size - 2 * margin) / 16);
+function clawde(size) {
+  const c = canvas(size, size), s = size / 16;
+  for (const [sx, sy, color] of squares(art.creatureLayers(DEFAULT_LOOK), POSES[0]))
+    if (sy >= 2 && !(sx >= 4 && sx < 12 && sy < 6))   // rows 0-1 would move off the top, as the tray clips them
+      for (let j = 0; j < s; j++) for (let i = 0; i < s; i++) c.px.set(rgba(color), ((sy - 2) * s + j) * c.w * 4 + (sx * s + i) * 4);
+  return c;
+}
 
 function rows(c) {
   const raw = Buffer.alloc((c.w * 4 + 1) * c.h);
@@ -66,7 +74,7 @@ function ico(images) {   // PNG entries, which every browser that reads .ico und
   let at = head.length;
   images.forEach((c, i) => {
     const e = 6 + 16 * i;
-    head[e] = c.w; head[e + 1] = c.h; head.writeUInt16LE(1, e + 4); head.writeUInt16LE(32, e + 6);
+    head[e] = c.w & 255; head[e + 1] = c.h & 255;   // 0 means 256 head.writeUInt16LE(1, e + 4); head.writeUInt16LE(32, e + 6);
     head.writeUInt32LE(data[i].length, e + 8); head.writeUInt32LE(at, e + 12);
     at += data[i].length;
   });
@@ -75,18 +83,20 @@ function ico(images) {   // PNG entries, which every browser that reads .ico und
 
 const sheet = canvas(HATS * 16, BODIES * POSES.length * 16);
 POSES.forEach((_, p) => { for (let l = 0; l < HATS * BODIES; l++) draw(sheet, l, p, (l % HATS) * 16, (p * BODIES + Math.floor(l / HATS)) * 16, 1); });
-const favicons = [16, 32, 48].map((s) => worker(s));
+const icos = { 'favicon.ico': [16, 32, 48].map((s) => worker(s)), 'clawde.ico': [16, 32, 48, 256].map(clawde) };
 const pngs = { 'workers.png': sheet, 'worker-192.png': worker(192), 'apple-touch-icon.png': worker(180, '#141414', 10) };   // iOS paints transparency black
 
 if (process.argv[2] === '--check') {
   // Pixels, not bytes: a different zlib build compresses the same image differently.
   const pixels = (b) => { const parts = []; for (let o = 8; o < b.length;) { const n = b.readUInt32BE(o); if (b.toString('latin1', o + 4, o + 8) === 'IDAT') parts.push(b.subarray(o + 8, o + 8 + n)); o += 12 + n; } return zlib.inflateSync(Buffer.concat(parts)); };
   const stale = Object.entries(pngs).filter(([f, c]) => !pixels(fs.readFileSync(path.join(src, f))).equals(rows(c))).map(([f]) => f);
-  const icoFile = fs.readFileSync(path.join(src, 'favicon.ico'));
-  favicons.forEach((c, i) => { const e = 6 + 16 * i; if (!pixels(icoFile.subarray(icoFile.readUInt32LE(e + 12), icoFile.readUInt32LE(e + 12) + icoFile.readUInt32LE(e + 8))).equals(rows(c))) stale.push(`favicon.ico ${c.w}px`); });
+  for (const [f, images] of Object.entries(icos)) {
+    const icoFile = fs.readFileSync(path.join(src, f));
+    images.forEach((c, i) => { const e = 6 + 16 * i; if (icoFile.readUInt16LE(4) !== images.length || !pixels(icoFile.subarray(icoFile.readUInt32LE(e + 12), icoFile.readUInt32LE(e + 12) + icoFile.readUInt32LE(e + 8))).equals(rows(c))) stale.push(`${f} ${c.w}px`); });
+  }
   if (stale.length) { console.log('out of date: ' + stale.join(', ')); process.exit(1); }
   console.log('ok');
 } else {
   for (const [f, c] of Object.entries(pngs)) fs.writeFileSync(path.join(src, f), png(c));
-  fs.writeFileSync(path.join(src, 'favicon.ico'), ico(favicons));
+  for (const [f, images] of Object.entries(icos)) fs.writeFileSync(path.join(src, f), ico(images));
 }

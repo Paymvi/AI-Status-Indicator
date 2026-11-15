@@ -1685,7 +1685,7 @@ Check 'service worker: duplicate filter in IndexedDB for 24 h (best effort), no 
 $node = Get-Command node -ErrorAction SilentlyContinue
 if ($node) {
     $out = & $node.Source (Join-Path $PSScriptRoot 'worker-icons.mjs') --check 2>&1 | Out-String
-    Check 'favicon, touch icon and notification sheet still match the creature art in phone.js' ($LASTEXITCODE -eq 0) $out
+    Check 'favicon, shortcut icon, touch icon and notification sheet still match the creature art in phone.js' ($LASTEXITCODE -eq 0) $out
     # sw.js in a minimal stand-in worker scope: real logic, fake IndexedDB that can be cleared, fake notifications
     $harness = @'
 const fs = require('fs'); const src = fs.readFileSync(process.argv[2], 'utf8');
@@ -1981,7 +1981,7 @@ $pushDat = Join-Path $inst 'state\push.dat'; [IO.File]::WriteAllBytes($pushDat, 
 $out = & $winPs -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repo 'install.ps1') -ClaudeDir $cd -NoStart -NoVSCodeBridge 2>&1
 Check 're-running the installer is a no-op for settings.json and config.json' ((Get-Content (Join-Path $inst 'config.json') -Raw) -eq $cfgText -and (($out | Out-String) -match 'already up to date'))
 Check 'upgrade (re-running the installer) keeps phone notification registrations (state\push.dat)' ((Test-Path $pushDat) -and (([IO.File]::ReadAllBytes($pushDat)) -join ',') -eq '7,7,7')
-Check 'phone dashboard files installed; config gets phoneDashboard=false, phonePort=48521' ((@('phone.cs', 'phone.html', 'phone.css', 'phone.js', 'phone-setup.ps1', 'push.cs', 'sw.js', 'workers.png', 'favicon.ico', 'worker-192.png', 'apple-touch-icon.png') | Where-Object { -not (Test-Path (Join-Path $inst $_)) }).Count -eq 0 -and $c.phoneDashboard -eq $false -and $c.phonePort -eq 48521)
+Check 'phone dashboard files installed; config gets phoneDashboard=false, phonePort=48521' ((@('phone.cs', 'phone.html', 'phone.css', 'phone.js', 'phone-setup.ps1', 'push.cs', 'sw.js', 'workers.png', 'favicon.ico', 'clawde.ico', 'worker-192.png', 'apple-touch-icon.png') | Where-Object { -not (Test-Path (Join-Path $inst $_)) }).Count -eq 0 -and $c.phoneDashboard -eq $false -and $c.phonePort -eq 48521)
 $out = & $winPs -NoProfile -Command "Add-Type -Path '$inst\indicator.cs', '$inst\phone.cs', '$inst\usage.cs', '$inst\push.cs', '$inst\scheduler.cs', '$inst\queue.cs', '$inst\vscode.cs', '$inst\git.cs', '$inst\calendar.cs' -ReferencedAssemblies System.Windows.Forms, System.Drawing, System.Web.Extensions, System.Core, System.Security, System.Numerics; 'ok'" 2>&1
 Check 'installed indicator compiles with Windows PowerShell 5.1' (($out | Out-String).Trim() -eq 'ok') ($out | Out-String)
 Check 'VS Code runner files installed (vscode.cs and the bridge extension with its installer)' ((@('vscode.cs', 'vscode-bridge\package.json', 'vscode-bridge\extension.js', 'vscode-bridge\install-bridge.ps1') | Where-Object { -not (Test-Path (Join-Path $inst $_)) }).Count -eq 0)
