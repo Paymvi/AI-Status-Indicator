@@ -46,8 +46,8 @@ function WaitFor([scriptblock]$cond, [int]$sec = 120, [scriptblock]$each = $null
     return $false
 }
 function TypeInto([string]$name, [string]$text, [bool]$enter = $true) { [IO.File]::WriteAllText((Join-Path $driverDir ("cmd-" + [Guid]::NewGuid().ToString('N') + '.json')), (@{ op = 'type'; name = $name; text = $text; enter = $enter } | ConvertTo-Json)) }
-function Task([string]$title, [string]$prompt) {
-    $t = [ClaudeStatus.TaskEditor]::NewTask(); $t.Title = $title; $t.Project = $proj; $t.Prompt = $prompt; $t.State = 'Scheduled'; $t.Model = 'haiku'
+function Task([string]$title, [string]$prompt, [bool]$unattended = $true) {
+    $t = [ClaudeStatus.TaskEditor]::NewTask(); $t.Title = $title; $t.Project = $proj; $t.Prompt = $prompt; $t.State = 'Scheduled'; $t.Model = 'haiku'; $t.Unattended = $unattended
     $e = $eng.Save($t, 0); if ($e) { throw $e }; $t.Id
 }
 
@@ -79,8 +79,17 @@ try {
         Check 'real Claude: resuming sent nothing to Claude (no prompt resubmitted, same session)' ($newUser.Count -eq 0 -and (T $t1.Id).SessionId -eq $t1.SessionId) "$($newUser.Count) new user message(s)"
     }
 
-    $script:cur = Task 'Smoke: asks a question' 'Use the AskUserQuestion tool once to ask me which color I prefer, with the options red and blue. Then reply with only the color I chose.'
-    Check 'real Claude: a question shows as Needs you' (WaitFor { (T $script:cur).Last -and (T $script:cur).Last.Phase -eq 'needs_you' } 240) "$((T $script:cur).State) $((T $script:cur).Reason)"
+    # Unattended (the default): no question reaches you; Claude picks the recommended option, edits, runs a command, logs it.
+    $script:cur = Task 'Smoke: unattended choice' 'Ask me which color I prefer: red (recommended) or blue. Then write the chosen color into color.txt in this folder and show its contents with a shell command.'
+    $sawNeeds = $false
+    $done = WaitFor { (T $script:cur).State -notin 'Running', 'Queued', 'Scheduled' } 300 { if ((T $script:cur).Last -and (T $script:cur).Last.Phase -eq 'needs_you') { $script:sawNeeds = $true } }
+    $tu = T $script:cur; $ulog = $eng.RunLogPath($tu.Last); $umd = if ($ulog -and (Test-Path -LiteralPath $ulog)) { Get-Content -LiteralPath $ulog -Raw -Encoding UTF8 } else { '' }
+    Check 'real Claude, unattended in VS Code: Completed without ever needing you (edit + shell command, no prompt)' ($done -and $tu.State -eq 'Completed' -and -not $script:sawNeeds -and (Test-Path (Join-Path $proj 'color.txt'))) "$($tu.State): $($tu.Reason)"
+    Check 'real Claude, unattended: the color choice is recorded under Decisions in the run log' ($umd -match '(?s)## Decisions\s+-.*red') $umd
+    Info ("unattended run log: " + $ulog)
+
+    $script:cur = Task 'Smoke: asks a question' 'Use the AskUserQuestion tool once to ask me which color I prefer, with the options red and blue. Then reply with only the color I chose.' $false
+    Check 'real Claude, attended (unattended off): a question shows as Needs you' (WaitFor { (T $script:cur).Last -and (T $script:cur).Last.Phase -eq 'needs_you' } 240) "$((T $script:cur).State) $((T $script:cur).Reason)"
     Info ("request shown in the app: " + (T $script:cur).Last.Attention)
     TypeInto (T $script:cur).Last.Terminal ''   # Enter picks the highlighted (first) option
     Check 'real Claude: answering in the VS Code terminal lets it finish (Completed)' (WaitFor { (T $script:cur).State -eq 'Completed' } 180) "$((T $script:cur).State): $((T $script:cur).Reason)"

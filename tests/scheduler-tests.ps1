@@ -118,7 +118,7 @@ $t1 = Q $eng $id1
 $c = @(Calls)[0]
 Check 'new task runs and completes (Claude''s success result)' ($done -and $t1.State -eq 'Completed' -and $t1.Outcome -eq 'completed') "$($t1.State) $($t1.Reason)"
 Check 'new conversation: --session-id with a fresh UUID, kept on the task for follow-ups' ([ClaudeStatus.Sched]::IsGuid($t1.SessionId) -and (ArgAfter $c '--session-id') -eq $t1.SessionId -and -not (@($c.args) -contains '--resume') -and -not (@($c.args) -contains '--continue'))
-Check 'headless flags: -p, stream-json, --permission-prompts none, a --settings file; never bypassPermissions' ((@($c.args) -contains '-p') -and (ArgAfter $c '--output-format') -eq 'stream-json' -and (ArgAfter $c '--permission-prompts') -eq 'none' -and (ArgAfter $c '--permission-mode') -eq 'acceptEdits' -and -not (@($c.args) -match 'bypass|dangerously'))
+Check 'headless flags: -p, stream-json, --permission-prompts none, a --settings file; never bypassPermissions' ((@($c.args) -contains '-p') -and (ArgAfter $c '--output-format') -eq 'stream-json' -and (ArgAfter $c '--permission-prompts') -eq 'none' -and (ArgAfter $c '--permission-mode') -eq 'auto' -and -not (@($c.args) -match 'bypass|dangerously'))
 $sentBytes = [Convert]::FromBase64String($c.prompt)
 Check 'prompt arrives on stdin byte-for-byte (multiline, Unicode, quotes, shell characters)' ([Text.Encoding]::UTF8.GetString($sentBytes) -eq $prompt1)
 Check 'prompt text never appears on the command line' (-not (@($c.args) -join ' ').Contains('fix the tests'))
@@ -183,6 +183,8 @@ Check 'usage limit midway: Waiting for usage, retry right after the reported res
 Check 'it will continue the same conversation (session kept)' ($u.NeedsContinue -and $u.Reason -match 'continues the same conversation')
 Check 'the other queued task also waits for the usage reset (no launch into a known limit)' ($w.State -eq 'WaitingUsage' -and $w.Attempts.Count -eq 0 -and $w.Reason -match 'resets')
 Check 'one notification per waiting condition' (@($notes | Where-Object { $_ -eq 'Hits the limit|WaitingUsage' }).Count -eq 1)
+$mdU = Get-Content -LiteralPath $eng.RunLogPath($u.Last) -Raw -Encoding UTF8
+Check 'run log while waiting for the usage reset: says so, not finished' ($mdU -match '\| Status \| \*\*Waiting for usage\*\*' -and $mdU -match '\| Finished \| — \|') $mdU
 for ($k = 0; $k -lt 5; $k++) { $eng.Tick() }
 Check 'repeated ticks while waiting launch nothing and don''t notify again' (@(Calls).Count -eq 1 -and @($notes | Where-Object { $_ -like 'Hits the limit|*' }).Count -eq 1)
 $script:offset = [TimeSpan]::FromMinutes(32)
@@ -192,6 +194,8 @@ $second = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($calls[1].
 Check 'after the reset it resumes the same conversation (--resume) instead of starting over' ($u.State -eq 'Completed' -and (ArgAfter $calls[1] '--resume') -eq $u.SessionId -and $u.Attempts.Count -eq 2)
 Check 'the continuation prompt asks to continue; the original prompt is not resent' ($second -match '^Continue the task' -and $second -notmatch 'big refactor' -and $second -match 'usage limit')
 Check 'then the waiting task runs' ((Q $eng $idW).State -eq 'Completed')
+$mdU = Get-Content -LiteralPath $eng.RunLogPath($u.Last) -Raw -Encoding UTF8
+Check 'the usage-limit continuation adds to the same run log (one log per run, both attempts listed)' ($u.Attempts[0].RunLog -ne '' -and $u.Attempts[0].RunLog -eq $u.Attempts[1].RunLog -and $mdU -match 'Attempt #1: started' -and $mdU -match 'Attempt #2 \(continued the conversation\)' -and $mdU -match '\*\*Completed\*\*')
 $script:offset = [TimeSpan]::Zero
 $eng2 = New-Engine (New-Root)   # fresh engine: no remembered limit
 $idN = QTask $eng2 'No reset time' $proj 'MOCK:usage-noreset'
@@ -214,6 +218,41 @@ $eng2.RunNow($idUb)
 $null = Drive $eng2 { Settled $eng2 $idUb }
 Check 'Run now overrides the usage wait (your explicit choice)' ((Q $eng2 $idUb).State -eq 'Completed')
 $eng2.UsageBlockedUntil = $null
+
+# 3b. unattended runs: auto mode, the policy, no question tools, a Markdown log per run, honest status
+Clear-Calls
+$idDe = QTask $eng2 'Picks a runner' $proj 'MOCK:decide add tests for the parser'
+$null = Drive $eng2 { Settled $eng2 $idDe }
+$de = Q $eng2 $idDe; $c = @(Calls)[0]
+$pf = ArgAfter $c '--append-system-prompt-file'; $logF = $eng2.RunLogPath($de.Last)
+$md = Get-Content -LiteralPath $logF -Raw -Encoding UTF8
+$perm = (Get-Content (ArgAfter $c '--settings') -Raw | ConvertFrom-Json).permissions
+Check 'unattended (default): auto mode, the policy as a system-prompt file, only the log folder added; never bypass' ((ArgAfter $c '--permission-mode') -eq 'auto' -and (Test-Path -LiteralPath $pf) -and (Get-Content -LiteralPath $pf -Raw -Encoding UTF8) -match 'recommended option' -and (ArgAfter $c '--add-dir') -eq (Split-Path $logF) -and -not (@($c.args) -match 'bypass|dangerously'))
+Check 'unattended: question-only tools removed (AskUserQuestion, EnterPlanMode); commit/push/delete still denied' ((@($perm.deny) -contains 'AskUserQuestion') -and (@($perm.deny) -contains 'EnterPlanMode') -and (@($perm.deny) -contains 'Bash(git push *)') -and (@($perm.deny) -contains 'Bash(rm *)'))
+Check 'a routine decision: Completed (not Needs you), and the decision is in the run log' ($de.State -eq 'Completed' -and $md -match '## Decisions\s+- Which test runner\? Chose the recommended one') "$($de.State) $($de.Reason)"
+Check 'run log: task, request, project, worker, times and final status' ($md -match '# Scheduled run: Picks a runner' -and $md -match '> MOCK:decide add tests' -and $md.Contains($proj) -and $md -match 'permission mode `auto`, unattended' -and $md -match '\| Finished \| \d{4}-' -and $md -match '\| Status \| \*\*Completed\*\*' -and $md -match "### Claude's final message") $md
+Check 'run log: secrets Claude wrote are redacted' ($md -notmatch 'ghp_abcdef' -and $md -match 'token=\[redacted\]')
+Check 'run log lives with the task''s other run files (state\queue\runs\<task>\logs\<time>-run<n>.md)' ($logF -match ([regex]::Escape((Join-Path $eng2.RunsDir "$idDe\logs\")) + '\d{8}-\d{6}-run1\.md$')) $logF
+$eng2.Retry($idDe, $false)
+$null = Drive $eng2 { (Settled $eng2 $idDe) -and (Q $eng2 $idDe).Attempts.Count -eq 2 }
+$de = Q $eng2 $idDe
+Check 'running it again (original prompt) starts a new run log; the first is kept' ($de.Attempts.Count -eq 2 -and $de.Attempts[1].RunLog -ne $de.Attempts[0].RunLog -and (Test-Path -LiteralPath $eng2.RunLogPath($de.Attempts[0])) -and (Test-Path -LiteralPath $eng2.RunLogPath($de.Attempts[1])))
+Check 'one worker per run: one Claude call per run, the second only after the first ended' (@(Calls).Count -eq 2 -and [DateTime]::Parse(@(Calls)[1].at).ToUniversalTime() -ge $de.Attempts[0].EndedUtc.AddSeconds(-1))
+$idBl = QTask $eng2 'Needs a deploy token' $proj 'MOCK:blocked build and deploy'
+$null = Drive $eng2 { Settled $eng2 $idBl }
+$bl = Q $eng2 $idBl; $mdB = Get-Content -LiteralPath $eng2.RunLogPath($bl.Last) -Raw -Encoding UTF8
+Check 'a genuine blocker: Needs attention (not Completed) with the worker''s reason; the log says so' ($bl.State -eq 'NeedsAttention' -and $bl.Outcome -eq 'blocked' -and $bl.Reason -match 'DEPLOY_TOKEN' -and $mdB -match '\*\*Needs attention\*\*' -and $mdB -match 'DEPLOY_TOKEN') "$($bl.State) $($bl.Reason)"
+Clear-Calls
+$idAt = QTask $eng2 'Attended' $proj 'plain' @{ Unattended = $false }
+$null = Drive $eng2 { Settled $eng2 $idAt }
+$c = @(Calls)[0]; $perm = (Get-Content (ArgAfter $c '--settings') -Raw | ConvertFrom-Json).permissions
+Check 'unattended off: acceptEdits as before, no policy, question tools kept; still a run log' ((Q $eng2 $idAt).State -eq 'Completed' -and (ArgAfter $c '--permission-mode') -eq 'acceptEdits' -and -not (@($c.args) -contains '--append-system-prompt-file') -and -not (@($perm.deny) -contains 'AskUserQuestion') -and (Test-Path -LiteralPath $eng2.RunLogPath((Q $eng2 $idAt).Last)))
+$pt = [ClaudeStatus.TaskEditor]::NewTask(); $pt.PermissionMode = 'plan'; $dn = New-Object 'Collections.Generic.List[string]'; [ClaudeStatus.Sched]::UnattendedDeny($pt, $dn)
+Check 'unattended plan-only task: stays in plan mode and ends with its plan (ExitPlanMode removed)' ([ClaudeStatus.Sched]::EffectiveMode($pt) -eq 'plan' -and ($dn -contains 'ExitPlanMode'))
+$pt.PermissionMode = 'dontAsk'
+Check 'unattended "only allowed commands" task keeps dontAsk (never widened to auto)' ([ClaudeStatus.Sched]::EffectiveMode($pt) -eq 'dontAsk')
+Check 'worker verdict line: blocked with a reason / completed / missing' ([ClaudeStatus.Sched]::BlockedReason("x`nUNATTENDED-RESULT: blocked: needs the API key") -eq 'needs the API key' -and $null -eq [ClaudeStatus.Sched]::BlockedReason("UNATTENDED-RESULT: completed") -and $null -eq [ClaudeStatus.Sched]::BlockedReason('no line'))
+Check 'redaction: API keys, bearer tokens, password=..., private keys; ordinary text untouched' ([ClaudeStatus.Sched]::Redact('k sk-ant-api03-abcdefghij x') -eq 'k [redacted] x' -and [ClaudeStatus.Sched]::Redact('Authorization: Bearer abc.def.ghi123') -match 'Bearer \[redacted\]' -and [ClaudeStatus.Sched]::Redact('password: hunter22') -eq 'password: [redacted]' -and [ClaudeStatus.Sched]::Redact("-----BEGIN RSA PRIVATE KEY-----`nMIIx`n-----END RSA PRIVATE KEY-----") -eq '[redacted]' -and [ClaudeStatus.Sched]::Redact('ran 12 tests in 3.2s') -eq 'ran 12 tests in 3.2s')
 
 # 4. other failure kinds are told apart
 $idP = QTask $eng2 'Blocked action' $proj 'MOCK:deny'
@@ -417,9 +456,10 @@ $E = [ClaudeStatus.QueueEngine]
 $vt = [ClaudeStatus.TaskEditor]::NewTask(); $vt.Title = 'Fix "tests"'; $vt.Project = $proj
 $err = $null
 $line = $E::VsArgs(@('C:\x\claude.exe'), $vt, 'C:\My Runs\1.settings.json', 'new', '0b6f7a2e-1111-2222-3333-444455556666', "-p looks like a flag`r`nline 2 `"q`" \", [ref]$err)
-Check 'VS Code arguments: options first, then "--" and the prompt quoted as one argument (a leading "-" stays text)' ($line -match '^--permission-mode acceptEdits --settings "C:\\My Runs\\1\.settings\.json" --session-id 0b6f7a2e-1111-2222-3333-444455556666 --name "Fix \\"tests\\"" -- "-p looks like a flag' -and $line.EndsWith('line 2 \"q\" \\"')) $line
+Check 'VS Code arguments: options first, then "--" and the prompt quoted as one argument (a leading "-" stays text)' ($line -match '^--permission-mode auto --settings "C:\\My Runs\\1\.settings\.json" --session-id 0b6f7a2e-1111-2222-3333-444455556666 --name "Fix \\"tests\\"" -- "-p looks like a flag' -and $line.EndsWith('line 2 \"q\" \\"')) $line
 $line = $E::VsArgs(@('C:\x\claude.exe'), $vt, 'C:\s.json', 'resume', '0b6f7a2e-1111-2222-3333-444455556666', $null, [ref]$err)
 Check 'VS Code arguments for opening a conversation yourself: --resume <id>, no prompt and no "--"' ($line -match '--resume 0b6f7a2e-1111-2222-3333-444455556666$' -and $line -notmatch ' -- ') $line
+Check 'opening a conversation yourself is attended: the task''s own mode (acceptEdits), not auto' ($line -match '^--permission-mode acceptEdits ') $line
 $line = $E::VsArgs(@('C:\x\claude.exe'), $vt, 'C:\s.json', 'new', '0b6f7a2e-1111-2222-3333-444455556666', ('x' * 40000), [ref]$err)
 Check 'a prompt too long for a Windows command line is refused with a clear reason (never truncated)' ($null -eq $line -and $err -match 'too long')
 

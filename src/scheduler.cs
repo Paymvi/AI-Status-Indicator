@@ -39,6 +39,7 @@ namespace ClaudeStatus
         // VS Code runs: "" = headless (claude -p; every attempt made before the VS Code runner existed).
         // Phase: opening (asked VS Code) -> terminal (terminal open, Claude not started yet) -> working / needs_you -> ended.
         public string Runner = "", Phase = "", Req = "", Window = "", Terminal = "", Attention = "";
+        public string RunLog = "";   // this run's Markdown log, relative to RunsDir ("" = attempts made before run logs existed)
         public int ClaudePid;
         public DateTime ClaudeStartedUtc, HookBefore;   // HookBefore: the session's last hook event before this run (older ones are never this run's)
         [ScriptIgnore] public bool InVsCode { get { return Runner == "vscode"; } }
@@ -55,6 +56,9 @@ namespace ClaudeStatus
         public string PermissionMode = "acceptEdits";  // acceptEdits | dontAsk | plan (never bypassPermissions)
         public List<string> AllowCommands = new List<string>();
         public bool AllowCommit, AllowPush, AllowDelete, RunNow, NeedsContinue;
+        // Unattended: Claude Code's auto mode instead of acceptEdits, no questions (AskUserQuestion / plan mode removed),
+        // the unattended policy appended to its system prompt, and its decisions written to the run's Markdown log.
+        public bool Unattended = true;
         public string Model = "", ContinueWhy = "";
         public string Runner = "vscode";               // vscode (a terminal in the project's VS Code window) | headless (claude -p, no window)
         public string ManualReq = "";                  // a VS Code terminal you opened on this conversation yourself (the queue leaves it alone)
@@ -324,8 +328,14 @@ namespace ClaudeStatus
             var extra = new List<string>();
             if (t.AllowCommit) extra.Add("git commit"); if (t.AllowPush) extra.Add("git push"); if (t.AllowDelete) extra.Add("deleting files");
             sb.Append(extra.Count > 0 ? " Also authorized: " + string.Join(", ", extra) + "." : " Commits, pushes and deletions are denied.");
-            sb.Append(t.Runner == "headless"
-                ? " Anything else (network, deploys, other tools, questions) is denied automatically and the task is marked Needs attention."
+            if (t.Unattended)
+                sb.Append(t.PermissionMode == "acceptEdits"
+                    ? " Unattended: Claude Code's auto mode also approves other local work in the project folder (builds, tests, project commands) without asking; its safety check blocks risky actions (downloading and running code, force pushes, deploys, sending data out, destroying existing files), and Claude records them as blockers."
+                    : " Unattended: no questions or plan approvals.")
+                  .Append(" Claude decides routine questions itself (the recommended option where one fits) and logs each decision in the run's Markdown log. It runs in the project folder only; your other sessions and global settings are unchanged.");
+            sb.Append(t.Runner == "headless" || t.Unattended && t.PermissionMode != "acceptEdits"
+                ? " Anything else is denied automatically and recorded."
+                : t.Unattended ? " Anything Claude Code still asks about (rare) waits in the task's VS Code terminal as Needs you."
                 : " Anything else (network, deploys, other tools) makes Claude ask you in the task's VS Code terminal; the task waits as Needs you until you answer there.");
             return sb.ToString();
         }
@@ -337,6 +347,7 @@ namespace ClaudeStatus
             if (t.AllowCommit) extra.Add("commit"); if (t.AllowPush) extra.Add("push"); if (t.AllowDelete) extra.Add("delete");
             return ModeLabel(t.PermissionMode) + (t.PermissionMode != "plan" ? " (" + n + " allowed command patterns)" : "") +
                 "; " + (extra.Count > 0 ? "also authorized: " + string.Join(", ", extra) : "no commit, push or delete") +
+                (t.Unattended ? (t.PermissionMode == "acceptEdits" ? "; unattended (auto mode: other local work approved, risky actions blocked)" : "; unattended (no questions)") : "") +
                 (t.Runner == "headless" ? "; everything else is denied." : "; anything else is asked in VS Code.");
         }
 
@@ -344,6 +355,114 @@ namespace ClaudeStatus
         {
             return "Continue the task from your previous turn in this conversation. It stopped early" + (why != "" ? " (" + why + ")" : "") +
                 ". First check what is already done (files, test results) and don't repeat completed steps. When you finish, summarise what you did and what you verified.";
+        }
+
+        // ----- unattended runs -----
+        // The Claude Code permission mode a run starts in. Unattended runs that may edit use auto mode: Claude Code itself
+        // approves local work in the working directories and safety-checks the rest; deny rules still win in it.
+        public static string EffectiveMode(QueueTask t) { return t.Unattended && t.PermissionMode == "acceptEdits" ? "auto" : t.PermissionMode; }
+
+        // Tools that only wait for a person (no permission mode auto-approves AskUserQuestion), removed from unattended runs.
+        public static void UnattendedDeny(QueueTask t, List<string> deny)
+        {
+            if (!t.Unattended) return;
+            deny.Add("AskUserQuestion"); deny.Add("EnterPlanMode");
+            if (t.PermissionMode == "plan") deny.Add("ExitPlanMode");   // a plan-only task ends with its plan instead of waiting for approval
+        }
+
+        public const string ResultTag = "UNATTENDED-RESULT:";
+        public const string WorkerMark = "<!-- worker notes: Claude adds to the sections below -->", ResultMark = "<!-- run result: written by Claude Status -->";
+
+        // Appended to Claude Code's system prompt (--append-system-prompt-file) for every unattended run.
+        public static string UnattendedPolicy(QueueTask t, string logFile)
+        {
+            return "# Unattended scheduled task\n\n" +
+                "The user scheduled this task to run unattended: nobody is watching and nobody can answer. Complete it from start to finish.\n\n" +
+                "- Don't stop to ask questions, to have a plan approved, or for permission to continue. Tools for asking the user are unavailable on purpose.\n" +
+                "- When a choice has a recommended option, choose it if it fits the task and the project's instructions (CLAUDE.md, README, conventions).\n" +
+                "- Otherwise follow the project's established conventions and choose the reasonable option that best fulfils the request. Ambiguity you can reasonably resolve is not a blocker.\n" +
+                "- Explicit constraints in the task always win: \"recommended\" never overrides what the user asked for.\n" +
+                "- Don't end your turn after presenting a plan or a partial implementation. Implement, then verify (build and the relevant tests) before you finish.\n" +
+                "- This is not authorization for destructive actions unrelated to the task, spending money, sending messages, publishing, deploying or production changes. Do those only when the task itself asks for them; otherwise finish the independent work and record the specific blocked action under Blockers.\n" +
+                "- If the permission system denies an action, don't retry it in another form: record it under Blockers and carry on with the rest.\n" +
+                (t.PermissionMode == "plan" ? "- This task is read-and-plan only: write the complete plan as your final message instead of asking to exit plan mode.\n" : "") +
+                "\n## Run log\n\nKeep this run's Markdown log current as you work:\n" + logFile + "\n\n" +
+                "Add short bullets under its headings, below the \"worker notes\" line only: Decisions (the question, the option chosen, why, in one line), Assumptions that materially affect the work, Changes, Verification (commands and results), Blockers. " +
+                "Add each decision when you make it, not only at the end. Edit it with your file-editing tool (Edit / Write), never with a shell command or script. Never write credentials, tokens or other secrets into it. " +
+                "If the log can't be written, put the same notes in your final message instead and carry on: the log is never a blocker.\n\n" +
+                "## Last line\n\nEnd your final message with exactly one of these lines:\n" + ResultTag + " completed\n" + ResultTag + " blocked: <what couldn't be done and what the user must do>\n" +
+                "Use blocked only when a required part couldn't be done (missing credentials, an action that needs authorization, an unavailable service), after finishing everything else.\n";
+        }
+
+        // The worker's own verdict from its final message: null = completed or not stated; otherwise why it is blocked.
+        public static string BlockedReason(string text)
+        {
+            var all = Regex.Matches(text ?? "", @"^[ \t>*_`]*" + Regex.Escape(ResultTag) + @"[ \t]*(\w+)[: \t-]*(.*?)\r?$", RegexOptions.IgnoreCase | RegexOptions.Multiline);
+            if (all.Count == 0) return null;
+            var m = all[all.Count - 1];   // the last verdict line counts
+            if (!m.Groups[1].Value.Equals("blocked", StringComparison.OrdinalIgnoreCase)) return null;
+            string why = m.Groups[2].Value.Trim();
+            return why != "" ? why : "the task reported it is blocked";
+        }
+
+        static readonly Regex SecretRx = new Regex(@"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----|\bsk-ant-[\w-]{8,}|\bsk-[A-Za-z0-9_-]{20,}|\bgh[pousr]_[A-Za-z0-9]{20,}|\bgithub_pat_\w{20,}|\bxox[abprs]-[\w-]{10,}|\bAKIA[0-9A-Z]{16}\b|\beyJ[\w-]{10,}\.[\w-]{10,}\.[\w-]{10,}", RegexOptions.Compiled);
+        static readonly Regex SecretKvRx = new Regex(@"(?i)\b(bearer\s+|(?:password|passwd|secret|token|api[_-]?key|access[_-]?key|client[_-]?secret)[""']?\s*[:=]\s*[""']?)([^\s""',;]{6,})", RegexOptions.Compiled);
+        public static string Redact(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return s ?? "";
+            return SecretKvRx.Replace(SecretRx.Replace(s, "[redacted]"), m => m.Groups[1].Value + "[redacted]");
+        }
+
+        static string LogTime(DateTime utc) { return utc == DateTime.MinValue ? "—" : utc.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture); }
+        static string Cell(string s) { return Redact(s ?? "").Replace("\r", "").Replace("\n", " ").Replace("|", "\\|"); }
+
+        // A run's Markdown log: Claude Status owns the header and the result; Claude owns the notes between the marks.
+        public static string RunLogText(QueueTask t, RunAttempt cur, string existing, DateTime nowUtc)
+        {
+            var mine = t.Attempts.FindAll(x => x.RunLog == cur.RunLog);
+            var first = mine.Count > 0 ? mine[0] : cur;
+            bool finished = t.State != QState.Running && cur.EndedUtc != DateTime.MinValue;
+            string status = t.State == QState.Running ? (cur.Phase == "needs_you" ? "Needs you" : "Running") : QState.Label(t.State);
+            string notes = null;
+            if (existing != null)
+            {
+                int i = existing.IndexOf(WorkerMark, StringComparison.Ordinal);
+                if (i >= 0)
+                {
+                    int j = existing.IndexOf(ResultMark, i, StringComparison.Ordinal);
+                    notes = (j >= 0 ? existing.Substring(i, j - i) : existing.Substring(i)).TrimEnd() + "\n";
+                }
+            }
+            if (notes == null)
+                notes = WorkerMark + "\n\n## Decisions\n\n## Assumptions\n\n## Changes\n\n## Verification\n\n## Blockers\n";
+            string prompt = (first.Prompt != "" ? first.Prompt : t.Prompt);
+            if (prompt.Length > 4000) prompt = prompt.Substring(0, 4000) + "\n…(truncated)";
+            var sb = new StringBuilder();
+            sb.Append("# Scheduled run: ").Append(Cell(t.Title)).Append("\n\n");
+            sb.Append("| | |\n|---|---|\n");
+            sb.Append("| Task | ").Append(Cell(t.Title)).Append(" (`").Append(t.Id).Append("`) |\n");
+            sb.Append("| Project | ").Append(Cell(t.Project)).Append(" |\n");
+            sb.Append("| Worker | Claude Code, ").Append(cur.InVsCode ? "VS Code terminal" : "background (claude -p)").Append(", permission mode `").Append(EffectiveMode(t)).Append("`").Append(t.Unattended ? ", unattended" : ", attended").Append(" |\n");
+            sb.Append("| Conversation | `").Append(cur.SessionId).Append("` |\n");
+            sb.Append("| Attempts | ").Append(mine.Count > 1 ? "#" + first.N + "–#" + cur.N : "#" + cur.N).Append(" |\n");
+            sb.Append("| Started | ").Append(LogTime(first.StartedUtc)).Append(" |\n");
+            sb.Append("| Last update | ").Append(LogTime(nowUtc)).Append(" |\n");
+            sb.Append("| Finished | ").Append(finished && !QState.Pending(t.State) ? LogTime(cur.EndedUtc) : "—").Append(" |\n");
+            sb.Append("| Status | **").Append(status).Append("** |\n\n");
+            sb.Append("## Request\n\n");
+            foreach (var l in Redact(prompt).Replace("\r", "").Split('\n')) sb.Append("> ").Append(l).Append("\n");
+            sb.Append("\n").Append(Redact(notes)).Append("\n").Append(ResultMark).Append("\n\n## Result\n\n");
+            sb.Append("- **").Append(status).Append("**").Append(t.Reason != "" ? ": " + Cell(t.Reason) : "").Append("\n");
+            foreach (var x in mine)
+                sb.Append("- Attempt #").Append(x.N).Append(x.Prompt != t.Prompt ? " (continued the conversation)" : "").Append(": started ").Append(LogTime(x.StartedUtc))
+                  .Append(x.EndedUtc != DateTime.MinValue ? ", ended " + LogTime(x.EndedUtc) + " (" + (x.Outcome != "" ? x.Outcome : "?") + ")" : ", in progress").Append("\n");
+            if (t.Denials.Count > 0) { sb.Append("- Blocked by permissions: "); sb.Append(Cell(string.Join("; ", t.Denials.ToArray()))).Append("\n"); }
+            if (finished && t.ResultText != "")
+            {
+                string r = t.ResultText.Length > 3000 ? "…" + t.ResultText.Substring(t.ResultText.Length - 3000) : t.ResultText;
+                sb.Append("\n### Claude's final message\n\n").Append(Redact(r).Trim()).Append("\n");
+            }
+            return sb.ToString();
         }
 
         public static string FirstLine(string s, int max)
@@ -1157,6 +1276,10 @@ namespace ClaudeStatus
                     var a = new RunAttempt { N = t.Attempts.Count + 1, SessionId = sid, Mode = mode, Prompt = prompt, StartedUtc = now, Owner = instance, OwnerPid = myPid, OwnerStartedUtc = myStart, Runner = t.Runner == "headless" ? "" : "vscode" };
                     a.Log = Path.Combine(t.Id, a.N + ".jsonl");
                     a.Job = "Local\\ClaudeStatusQueue-" + t.Id + "-" + a.N;
+                    // One log per run: a continuation (usage limit, network, Continue) adds to the run it continues.
+                    var prev = t.Last;
+                    a.RunLog = prev != null && prev.RunLog != "" && mode == "resume" && prompt != t.Prompt ? prev.RunLog
+                        : Path.Combine(t.Id, "logs", now.ToLocalTime().ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture) + "-run" + a.N + ".md");
                     t.Attempts.Add(a);
                     t.SessionId = sid;
                     t.State = QState.Running; t.RunNow = false;
@@ -1410,19 +1533,55 @@ namespace ClaudeStatus
         }
 
         // The task's permission scope as a Claude Code --settings file (allow + deny rules; deny always wins).
-        string WriteSettings(QueueTask t, string name)
+        string WriteSettings(QueueTask t, string name, bool attended = false)
         {
             string dir = Path.Combine(RunsDir, t.Id);
             Directory.CreateDirectory(dir);
             string settingsFile = Path.Combine(dir, name + ".settings.json");
             var allow = new List<string>(); var deny = new List<string>();
             Sched.Rules(t, allow, deny);
+            if (!attended) Sched.UnattendedDeny(t, deny);
             var perms = new Dictionary<string, object> { { "allow", allow }, { "deny", deny } };
             File.WriteAllText(settingsFile, Json.Pretty(QueueStore.Ser().Serialize(new Dictionary<string, object> { { "permissions", perms } })), new UTF8Encoding(false));
             return settingsFile;
         }
 
-        void Launch(QueueTask t) { if (t.Last.InVsCode) LaunchVs(t); else LaunchHeadless(t); }
+        // Unattended runs: the policy as a system-prompt file, and the run log's folder as an extra working directory (so
+        // Claude may write its notes there without asking). Nothing for attended runs.
+        List<string> UnattendedArgs(QueueTask t, string name)
+        {
+            var args = new List<string>();
+            var a = t.Last;
+            if (!t.Unattended || a == null || a.RunLog == "") return args;
+            string log = Path.Combine(RunsDir, a.RunLog), policy = Path.Combine(RunsDir, t.Id, name + ".policy.md");
+            Directory.CreateDirectory(Path.GetDirectoryName(log));
+            File.WriteAllText(policy, Sched.UnattendedPolicy(t, log), new UTF8Encoding(false));
+            args.Add("--append-system-prompt-file"); args.Add(policy);
+            args.Add("--add-dir"); args.Add(Path.GetDirectoryName(log));
+            return args;
+        }
+
+        public string RunLogPath(RunAttempt a) { return a == null || a.RunLog == "" ? "" : Path.Combine(RunsDir, a.RunLog); }
+
+        // Rewrites the current run's Markdown log from the task (header, status, result), keeping Claude's notes. Called only
+        // when Claude isn't writing to it (before it starts, while it waits for you, after its turn ended). Never throws.
+        void WriteRunLog(string id)
+        {
+            try
+            {
+                var t = Data.Find(id);
+                var a = t != null ? t.Last : null;
+                string f = RunLogPath(a);
+                if (f == "") return;
+                Directory.CreateDirectory(Path.GetDirectoryName(f));
+                string old = File.Exists(f) ? File.ReadAllText(f) : null, tmp = f + ".tmp";
+                File.WriteAllText(tmp, Sched.RunLogText(t, a, old, Now()), new UTF8Encoding(false));
+                if (old != null) File.Replace(tmp, f, null); else File.Move(tmp, f);
+            }
+            catch { }
+        }
+
+        void Launch(QueueTask t) { WriteRunLog(t.Id); if (t.Last.InVsCode) LaunchVs(t); else LaunchHeadless(t); }
 
         void LaunchHeadless(QueueTask t)
         {
@@ -1438,7 +1597,8 @@ namespace ClaudeStatus
 
                 var claude = ResolveClaude(ClaudeCommand);
                 if (claude == null) throw new FileNotFoundException("Claude Code (claude.exe) wasn't found on PATH or in %USERPROFILE%\\.local\\bin.");
-                var args = new List<string> { "-p", "--output-format", "stream-json", "--verbose", "--permission-mode", t.PermissionMode, "--permission-prompts", "none", "--settings", settingsFile };
+                var args = new List<string> { "-p", "--output-format", "stream-json", "--verbose", "--permission-mode", Sched.EffectiveMode(t), "--permission-prompts", "none", "--settings", settingsFile };
+                args.AddRange(UnattendedArgs(t, a.N.ToString()));
                 args.Add(a.Mode == "resume" ? "--resume" : "--session-id"); args.Add(a.SessionId);
                 if (t.Model != "") { args.Add("--model"); args.Add(t.Model); }
                 string cmdErr;
@@ -1457,7 +1617,7 @@ namespace ClaudeStatus
                 xa.Pid = r.Pid; xa.PidStartedUtc = r.PidStarted;
                 return true;
             });
-            if (err == null) { run = r; SetAwake(true); }
+            if (err == null) { run = r; SetAwake(true); } else WriteRunLog(t.Id);
         }
 
         // ---------- VS Code runner: interactive Claude in a named terminal of the project's VS Code window ----------
@@ -1469,12 +1629,16 @@ namespace ClaudeStatus
         // Arguments after the executable. The prompt is the last one, after "--" (so a prompt starting with "-" isn't
         // read as an option), quoted with the Windows argv rules: it reaches Claude as one exact argument, no shell.
         public static string VsArgs(string[] claude, QueueTask t, string settingsFile, string mode, string sid, string prompt, out string error)
+        { return VsArgs(claude, t, settingsFile, null, mode, sid, prompt, out error); }
+        public static string VsArgs(string[] claude, QueueTask t, string settingsFile, List<string> extra, string mode, string sid, string prompt, out string error)
         {
             error = null;
             var args = new List<string>();
             for (int i = 1; i < claude.Length; i++) args.Add(claude[i]);
-            args.Add("--permission-mode"); args.Add(t.PermissionMode);
+            // No prompt = you're opening the conversation yourself: attended, the task's own permission mode.
+            args.Add("--permission-mode"); args.Add(!string.IsNullOrEmpty(prompt) ? Sched.EffectiveMode(t) : t.PermissionMode);
             args.Add("--settings"); args.Add(settingsFile);
+            if (extra != null) args.AddRange(extra);
             args.Add(mode == "resume" ? "--resume" : "--session-id"); args.Add(sid);
             if (t.Model != "") { args.Add("--model"); args.Add(t.Model); }
             if (mode != "resume" && t.Title.Trim() != "") { args.Add("--name"); args.Add(Sched.FirstLine(t.Title, 80)); }
@@ -1508,7 +1672,7 @@ namespace ClaudeStatus
                 x.Reason = target != "" ? "Opening a terminal in the project's VS Code window…" : "Opening a VS Code window for this project…";
                 return true;
             });
-            if (err == null) { run = new Run { TaskId = t.Id, N = a.N, Vs = true, SeenUtc = Now() }; SetAwake(true); }
+            if (err == null) { run = new Run { TaskId = t.Id, N = a.N, Vs = true, SeenUtc = Now() }; SetAwake(true); } else WriteRunLog(t.Id);
         }
 
         // Asks VS Code for a terminal running Claude in the project: in the window that has the project open, or in a
@@ -1520,7 +1684,8 @@ namespace ClaudeStatus
             if (!claude[0].EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("VS Code runs need claude.exe (found " + claude[0] + "). Run this task in the background instead.");
             if (!Directory.Exists(t.Project)) throw new DirectoryNotFoundException("The project folder doesn't exist: " + t.Project);
             if (!Bridge.Installed()) throw new InvalidOperationException("the Claude Status Bridge extension isn't installed in VS Code. Click \"Install VS Code bridge\" in the Queue (or run install.ps1), then Retry. Or choose \"Run in background instead\".");
-            string error, line = VsArgs(claude, t, WriteSettings(t, req), mode, sid, prompt, out error);
+            // A conversation you open yourself (no prompt) is attended: no policy, the task's own permission mode.
+            string error, line = VsArgs(claude, t, WriteSettings(t, req, string.IsNullOrEmpty(prompt)), !string.IsNullOrEmpty(prompt) ? UnattendedArgs(t, req) : null, mode, sid, prompt, out error);
             if (line == null) throw new InvalidOperationException(error);
             var env = new Dictionary<string, object> { { "CLAUDECODE", null }, { "CLAUDE_CODE_ENTRYPOINT", null }, { "CLAUDE_STATUS_TASK", t.Id } };
             if (!AllowApiBilling) { env["ANTHROPIC_API_KEY"] = null; env["ANTHROPIC_AUTH_TOKEN"] = null; }
@@ -1620,6 +1785,7 @@ namespace ClaudeStatus
             }
             else reason = "Terminal open in VS Code; Claude is starting…";
             if (a.Phase != phase || a.Attention != attention || t.Reason != reason || a.Window != st.Window || a.ClaudePid != cpid)
+            {
                 Edit(t.Id, x =>
                 {
                     var xa = x.Last;
@@ -1627,6 +1793,8 @@ namespace ClaudeStatus
                     xa.Phase = phase; xa.Attention = attention; xa.Window = st.Window; xa.ClaudePid = cpid; xa.ClaudeStartedUtc = cst; x.Reason = reason;
                     return true;
                 });
+                if (phase == "needs_you" && a.Phase != phase) WriteRunLog(t.Id);   // Claude is waiting, so the log is safe to update
+            }
             else Raise();
         }
 
@@ -1920,6 +2088,8 @@ namespace ClaudeStatus
                 bool hasConversation = Sessions.Find(ProjectsDir, t.Project, t.SessionId) != null;
                 t.NeedsContinue = false; t.ContinueWhy = "";
                 if (t.State != QState.Running) return true;   // canceled from elsewhere meanwhile
+                string blocked = t.Unattended && (v.Kind == "completed" || v.Kind == "denied") ? Sched.BlockedReason(rep.ResultText) : null;
+                if (blocked != null) { v = Fail("blocked", "Claude finished what it could but reports it is blocked: " + Sched.FirstLine(blocked, 300) + " Details are in the run log."); a.Outcome = v.Kind; }
                 switch (v.Kind)
                 {
                     case "completed": Finish(t, QState.Completed, v.Kind, v.Message); t.RetryCount = 0; break;
@@ -1942,10 +2112,11 @@ namespace ClaudeStatus
                         break;
                     case "canceled": Finish(t, QState.Canceled, v.Kind, v.Message); break;
                     case "failed": Finish(t, QState.Failed, v.Kind, v.Message); break;
-                    default: Finish(t, QState.NeedsAttention, v.Kind, v.Message); break;   // denied, auth, billing, api_key, interrupted
+                    default: Finish(t, QState.NeedsAttention, v.Kind, v.Message); break;   // denied, blocked, auth, billing, api_key, interrupted
                 }
                 return true;
             });
+            WriteRunLog(id);
         }
 
         // A task marked Running that this engine isn't watching: after a restart or a crash (ours or another

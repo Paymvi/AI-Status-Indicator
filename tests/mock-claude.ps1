@@ -97,5 +97,18 @@ switch -regex ($prompt) {
         Start-Sleep -Seconds 120; exit 0
     }
     'MOCK:apikey' { Start-Sleep -Seconds 20; Result 'success' $false 'billed'; exit 0 }
+    'MOCK:decide|MOCK:blocked' {
+        # An unattended worker: finds its run log in the appended policy and records a decision there, as Claude would.
+        $pf = $null; for ($i = 0; $i -lt $argv.Count; $i++) { if ($argv[$i] -eq '--append-system-prompt-file') { $pf = $argv[$i + 1] } }
+        $log = if ($pf) { ([regex]::Match([IO.File]::ReadAllText($pf), '(?m)^(.+\.md)\s*$')).Groups[1].Value } else { '' }
+        if ($log -and (Test-Path -LiteralPath $log)) {
+            $md = [IO.File]::ReadAllText($log)
+            $md = $md.Replace("## Decisions`n", "## Decisions`n- Which test runner? Chose the recommended one (node --test), the project already uses it.`n")
+            $md = $md.Replace("## Verification`n", "## Verification`n- node --test: 3 passed. token=ghp_abcdefghijklmnopqrstuvwxyz0123`n")
+            [IO.File]::WriteAllText($log, $md)
+        }
+        if ($prompt -match 'MOCK:blocked') { Result 'success' $false "Implemented the feature; deploying needs a token I don't have.`nUNATTENDED-RESULT: blocked: deploy needs DEPLOY_TOKEN, which isn't set"; exit 0 }
+        Result 'success' $false "Done, tests pass.`nUNATTENDED-RESULT: completed"; exit 0
+    }
     default { Say "Looking at the project."; Tool 'Bash' @{ command = 'npm test' }; Result 'success' $false "All done.`nChanged 2 files; tests pass."; exit 0 }
 }

@@ -89,7 +89,7 @@ try {
     $argv = @($a[0].argv)
     Check 'the multiline prompt reaches Claude byte for byte as one argument (after "--")' ($argv[-1] -ceq $prompt -and $argv[-2] -eq '--') ($argv[-1])
     Check 'Claude runs in the project folder' ([ClaudeStatus.Sched]::SamePath($a[0].cwd, $p1)) $a[0].cwd
-    Check 'permissions are passed as before (mode + generated --settings), never a bypass' (($argv -join ' ') -match '--permission-mode acceptEdits' -and ($argv -join ' ') -match '--settings ' -and ($argv -join ' ') -notmatch 'dangerously|bypass')
+    Check 'permissions are passed as before (mode + generated --settings), never a bypass' (($argv -join ' ') -match '--permission-mode auto' -and ($argv -join ' ') -match '--settings ' -and ($argv -join ' ') -notmatch 'dangerously|bypass')
     Check 'ANTHROPIC_API_KEY is removed from the terminal (subscription sign-in only)' ($a[0].apiKey -eq '') $a[0].apiKey
     Check 'the open project window was reused (still exactly one window for it)' ((WindowsFor $p1).Count -eq 1 -and (WindowsFor $p1)[0].Id -eq $w1)
     Check 'the terminal has a recognizable task name in that window' (WaitFor { @(DriverFor $p1 | Where-Object { $_.terminals -contains ([char]0x23F1 + ' Multi line task') }).Count -eq 1 } 10)

@@ -640,6 +640,8 @@ namespace ClaudeStatus
             sb.Append("When:  ").Append(ScheduleText(t)).Append("\r\n");
             sb.Append("Permissions:  ").Append(Sched.PermissionShort(t));
             if (t.Attempts.Count > 0) sb.Append("\r\nRuns:  ").Append(t.Attempts.Count).Append(t.Attempts.Count == 1 ? " run" : " runs");
+            string runLog = eng.RunLogPath(a);
+            if (runLog != "" && File.Exists(runLog)) sb.Append("\r\nRun log:  ").Append(Path.GetFileName(runLog)).Append("  (More ▾ → Open run log)");
             if (t.State == QState.Running && a != null && !a.InVsCode)
                 sb.Append("\r\n\r\nThis task started in the background (claude -p) before it could run in VS Code. It keeps running there: let it finish, or stop it with Cancel run. Afterwards Open in VS Code resumes the same conversation without resending the prompt.");
             facts.Text = sb.ToString();
@@ -785,6 +787,8 @@ namespace ClaudeStatus
             }
             menu("Duplicate", () => { var c = eng.Duplicate(id); if (c != null) SelectTask(c.Id); });
             if (hasSession) menu("Copy session ID", () => { try { Clipboard.SetText(t.SessionId); } catch { } });
+            string log = eng.RunLogPath(t.Last);
+            if (log != "" && File.Exists(log)) menu("Open run log", () => { try { Process.Start(new ProcessStartInfo(log) { UseShellExecute = true }); } catch { Process.Start("notepad.exe", "\"" + log + "\""); } });   // no .md app: Notepad
             menu("Open project folder", () => { if (Directory.Exists(t.Project)) Process.Start("explorer.exe", "\"" + t.Project + "\""); });
             if (t.State != QState.Running) menu("Remove…", () => { if (Confirm("Remove \"" + t.Title + "\" and its saved output? This can't be undone.")) { string e = eng.Remove(id); if (e != null) MessageBox.Show(this, e, "Claude Status"); } });
             if (QState.Finished(t.State)) menu("Clear all history…", ClearHistory);
@@ -887,7 +891,7 @@ namespace ClaudeStatus
         {
             var n = TaskEditor.NewTask();
             n.Title = "Follow-up: " + t.Title; n.Project = t.Project; n.Runner = t.Runner;
-            n.PermissionMode = t.PermissionMode; n.AllowCommands = new List<string>(t.AllowCommands); n.AllowCommit = t.AllowCommit; n.AllowPush = t.AllowPush; n.AllowDelete = t.AllowDelete; n.Model = t.Model;
+            n.PermissionMode = t.PermissionMode; n.AllowCommands = new List<string>(t.AllowCommands); n.AllowCommit = t.AllowCommit; n.AllowPush = t.AllowPush; n.AllowDelete = t.AllowDelete; n.Model = t.Model; n.Unattended = t.Unattended;
             if (t.State == QState.Completed) { n.Conversation = "predecessor"; n.Schedule = "after"; n.After = t.Id; }
             else { n.Conversation = "resume"; n.ResumeSession = t.SessionId; }
             Edit(n, true);
@@ -917,7 +921,7 @@ namespace ClaudeStatus
         readonly ComboBox project, sessions, after, mode, missed, whenKind, runner;
         readonly RadioButton cNew, cResume, cPred;
         readonly DateTimePicker atDate, atTime, reset;
-        readonly CheckBox resetKnown, allowCommit, allowPush, allowDelete;
+        readonly CheckBox resetKnown, unattended, allowCommit, allowPush, allowDelete;
         readonly Button advancedToggle;
         readonly Wrap review, sessionNote, error, whenNote, promptInfo;
         readonly Panel adv, whenAt, whenAfter, whenUsage;
@@ -1041,7 +1045,7 @@ namespace ClaudeStatus
             add(whenAt); add(whenAfter); add(whenUsage); add(whenNote);
 
             // advanced (collapsed)
-            advancedToggle = QTheme.Btn("▸  Advanced: where it runs, permissions, model, missed times", null);
+            advancedToggle = QTheme.Btn("▸  Advanced: unattended, where it runs, permissions, model, missed times", null);
             advancedToggle.Margin = new Padding(0, S(14), 0, S(2));
             body.Controls.Add(advancedToggle);
             adv = new Panel { AutoSize = true, Visible = false, Dock = DockStyle.Fill, Margin = new Padding(S(22), 0, 0, 0) };
@@ -1060,6 +1064,10 @@ namespace ClaudeStatus
             runner.SelectedIndex = task.Runner == "headless" ? 1 : 0;
             runner.SelectedIndexChanged += (s, e) => UpdateReview();
             arow("Runs in", runner);
+            unattended = new CheckBox { Text = "Run unattended: don't stop for questions or routine approvals", AutoSize = true, Checked = task.Unattended };
+            unattended.CheckedChanged += (s, e) => UpdateReview();
+            arow("Unattended", unattended);
+            arow("", new Wrap { ForeColor = QTheme.Muted, Text = "Claude chooses the recommended option for routine decisions and records each one in the run's Markdown log. With \"Edit files in the project\" it runs in Claude Code's auto mode: other local work in this project (builds, tests, project commands) is approved without asking, and its safety check blocks risky actions. Only this task's runs change; your other Claude sessions and settings don't." });
             mode = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, AccessibleName = "Claude may" };
             foreach (var m in Modes) mode.Items.Add(Sched.ModeLabel(m));
             mode.SelectedIndex = Math.Max(0, Array.IndexOf(Modes, task.PermissionMode));
@@ -1204,6 +1212,7 @@ namespace ClaudeStatus
             t.UsageResetUtc = t.Schedule == "usage" && resetKnown.Checked ? Sched.LocalToUtc(reset.Value, TimeZoneInfo.Local) : DateTime.MinValue;
             t.Runner = runner.SelectedIndex == 1 ? "headless" : "vscode";
             t.PermissionMode = Modes[Math.Max(0, mode.SelectedIndex)];
+            t.Unattended = unattended.Checked;
             t.AllowCommands = new List<string>();
             foreach (var l in commands.Text.Split('\n')) if (l.Trim() != "") t.AllowCommands.Add(l.Trim());
             t.AllowCommit = allowCommit.Checked; t.AllowPush = allowPush.Checked; t.AllowDelete = allowDelete.Checked;

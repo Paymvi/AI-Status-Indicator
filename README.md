@@ -167,7 +167,7 @@ Progress comes from Claude Code's own hooks for that session, so the app can tel
 |---|---|
 | **Starting** | Terminal open, Claude hasn't started the prompt yet. After 2 minutes it says why that may be (Claude asking you to trust the folder, or to sign in). |
 | **Running** | Claude started the prompt and is working. |
-| **Needs you** | Claude asked a question or needs a permission. The task shows what it asks (when Claude's saved conversation says) and where to answer. |
+| **Needs you** | Claude asked a question or needs a permission (rare for unattended tasks: only what Claude Code itself still asks, such as trusting a new folder). The task shows what it asks (when Claude's saved conversation says) and where to answer. |
 | **Completed** | Claude finished its turn (its *Stop* hook). That's Claude's own report, not independent verification. Opening or closing a terminal, or Claude exiting, never counts as success. |
 | **Needs attention** | It stopped early (terminal closed, Claude exited, an error). Nothing is retried on its own except usage limits and network problems. |
 
@@ -179,6 +179,18 @@ While you use a task's conversation yourself, the queue leaves it alone. It won'
 
 **Tasks from earlier versions** run in VS Code from now on. A task that was already running in the background keeps running there. Opening its details never stops it. To move it to VS Code, let it finish or **Cancel run**; then **Open in VS Code** resumes the same conversation and session ID without resending the prompt.
 
+### Unattended runs (default)
+
+Scheduled tasks run **unattended** by default (*Advanced → Unattended*, on for new and existing tasks). They are meant to finish while you're asleep or away, so a run doesn't stop for routine questions or approvals:
+
+- **Permissions through Claude Code's own auto mode.** A task that may edit files starts with `--permission-mode auto` instead of `acceptEdits`. Claude Code then approves ordinary local work in the project folder itself (reading, editing, builds, tests, project commands), and its safety check blocks risky actions such as downloading and running code, force pushes, deploys, sending data out or destroying existing files. The task's deny rules (commit, push, delete unless ticked) still win. This applies only to that task's Claude process: your own sessions and your global settings are unchanged. *Only the allowed commands* stays `dontAsk` and *Read and plan only* stays `plan`; neither is widened.
+- **No questions.** `AskUserQuestion` and `EnterPlanMode` (and `ExitPlanMode` for plan-only tasks) are removed from the run (they only wait for a person, and no permission mode approves them).
+- **A fixed policy** is appended to Claude's system prompt (`--append-system-prompt-file`): finish the task; pick the recommended option when it fits, otherwise follow the project's conventions; record assumptions; don't stop after a plan or a partial implementation; your explicit instructions beat any recommendation; and no unrelated destructive actions, spending, messages, publishing or production changes unless the task asks for them (those are recorded as blockers instead).
+- **A Markdown log per run**, `state\queue\runs\<task>\logs\<yyyyMMdd-HHmmss>-run<N>.md`: task, request, project, worker, start / last update / finish, status, then Claude's own notes (*Decisions, Assumptions, Changes, Verification, Blockers*, written as it goes) and the result. A continuation after a usage limit or network problem adds to the same log; *Run again* starts a new one. Secrets that look like keys or tokens are redacted. Open it from the task: **More ▾ → Open run log**.
+- **Honest status.** Claude ends with `UNATTENDED-RESULT: completed` or `UNATTENDED-RESULT: blocked: <why>`. *Blocked* makes the task **Needs attention** with that reason (never *Completed*). Sign-in, billing and usage limits are reported as before; nothing is retried endlessly.
+
+Turn *Unattended* off for a task to get the earlier behaviour (`acceptEdits`; Claude asks you in VS Code). Opening a task's conversation yourself (**Open in VS Code**) is always attended.
+
 ### Permissions
 
 Each task has an explicit scope that **Claude Code enforces** (its own permission rules, from a `--settings` file):
@@ -187,9 +199,9 @@ Each task has an explicit scope that **Claude Code enforces** (its own permissio
 |---|---|
 | Allowed | Editing files in the project (`acceptEdits`), read-only commands, and the allowed command patterns: `npm test *`, `npm run build *`, `dotnet test *`, `pytest *`, `cargo test *`, `go test *`, `git status/diff/log *`, … (editable, one per line, applied to both Bash and PowerShell) |
 | Denied unless you tick them | `git commit`, `git push`, deleting files (`rm`, `Remove-Item`, `git clean`, `git reset --hard`, …) |
-| Anything else | **VS Code:** Claude asks you in the task's terminal, and the task waits as *Needs you*. **Background:** denied automatically (`--permission-prompts none`), and the task is marked *Needs attention* with what was blocked. |
+| Anything else (unattended off) | **VS Code:** Claude asks you in the task's terminal, and the task waits as *Needs you*. **Background:** denied automatically (`--permission-prompts none`), and the task is marked *Needs attention* with what was blocked. |
 
-- Other levels: *Only the allowed commands (no file edits)* and *Read and plan only*. There is no "bypass permissions" option, and running in VS Code doesn't add one.
+- Other levels: *Only the allowed commands (no file edits)* and *Read and plan only*. There is no "bypass permissions" option, and running in VS Code doesn't add one. Unattended tasks use auto mode, described above.
 - Deny rules win over allow rules, also over allow rules in your own settings.
 - This limits which tools and commands Claude may use; it isn't a sandbox. An allowed command such as a test script can still do whatever that script does.
 - `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` are removed from the task's environment, so it uses your subscription (`"queueAllowApiBilling": true` allows API billing on purpose).
