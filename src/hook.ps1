@@ -1,9 +1,10 @@
 # Claude Status Indicator - hook writer.
-# Invoked by Claude Code lifecycle hooks (see ~/.claude/settings.json).
+# Invoked by Claude Code lifecycle hooks (see ~/.claude/settings.json) and, with -Provider codex, by Codex's
+# lifecycle hooks (~/.codex/hooks.json). Both write the same session files (format: README "Shared status files").
 # Reads the hook JSON from stdin and writes a tiny per-session state file.
 # MUST print nothing to stdout (UserPromptSubmit stdout is injected into Claude's context)
 # and MUST always exit 0 so it can never interfere with Claude Code.
-param([string]$Action = '')
+param([string]$Action = '', [string]$Provider = 'claude')
 
 try {
     # State lives next to this script (normally %USERPROFILE%\.claude\status-indicator).
@@ -17,6 +18,9 @@ try {
     if ($raw) { $i = $raw.IndexOf('{'); if ($i -gt 0) { $raw = $raw.Substring($i) } }  # tolerate a BOM/garbage prefix
     if ($raw) { try { $in = $raw | ConvertFrom-Json } catch {} }
     $raw = $null  # the raw event (which can include the prompt) is never kept or written
+    $provider = if ($Provider -eq 'codex') { 'codex' } else { 'claude' }
+    # Codex sub-agent threads (agent_id set) run inside their parent's turn; the parent is the worker.
+    if ($provider -eq 'codex' -and $in -and $in.agent_id) { exit 0 }
 
     $sid = 'default'
     if ($in -and $in.session_id) { $sid = [string]$in.session_id }
@@ -53,6 +57,7 @@ try {
             if (-not (Test-Path -LiteralPath (Split-Path $mark))) { $null = New-Item -ItemType Directory -Force -Path (Split-Path $mark) }
             [IO.File]::WriteAllText($mark, '')
         }
+        if ($provider -eq 'codex') { return }   # the Calendar reads Codex's own session logs (calendar.cs CodexWatch)
         if (-not (Test-Path -LiteralPath $adir)) { $null = New-Item -ItemType Directory -Force -Path $adir }
         $pj = ''
         if ($in -and $in.cwd) { try { $pj = Split-Path -Leaf ([string]$in.cwd) } catch {} }
@@ -86,7 +91,8 @@ try {
         'end' {
             # A finished (DONE) worker stays on the Worker Board until you dismiss it there.
             # Anything else (WORKING / NEEDS_YOU / ERROR) disappears with the session, as before.
-            if ($cur -and $cur.state -eq 'DONE') { $kept = $true }
+            # Codex isn't on the Worker Board, so nothing would ever dismiss a kept file: it always goes.
+            if ($cur -and $cur.state -eq 'DONE' -and $provider -ne 'codex') { $kept = $true }
             elseif (Test-Path -LiteralPath $file) { Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue }
         }
     }
@@ -120,7 +126,8 @@ try {
         # Identity of the Claude Code process that owns this session (process ID + its start time),
         # so the indicator can bring the right window forward. Claude Code sets CLAUDE_PID for hooks.
         $cpid = 0; $cstart = ''
-        if ($env:CLAUDE_PID -match '^\d{1,10}$') { $cpid = [int]$env:CLAUDE_PID }
+        # Codex never uses CLAUDE_PID: a Codex started from a Claude Code terminal would inherit Claude's.
+        if ($provider -eq 'claude' -and $env:CLAUDE_PID -match '^\d{1,10}$') { $cpid = [int]$env:CLAUDE_PID }
         elseif ($cur -and $cur.claude_pid) { $cpid = [int]$cur.claude_pid }
         else {
             # Older Claude Code without CLAUDE_PID: use the nearest non-shell ancestor of this hook.
@@ -137,6 +144,14 @@ try {
             else { try { $cstart = (Get-Process -Id $cpid -ErrorAction Stop).StartTime.ToUniversalTime().ToString('o') } catch { $cpid = 0 } }
         }
 
+        # Which VS Code window hosts this worker, for Project Previews: its companion extension puts the window's
+        # opaque session id into that window's terminals as PROJECT_PREVIEWS_WINDOW. Workers started by an
+        # extension are matched by process ancestry instead (claude_pid's parent is the window's extension host).
+        $vsWin = ([string]$env:PROJECT_PREVIEWS_WINDOW) -replace '[^A-Za-z0-9-]', ''
+        if ($vsWin.Length -gt 80) { $vsWin = $vsWin.Substring(0, 80) }
+        if (-not $vsWin -and $cur -and $cur.vscode_window) { $vsWin = [string]$cur.vscode_window }
+        $inVs = [bool]($env:VSCODE_PID -or $env:TERM_PROGRAM -eq 'vscode' -or $vsWin)
+
         $obj = [ordered]@{
             v              = 2
             session_id     = $sid
@@ -149,6 +164,9 @@ try {
             first_seen     = $first
             claude_pid     = $cpid
             claude_started = $cstart
+            provider       = $provider
+            vscode         = $inVs
+            vscode_window  = $vsWin
         }
         $json = $obj | ConvertTo-Json -Compress
         # Atomic replace: write temp file then rename over the target.

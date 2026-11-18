@@ -191,6 +191,24 @@ if ($null -ne $settings) {
     Write-Host "  no settings.json at $settingsPath"
 }
 
+# ---------- 3b. Remove only Claude Status's Codex hooks ----------
+$codexHome = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $env:USERPROFILE '.codex' }
+$codexHooksPath = Join-Path $codexHome 'hooks.json'
+if (Test-Path -LiteralPath $codexHooksPath) {
+    try {
+        $cx = Read-JsonFile $codexHooksPath
+        if ($null -ne $cx) {
+            $cxBefore = $cx | ConvertTo-Json -Depth 100 -Compress
+            Remove-ClaudeStatusHooks $cx
+            if (($cx | ConvertTo-Json -Depth 100 -Compress) -cne $cxBefore) {
+                Copy-Item -LiteralPath $codexHooksPath -Destination ($codexHooksPath + '.bak-claude-status-uninstall-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
+                Write-JsonFile $codexHooksPath $cx
+                Write-Host "  removed Claude Status's Codex hooks from $codexHooksPath"
+            }
+        }
+    } catch { Write-Warning "Couldn't read $codexHooksPath; left it unchanged." }
+}
+
 # ---------- 4. Delete the installed app folder (with guards) ----------
 if (Test-Path -LiteralPath $installDir) {
     $item = Get-Item -LiteralPath $installDir -Force

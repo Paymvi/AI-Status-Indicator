@@ -24,6 +24,11 @@
     Don't install (or update) the Claude Status Bridge extension in VS Code. Scheduled tasks run in VS Code
     terminals through it; without it they can only run in the background.
 
+.PARAMETER NoCodexHooks
+    Don't add Claude Status's Codex hooks to %CODEX_HOME%\hooks.json (and remove them if an earlier install added
+    them). They write the same session files as the Claude hooks, marked provider "codex", so Project Previews can
+    show Codex workers. Codex asks you to trust new hooks once before it runs them.
+
 .PARAMETER NoUsageStatusLine
     Don't set up the status line feed (and remove it if an earlier install added it). The Claude Usage
     section then only has Claude Code's /usage cache to go on.
@@ -37,7 +42,8 @@ param(
     [switch]$Autostart,
     [switch]$NoStart,
     [switch]$NoUsageStatusLine,
-    [switch]$NoVSCodeBridge
+    [switch]$NoVSCodeBridge,
+    [switch]$NoCodexHooks
 )
 
 $ErrorActionPreference = 'Stop'
@@ -59,6 +65,7 @@ if ($PSVersionTable.PSEdition -eq 'Core') {
     if ($NoStart)   { $a += '-NoStart' }
     if ($NoUsageStatusLine) { $a += '-NoUsageStatusLine' }
     if ($NoVSCodeBridge) { $a += '-NoVSCodeBridge' }
+    if ($NoCodexHooks) { $a += '-NoCodexHooks' }
     & $winPs @a
     exit $LASTEXITCODE
 }
@@ -304,6 +311,46 @@ if ($before -ceq $after) {
 }
 if ($slNote) { Write-Host "  $slNote" }
 
+# ---------- 4c. Codex hooks (optional: Codex installed) ----------
+# Same hook.ps1 with -Provider codex, so Codex workers land in the same state\sessions files (provider "codex").
+# Only Claude Status's own entries are replaced; other hooks in hooks.json are kept.
+$codexHome = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $env:USERPROFILE '.codex' }
+$codexHooksPath = Join-Path $codexHome 'hooks.json'
+$codexNote = ''
+if (Test-Path -LiteralPath $codexHome) {
+    try {
+        $cx = if (Test-Path -LiteralPath $codexHooksPath) { Read-JsonFile $codexHooksPath } else { $null }
+        if ($null -eq $cx) { $cx = New-Object PSObject }
+        $cxBefore = $cx | ConvertTo-Json -Depth 100 -Compress
+        Remove-ClaudeStatusHooks $cx
+        if (-not $NoCodexHooks) {
+            if (-not $cx.PSObject.Properties['hooks'] -or $null -eq $cx.hooks) {
+                if ($cx.PSObject.Properties['hooks']) { $cx.PSObject.Properties.Remove('hooks') }
+                $cx | Add-Member -NotePropertyName hooks -NotePropertyValue (New-Object PSObject)
+            }
+            # event, action, async (Codex has no StopFailure / question events: no ERROR or "needs input" for Codex)
+            foreach ($p in @(@('UserPromptSubmit', 'working', $false), @('Stop', 'done', $false), @('PermissionRequest', 'needs_you', $true),
+                             @('PostToolUse', 'resume', $true), @('Interrupt', 'end', $false), @('SessionEnd', 'end', $false))) {
+                $cmd = 'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + $hookPath.Replace('\', '/') + '" ' + $p[1] + ' -Provider codex'
+                # Codex clamps SessionEnd and Interrupt hooks to 3 s
+                $h = [ordered]@{ type = 'command'; command = $cmd; commandWindows = $cmd; timeout = $(if ($p[0] -in 'SessionEnd', 'Interrupt') { 3 } else { 10 }) }
+                if ($p[2]) { $h['async'] = $true }
+                $g = [pscustomobject]@{ hooks = @([pscustomobject]$h) }
+                if ($cx.hooks.PSObject.Properties[$p[0]]) { $cx.hooks.($p[0]) = @(@($cx.hooks.($p[0])) + $g) }
+                else { $cx.hooks | Add-Member -NotePropertyName $p[0] -NotePropertyValue @($g) }
+            }
+        }
+        if (($cx | ConvertTo-Json -Depth 100 -Compress) -cne $cxBefore) {
+            if (Test-Path -LiteralPath $codexHooksPath) { Copy-Item -LiteralPath $codexHooksPath -Destination ($codexHooksPath + '.bak-claude-status-' + (Get-Date -Format 'yyyyMMdd-HHmmss')) }
+            Write-JsonFile $codexHooksPath $cx
+            $codexNote = if ($NoCodexHooks) { "removed Claude Status's Codex hooks from $codexHooksPath" } else { "added to $codexHooksPath. Codex asks you to review and trust new hooks once before it runs them" }
+        } elseif (-not $NoCodexHooks) { $codexNote = "already up to date in $codexHooksPath" }
+    } catch {
+        $codexNote = "NOT changed: $codexHooksPath couldn't be read ($($_.Exception.Message))"
+    }
+    if ($codexNote) { Write-Host "  Codex hooks: $codexNote" }
+}
+
 # ---------- 5. VS Code bridge (scheduled tasks run in a terminal of the project's VS Code window) ----------
 $bridgeNote = ''
 if (-not $NoVSCodeBridge) {
@@ -327,6 +374,7 @@ Write-Host "  App folder : $installDir"
 Write-Host "  Hooks      : $settingsPath"
 if ($backup) { Write-Host "  Backup     : $backup" }
 if ($bridgeNote) { Write-Host "  VS Code    : bridge $bridgeNote" }
+if ($codexNote) { Write-Host "  Codex      : hooks $codexNote" }
 if ($started) { Write-Host '  Indicator  : started (look near the bottom-right of your screen)' }
 else          { Write-Host "  Indicator  : start it by double-clicking $(Join-Path $installDir 'start-indicator.vbs')" }
 Write-Host ''

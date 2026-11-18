@@ -28,6 +28,9 @@ if ($PSVersionTable.PSEdition -eq 'Core') {
 }
 $tmp = Join-Path ([IO.Path]::GetTempPath()) ('claude-status-tests-' + [Guid]::NewGuid().ToString('N').Substring(0, 8))
 . (Join-Path $PSScriptRoot 'common.ps1')
+# install.ps1 / uninstall.ps1 also edit Codex's hooks.json: point them at a temporary Codex home, never yours.
+$env:CODEX_HOME = Join-Path $tmp 'codex-home'; $null = New-Item -ItemType Directory -Force $env:CODEX_HOME
+[IO.File]::WriteAllText((Join-Path $env:CODEX_HOME 'hooks.json'), '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"echo my-codex-hook"}]}]}}')
 if (-not $RenderDir) { $RenderDir = Join-Path $tmp 'renders' }
 $null = New-Item -ItemType Directory -Force $RenderDir
 
@@ -66,7 +69,7 @@ Check 'schema v2 with state_since/first_seen/process identity' ($s.v -eq 2 -and 
 Check 'new session: state_since = first_seen = updated' ($s.state_since -eq $s.updated -and $s.first_seen -eq $s.updated)
 Check 'claude_started matches the real process start time' ([Math]::Abs(([DateTime]::Parse($s.claude_started).ToUniversalTime() - (StartOf $fakeClaude)).TotalMilliseconds) -lt 1)
 Check 'project is only the folder name' ($s.project -eq 'Toah_Nipi_Portal')
-$allowed = 'v,session_id,state,event,detail,project,updated,state_since,first_seen,claude_pid,claude_started'
+$allowed = 'v,session_id,state,event,detail,project,updated,state_since,first_seen,claude_pid,claude_started,provider,vscode,vscode_window'
 Check 'state file has exactly the documented fields' ((($s.PSObject.Properties.Name) -join ',') -eq $allowed) (($s.PSObject.Properties.Name) -join ',')
 $raw = Raw 's1'
 Check 'privacy: prompt text not stored' ($raw -notmatch 'SECRET-PROMPT')
@@ -152,6 +155,43 @@ Check 'garbage stdin: exits 0, prints nothing' ($r.Code -eq 0 -and $r.Out -eq ''
 $sw = [Diagnostics.Stopwatch]::StartNew(); for ($i = 0; $i -lt 3; $i++) { $null = Invoke-Hook 'working' (Ev 'perf' 'UserPromptSubmit') }
 Info ("hook run time ~{0:N0} ms per call (powershell.exe start-up included)" -f ($sw.ElapsedMilliseconds / 3))
 Check 'no temp files left behind' (@(Get-ChildItem $sess -Filter *.tmp).Count -eq 0)
+
+# --- shared status files for Project Previews: provider, VS Code window id; Codex through the same hook ---
+function Invoke-CodexHook([string]$action, $in, [hashtable]$envs = @{}) {
+    $saved = @{}; foreach ($k in @('CLAUDE_PID') + @($envs.Keys)) { $saved[$k] = [Environment]::GetEnvironmentVariable($k) }
+    try {
+        $env:CLAUDE_PID = "$fakeClaude"   # inherited from a Claude Code terminal: a Codex worker must not take it
+        foreach ($k in $envs.Keys) { [Environment]::SetEnvironmentVariable($k, $envs[$k]) }
+        $out = ($in | ConvertTo-Json -Compress -Depth 5) | & $winPs -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $hook $action -Provider codex
+        return @{ Out = ($out -join "`n"); Code = $LASTEXITCODE }
+    } finally { foreach ($k in $saved.Keys) { [Environment]::SetEnvironmentVariable($k, $saved[$k]) } }
+}
+$old = $env:PROJECT_PREVIEWS_WINDOW; $env:PROJECT_PREVIEWS_WINDOW = 'win-ABC-123'
+$null = Invoke-Hook 'working' (Ev 'pw1' 'UserPromptSubmit')
+$env:PROJECT_PREVIEWS_WINDOW = 'bad id;&|"x'
+$null = Invoke-Hook 'working' (Ev 'pw2' 'UserPromptSubmit')
+Remove-Item Env:PROJECT_PREVIEWS_WINDOW
+$null = Invoke-Hook 'done' (Ev 'pw1' 'Stop')
+if ($null -ne $old) { $env:PROJECT_PREVIEWS_WINDOW = $old }
+$s = State 'pw1'
+Check 'Claude session file: provider claude, vscode window id recorded' ($s.provider -eq 'claude' -and $s.vscode_window -eq 'win-ABC-123')
+Check 'window id is kept when a later hook runs without it' ($s.state -eq 'DONE' -and $s.vscode_window -eq 'win-ABC-123')
+Check 'window id is sanitized to an opaque token' ((State 'pw2').vscode_window -eq 'badidx')
+$r = Invoke-CodexHook 'working' (Ev 'cx1' 'UserPromptSubmit' @{ prompt = 'SECRET-CODEX-PROMPT'; turn_id = 't1' }) @{ PROJECT_PREVIEWS_WINDOW = 'win-codex' }
+$s = State 'cx1'
+Check 'Codex hook: exits 0, prints nothing, provider codex, window id' ($r.Code -eq 0 -and $r.Out -eq '' -and $s.provider -eq 'codex' -and $s.state -eq 'WORKING' -and $s.vscode_window -eq 'win-codex')
+Check 'Codex hook ignores an inherited CLAUDE_PID (its own process is found instead)' ($s.claude_pid -ne $fakeClaude -and $s.claude_pid -gt 0) "pid=$($s.claude_pid)"
+Check 'Codex prompt text is never written' ((Raw 'cx1') -notmatch 'SECRET')
+$null = Invoke-CodexHook 'needs_you' (Ev 'cx1' 'PermissionRequest' @{ tool_name = 'shell' })
+$null = Invoke-CodexHook 'resume' (Ev 'cx1' 'PostToolUse' @{ tool_name = 'shell' })
+$null = Invoke-CodexHook 'done' (Ev 'cx1' 'Stop')
+Check 'Codex: approval -> NEEDS_YOU -> resume -> DONE' ((State 'cx1').state -eq 'DONE')
+$null = Invoke-CodexHook 'end' (Ev 'cx1' 'SessionEnd')
+Check 'Codex DONE file is removed at SessionEnd (no board to dismiss it from)' ($null -eq (State 'cx1'))
+$null = Invoke-CodexHook 'working' (Ev 'cxsub' 'UserPromptSubmit' @{ agent_id = 'sub-1'; agent_type = 'reviewer' })
+Check 'Codex sub-agent thread is not a separate worker' ($null -eq (State 'cxsub'))
+$act = Get-ChildItem (Join-Path $hookDir 'state\activity') -Filter *.jsonl -ErrorAction SilentlyContinue | Get-Content
+Check 'Codex hooks add no Calendar lines (the Calendar reads Codex logs itself)' (-not ($act -match '"s":"cx1"')) 
 
 # ======================================================================================
 Section 'Worker Board logic (aliases, numbering, sorting, timers, pruning, placement)'
@@ -289,8 +329,18 @@ $f.Dispose()
 $f = Form (New-Root -NoConfig); Check 'missing config.json -> Worker Board' $f.IsBoard; $f.Dispose()
 $f = Form (New-Root @{ startupView = 'compact' }); Check 'old startupView=compact (Compact was removed) -> Status' ($f.IsBoard -and $f.ClientSize.Width -gt 200); $f.Dispose()
 
+# Codex workers share the files (for Project Previews) but aren't Claude Status workers; dead ones are cleaned up.
 $root = New-Root
 $me = StartOf $PID
+$n = Iso ([DateTime]::UtcNow)
+[IO.File]::WriteAllText((Join-Path $root 'state\sessions\cxlive.json'), "{`"v`":2,`"session_id`":`"cxlive`",`"state`":`"WORKING`",`"project`":`"P`",`"updated`":`"$n`",`"state_since`":`"$n`",`"claude_pid`":$PID,`"claude_started`":`"$(Iso $me)`",`"provider`":`"codex`"}")
+[IO.File]::WriteAllText((Join-Path $root 'state\sessions\cxdead.json'), "{`"v`":2,`"session_id`":`"cxdead`",`"state`":`"DONE`",`"project`":`"P`",`"updated`":`"$n`",`"state_since`":`"$n`",`"claude_pid`":$PID,`"claude_started`":`"$(Iso $me.AddMinutes(-3))`",`"provider`":`"codex`"}")
+$f = Form $root
+Check 'Codex sessions are not on the Worker Board' ($f.Workers.Count -eq 0) (Ids $f)
+Check 'a Codex session whose process is gone is deleted, even when DONE; a live one is kept' ((Test-Path (Join-Path $root 'state\sessions\cxlive.json')) -and -not (Test-Path (Join-Path $root 'state\sessions\cxdead.json')))
+$f.Dispose()
+
+$root = New-Root
 Put $root 'one' 'WORKING' 'Toah_Nipi_Booking_Software' 272 10 $PID $me
 $f = Form $root
 Check 'one WORKING row with alias and timer' ($f.Workers.Count -eq 1 -and $f.Workers[0].DisplayName -eq 'Booking Software')
@@ -1954,6 +2004,11 @@ if ($haveGit) {
 $out = & $winPs -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repo 'install.ps1') -ClaudeDir $cd -NoStart -NoVSCodeBridge 2>&1
 Check 'new version installs / updates' ($LASTEXITCODE -eq 0) ($out | Out-String)
 Check 'application files replaced with the new version' ((Get-Content (Join-Path $inst 'indicator.cs') -Raw) -match 'Worker Board')
+$cxPath = Join-Path $env:CODEX_HOME 'hooks.json'
+$cx = Get-Content $cxPath -Raw | ConvertFrom-Json
+$ours = @($cx.hooks.PSObject.Properties | Where-Object { ($_.Value | ConvertTo-Json -Depth 9) -match 'status-indicator/hook.ps1' } | ForEach-Object Name)
+Check 'Codex hooks merged into CODEX_HOME\hooks.json; your own Codex hook kept' (($ours -join ',') -eq 'Stop,UserPromptSubmit,PermissionRequest,PostToolUse,Interrupt,SessionEnd' -and (Get-Content $cxPath -Raw) -match 'my-codex-hook') ($ours -join ',')
+Check 'Codex hooks pass -Provider codex; SessionEnd within Codex''s 3 s limit' ($cx.hooks.SessionEnd[0].hooks[0].command -match '-Provider codex$' -and $cx.hooks.SessionEnd[0].hooks[0].timeout -eq 3)
 $c = Get-Content (Join-Path $inst 'config.json') -Raw | ConvertFrom-Json
 if ($haveGit) {
     Check 'update keeps existing sound / staleHours choices' ($c.soundOnDone -eq $false -and $c.staleHours -eq 12)
@@ -2006,6 +2061,8 @@ Check 'phone-setup.ps1 -Disable turns it off; leaves tailscale serve alone when 
 $out = & $winPs -NoProfile -ExecutionPolicy Bypass -File (Join-Path $inst 'uninstall.ps1') -ClaudeDir $cd -KeepVSCodeBridge 2>&1
 $s = Get-Content $settingsPath -Raw
 Check 'uninstall removes the app folder' (-not (Test-Path $inst)) ($out | Out-String)
+$cxs = Get-Content (Join-Path $env:CODEX_HOME 'hooks.json') -Raw
+Check 'uninstall removes only Claude Status''s Codex hooks' ($cxs -notmatch 'status-indicator' -and $cxs -match 'my-codex-hook')
 Check 'uninstall removes only Claude Status hooks (and its status line)' ($s -notmatch 'status-indicator' -and $s -match 'my-own-hook' -and $s -match 'opus' -and -not ($s | ConvertFrom-Json).PSObject.Properties['statusLine'])
 
 # --- a status line of your own: kept running (chained), restored on uninstall; -NoUsageStatusLine ---

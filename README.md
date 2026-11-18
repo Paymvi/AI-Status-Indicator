@@ -631,7 +631,8 @@ Each session file contains only:
 ```json
 {"v":2,"session_id":"…","state":"WORKING","event":"UserPromptSubmit","detail":"","project":"my-project",
  "updated":"2026-10-25T21:00:00Z","state_since":"2026-10-25T20:55:28Z","first_seen":"2026-10-25T20:40:02Z",
- "claude_pid":12345,"claude_started":"2026-10-25T20:39:58.1234567Z"}
+ "claude_pid":12345,"claude_started":"2026-10-25T20:39:58.1234567Z",
+ "provider":"claude","vscode":true,"vscode_window":"39e23fa8-…"}
 ```
 
 | Field | Meaning |
@@ -643,7 +644,39 @@ Each session file contains only:
 | `first_seen` | When the session first appeared (keeps `#1/#2` numbering stable). New in v2. |
 | `claude_pid`, `claude_started` | The process ID and start time of the Claude Code process for this session, used only to find its window and to notice when it has exited. New in v2. |
 
+| `provider` | `claude` or `codex` (see [Shared status files](#shared-status-files-for-other-local-apps)). |
+| `vscode` | Whether the session runs inside VS Code (an extension or its terminal), from the environment VS Code gives it. |
+| `vscode_window` | An opaque id of the VS Code window whose terminal started the session, set there by Project Previews' companion extension (`PROJECT_PREVIEWS_WINDOW`); empty otherwise. |
+
 **Prompts, Claude's messages, tool inputs, Bash commands, tool output, file contents, transcript paths and window titles are never written anywhere.**
+
+### Shared status files (for other local apps)
+
+The session files are written by `hook.ps1` from inside each Claude Code (and, with the Codex hooks, Codex) process,
+not by the indicator window. They stay current whether or not Claude Status is running, so other apps on this PC
+can read them instead of detecting agents a second time. [Project Previews](../Project-Previews) does this to show
+workers on its VS Code window cards.
+
+- **Location:** `%USERPROFILE%\.claude\status-indicator\state\sessions\<session id>.json` (`CLAUDE_CONFIG_DIR`
+  replaces `%USERPROFILE%\.claude`). One file per session, replaced atomically (read with sharing, and retry or
+  keep the previous reading if a read fails mid-replace).
+- **Format:** the v2 object above. Readers must ignore fields they don't know. `state` is one of `WORKING`,
+  `NEEDS_YOU`, `DONE`, `ERROR`. Within `NEEDS_YOU`, `event` / `detail` tell approval (`PermissionRequest`, or
+  `permission_prompt`) from a question (`AskUserQuestion`, `elicitation_*`, `agent_needs_input`).
+- **Liveness:** a session is live while the process `claude_pid` with start time `claude_started` runs (compare
+  both, so a reused PID never counts). A file can outlive its process (a crash, or a DONE row kept for dismissal),
+  so readers must check. `state\activity\tick\<session id>` is touched at most every 2 minutes while a WORKING
+  session runs tools (a heartbeat).
+- **Writers and owners:** only `hook.ps1` writes; Claude Status deletes (dismissal, pruning). Other apps only read.
+- **Codex** (`provider: "codex"`): written by the same hook through Codex's own lifecycle hooks, which `install.ps1`
+  adds to `%CODEX_HOME%\hooks.json` (default `%USERPROFILE%\.codex`; skip with `-NoCodexHooks`). Codex asks you
+  to **review and trust** new hooks once; until then they don't run. Mapping: `UserPromptSubmit` → WORKING,
+  `PermissionRequest` → NEEDS_YOU, `PostToolUse` → back to WORKING after an approval, `Stop` → DONE,
+  `Interrupt` / `SessionEnd` → file removed. Codex has no API-error or question hook, so Codex sessions are never
+  ERROR or "needs input". Codex sessions are **not** shown on the Worker Board, the phone or in notifications, and
+  they add no Calendar lines (the Calendar reads Codex's own logs, as before). Sub-agent threads are skipped. The
+  Codex process is identified by walking up from the hook to the nearest non-shell parent (Codex sets no
+  `CLAUDE_PID`, and an inherited one is ignored).
 
 The other files Claude Status writes, all on your computer only:
 
@@ -744,6 +777,7 @@ Run `install.ps1` again after pulling a newer version. It's safe to run repeated
 | `-Autostart` | Also start Claude Status when you sign in to Windows. |
 | `-NoStart` | Don't launch the indicator after installing. |
 | `-ClaudeDir <path>` | Use a different Claude config directory. |
+| `-NoCodexHooks` | Don't add the Codex hooks to `%CODEX_HOME%\hooks.json` (and remove ones an earlier install added). See [Shared status files](#shared-status-files-for-other-local-apps). |
 
 ## Usage
 

@@ -23,7 +23,7 @@ namespace ClaudeStatus
 {
     public class SessionInfo
     {
-        public string Id = "", State = "", Detail = "", Project = "", Event = "";
+        public string Id = "", State = "", Detail = "", Project = "", Event = "", Provider = "claude";
         public DateTime Updated, StateSince, FirstSeen, ClaudeStarted;
         public int Version, ClaudePid;
         // Presentation only (derived from config, never stored): friendly name and "#n" for duplicates.
@@ -51,6 +51,7 @@ namespace ClaudeStatus
         public static SessionInfo Parse(string id, Dictionary<string, object> d, DateTime fileCreatedUtc, DateTime fileWrittenUtc)
         {
             var si = new SessionInfo { Id = id, State = Str(d, "state"), Detail = Str(d, "detail"), Project = Str(d, "project"), Event = Str(d, "event") };
+            if (Str(d, "provider") == "codex") si.Provider = "codex";
             int v;
             si.Version = int.TryParse(Str(d, "v"), out v) ? v : 1;
             si.Updated = Time(d, "updated", fileWrittenUtc);
@@ -1009,8 +1010,12 @@ namespace ClaudeStatus
                     try { created = File.GetCreationTimeUtc(f); } catch { created = DateTime.MinValue; }
                     var si = Board.Parse(id, d, created, File.GetLastWriteTimeUtc(f));
                     if (d == null || Board.Rank(si.State) > 3) throw new InvalidDataException(); // empty / unknown state
-                    int alive = si.State == Board.Done ? -1 : WorkerWindows.ProcessAlive(si.ClaudePid, si.ClaudeStarted);
-                    if (Board.ShouldPrune(si, now, staleHours, alive)) { try { File.Delete(f); } catch { } continue; }
+                    bool codex = si.Provider == "codex";
+                    int alive = si.State == Board.Done && !codex ? -1 : WorkerWindows.ProcessAlive(si.ClaudePid, si.ClaudeStarted);
+                    if (Board.ShouldPrune(si, now, staleHours, alive) || (codex && alive == 0)) { try { File.Delete(f); } catch { } continue; }
+                    // Codex workers (written by the same hook for Project Previews) aren't Claude Status workers:
+                    // no row, sound, notification or phone card; the Calendar reads Codex's own logs.
+                    if (codex) continue;
                     next[id] = si;
                 }
                 catch

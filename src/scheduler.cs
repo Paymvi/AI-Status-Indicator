@@ -1435,7 +1435,7 @@ namespace ClaudeStatus
                     {
                         var d = ser.Deserialize<Dictionary<string, object>>(File.ReadAllText(f));
                         var si = Board.Parse(Path.GetFileNameWithoutExtension(f), d, DateTime.MinValue, File.GetLastWriteTimeUtc(f));
-                        if ((si.State == Board.Working || si.State == Board.NeedsYou) && WorkerWindows.ProcessAlive(si.ClaudePid, si.ClaudeStarted) != 0) list.Add(si);
+                        if (si.Provider != "codex" && (si.State == Board.Working || si.State == Board.NeedsYou) && WorkerWindows.ProcessAlive(si.ClaudePid, si.ClaudeStarted) != 0) list.Add(si);
                     }
                     catch { }
                 }
