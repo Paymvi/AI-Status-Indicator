@@ -231,6 +231,71 @@ Each task has an explicit scope that **Claude Code enforces** (its own permissio
 
 Prompts, results and logs stay on this computer in `state\queue\` (`tasks.json`, plus `runs\<task>\` with each run's permission file and, for background runs, its log). The VS Code bridge's request and status files are in `state\vscode\`. The activity shown for VS Code runs is read from Claude Code's own saved conversation (best effort: that format isn't documented). Nothing is sent anywhere except what Claude Code itself sends to Anthropic. Finished tasks are deleted after `"queueHistoryDays"` (30) days; **Clear all history…** (under More on a finished task) deletes them now. A `tasks.json` that can't be read is kept as `tasks.json.unreadable-<time>`, never silently replaced. The phone dashboard shows the Queue and can schedule, edit, cancel and stop tasks in it (see [Schedule tasks from the phone](#schedule-tasks-from-the-phone)).
 
+## Batches: a series of prompts, one after another
+
+A batch is an ordered list of prompts that run as one unit: *audit the project → fix the findings → commit → update the docs → commit*. Each step starts only after the step before it, **and its commit if it has one**, finished successfully. Nothing is delayed on purpose: the next step starts as soon as it may.
+
+**New to batches?** Start with the [step-by-step guide with screenshots](docs/batches/README.md). The rest of this section is the full reference.
+
+### Create and schedule a batch
+
+1. In the Queue window, open the **Batches** tab, then **+ New batch**.
+2. **Name**, and the settings every step uses: where it runs (each step's project VS Code window, or the background), what Claude may do, allowed commands and model. These are the task settings you know from single tasks. The agent is Claude Code, one per batch (the scheduler only runs Claude Code). Every step runs **unattended** (see [Unattended runs](#unattended-runs-default)): Claude decides routine questions itself and logs each decision in that step's Markdown run log. Claude itself is never allowed to commit or push in a batch.
+3. **Start:** *When I click Run now*, or *At* a date and time (your local time; a missed time starts after the usual 1-minute chance to cancel).
+4. **Steps:** **+ Add step**, **Remove**, **↑ Up / ↓ Down**. Each step has a title, its project (the same project list and Browse… as tasks), the prompt, its conversation, and two options, both off by default: **Review before continuing** and **Commit after this step**. The list shows a one-line summary; select a step to edit it.
+5. **Save.** A batch with a start time is scheduled; otherwise select it and click **Run now**. If something isn't valid yet (an empty prompt, a project that switches inside a continued conversation, a commit without a message or outside a Git repository) the batch is saved but says what to fix before it can run.
+
+**Editing never changes a run that has started.** Starting a batch freezes a copy of it (its steps and settings); edits apply to the next run. Running a batch again creates a **new run** with fresh progress, and earlier runs stay in **History** (deleted after `"queueHistoryDays"`, like tasks). Editing the steps of a run in progress isn't supported: cancel it and start again.
+
+Each step runs as an ordinary queue task (titled *Batch · 2/5 Step title*) in the same runner as single tasks, so the Status board, the Queue, notifications and the Calendar all show it. The batch owns those tasks: they can't be edited or removed while the batch runs. One batch runs at a time; a second one that is due waits for it.
+
+### Conversations and switching projects
+
+- **Fresh conversation** (default): a new Claude Code session.
+- **Continue the previous step's conversation:** the next step resumes the previous step's real session (`--resume <its session id>`), checked by the queue as for tasks (it belongs to this folder and isn't open elsewhere). This is only possible **in the same project folder**: a Claude Code conversation belongs to one folder. A step that switches projects must start fresh, and the editor and the start check say so.
+- **Step 1** starts fresh, or continues an existing conversation of its project that you pick (like a single task).
+- **Include a handoff from the previous step** (fresh conversations only): the step's prompt starts with a visible block naming the previous step, its project and folder, and its final response (complete, or its **last 6,000 characters, marked as shortened**), plus the path of a handoff file in the step's run folder that holds the complete final response, that step's prompt and its run log. Your prompt follows unchanged and is kept separately (the batch shows both).
+
+### When is a step done?
+
+Only when its task completed **and** Claude ended with `UNATTENDED-RESULT: completed`. Everything else pauses the batch with the reason, and nothing after it starts:
+
+| Outcome | What the batch does |
+|---|---|
+| Failed (an error, sign-in, billing) | Pauses: **Retry step**, **Skip step…**, **Cancel remaining steps…** |
+| Needs input or permission (Claude reports *blocked*, or a permission was denied) | Pauses with what Claude says it needs |
+| Usage limit | The step waits as *Waiting for usage* and continues its conversation after the reset, exactly like a task. The batch doesn't move on meanwhile. |
+| Interrupted (Claude Status, Claude or the terminal stopped mid-prompt) | Pauses: the outcome is unknown, so it's never rerun by itself |
+| Unclear (Claude finished its turn without the completion line) | Pauses: **Accept result and continue**, Retry, Skip or Cancel |
+| Waiting for you in VS Code (a question Claude Code still asks) | The step shows *Needs you* until you answer there |
+
+**Retry step** continues that step's own conversation ("continue where you stopped"); it never resends the prompt of a step that already ran and never touches other steps. **Skip** asks first, because later steps may depend on it. **Cancel remaining steps** stops anything further from starting; a prompt that is running keeps running unless you also use **Stop current prompt…**, which stops Claude and says whether that worked. Nothing is rolled back: file changes and commits stay.
+
+**Pause after current step** waits for the running step, meaning its prompt **and** its commit, then pauses before the next one. **Resume** continues. **Review before continuing** pauses the same way after that step (and its commit), shows its result and commit, and waits for **Continue**.
+
+### Commits between steps
+
+Tick **Commit after this step** and write the message. Saving the batch authorizes that commit for its runs; it isn't asked again unless the repository no longer matches (see below).
+
+- The commit is made **by Claude Status with your own Git on this laptop**, using the same command runner as the phone's Commit view: `git --literal-pathspecs add -- <files>` and `git commit --cleanup=verbatim --file=-` with your message on standard input, exactly as written. No AI writes or edits the message and nothing is added to it (no *Co-Authored-By*, no watermark). Your Git author, hooks and signing apply as usual; global Git settings are never changed. Never a push, `add .`, amend, reset, stash, force or `--no-verify`.
+- **Only this step's changes.** Just before the step's prompt starts, the batch records the repository's branch, HEAD and every file already changed or staged. The commit takes only the files that changed **during the step**, inside the step's project folder. Files that were already changed and that the step didn't touch are left out.
+- **It pauses for you to pick the files instead** (on the laptop or the phone) when that isn't clear: a file you had already changed and the step changed again, something staged before the step, a change outside the step's folder. Like the Commit view, files staged but not picked are refused, never silently included or unstaged.
+- Immediately before committing it reads the repository again: if the **branch changed**, **HEAD moved** (something else committed), Git reports a conflict or an operation in progress, or a file you picked changed since you picked it, nothing is committed and the batch pauses with the reason.
+- **No changes** → *No changes to commit*, recorded, and the batch continues.
+- **A failed commit** (for example a hook rejected it) pauses with Git's output (credentials hidden): **Retry commit**, **Skip commit and continue**, or Cancel. Retry never runs the prompt again; the step's changes stay in the working tree.
+- The run records each commit's hash, message, repository, branch, files and result.
+- While a batch runs a step in a repository, the Commit view's Send waits for that repository; **while the batch is paused you can review and commit by hand there**. That's the way to look at changes *before* they're committed: leave *Commit after this step* off, tick *Review before continuing*, and commit from the Commit view during the review. (An automatic commit happens before a review pause, not after it.) A queued single task in the same repository waits until the batch's step and its commit are done, so its changes are never mixed into the batch's commit.
+
+### From the phone
+
+**Scheduled** view → **BATCHES** (runs), **SAVED BATCHES** (each with **Run now**) and **PAST BATCHES**. A run shows its status, *Step 2 of 5*, the current project, why it waits or paused, and each step with its status, conversation, result and commit result (tap a step for its prompt, result and Git output). The actions are exactly those the laptop allows right now: **Pause after current step**, **Resume** / **Continue**, **Retry**, **Accept result and continue**, **Skip…**, **Commit selected files** (with the files to tick), **Stop current prompt…** and **Cancel remaining steps…**. Creating and editing batches is on the laptop only.
+
+Every action carries a one-time id and the version of the run you looked at. The laptop checks both, and which actions are valid, inside its locked write: a resend gets the first answer, and a second tap or a stale page is refused with the current state. The page shows *Sending…* until the laptop answers, and only the laptop's state afterwards. A disconnected phone never stops a batch; reconnecting shows what the laptop has.
+
+### Restarts and recovery
+
+Batches and their runs are stored in `state\queue\tasks.json` with the tasks, and every transition is one locked write, so a restart never repeats a finished step. A step that was running is picked up again like any task (a VS Code terminal is watched again, a background Claude reattached). If its outcome can't be known, the batch pauses instead of running it again. A commit that was in progress when Claude Status stopped is **checked against Git history**: if HEAD's parent is the recorded HEAD and its message is the step's, it's recorded as committed; if HEAD didn't move, Retry commit is safe; anything else pauses as unclear and is never committed again by itself.
+
 ## Calendar
 
 **Queue window → Calendar** (and **Calendar** on the phone) shows, Google Calendar style, **when your AI workers were working each day**: seven days across, the full 24 hours down the side, one block per prompt.
@@ -294,7 +359,7 @@ Answer your AI assistant's clarification questions on your phone instead of edit
 - **Answered format.** The original file, unchanged and in order, with an answer block after each question: its id, the status (*answered*, *Let the AI decide*, *skipped*, *unanswered*), selected option ids and labels, whether the recommendation was used (or used then changed), Other text and comments. Free text sits in fenced code blocks longer than any backticks inside it, so headings, `---`, fences or directive-like lines you type can't break the file or look like questions.
 - **Drafts and connection loss.** Every change is kept on the phone first, then saved on the laptop with the revision it's based on (and kept across a laptop restart). While disconnected you can keep answering an already-open questionnaire; it syncs when the connection is back. If the same questionnaire was also changed elsewhere meanwhile, both versions are kept and you choose. *Delivered to laptop* appears only after the laptop has written the answered file to disk; a retry or double tap never writes a second file. The page itself still needs the laptop to open (there's no offline copy of the page).
 - **One at a time.** Importing another replaces the active one after you confirm. The old one moves to the history folder (**Open history folder**) with its source and, if it had answers, a `.draft-answers.md`. A phone holding unsent answers to the old one keeps them (with *Copy those answers as text*) and never attaches them to the new one. **Remove…** retires the active one the same way.
-- Format details, a full example and the rules the assistant follows for answers: [`QUESTIONNAIRE_GUIDE.md`](questionnaires/QUESTIONNAIRE_GUIDE.md), [`example.questionnaire.md`](questionnaires/example.questionnaire.md) (every input type), [`example-prompt.md`](questionnaires/example-prompt.md).
+- Step-by-step instructions: [`questionnaires/README.md`](questionnaires/README.md). Format details, a full example and the rules the assistant follows for answers: [`QUESTIONNAIRE_GUIDE.md`](questionnaires/QUESTIONNAIRE_GUIDE.md), [`example.questionnaire.md`](questionnaires/example.questionnaire.md) (every input type), [`example-prompt.md`](questionnaires/example-prompt.md).
 
 ## Claude Usage
 
@@ -996,6 +1061,8 @@ src/
   calendar.cs            the Calendar: activity log, prompt runs from lifecycle events, Codex log reader, week layout,
                          and the desktop Calendar tab (the phone gets the same week from phone.cs /api/calendar)
   git.cs                 the phone's Commit view on the laptop: repository review, diffs, and the explicit commit & push
+  batch.cs               Batches: definitions, frozen runs, the step runner (steps run as queue tasks), commit scope and
+                         commits through git.cs, handoffs, restart reconciliation, and the desktop Batches tab and editor
   usage.cs               Claude Usage: reads the status line data and Claude Code's /usage cache; details window
   statusline.ps1         Claude Code status line command: keeps only the rate_limits numbers for Claude Usage
                          and each session's context-window percentage for the phone's context bars
@@ -1013,12 +1080,14 @@ tests/
   phone-browser.mjs      phone page checks in headless Chrome/Edge (run-tests.ps1 -Browser)
   git-tests.ps1          Commit & push against temporary repositories and a local bare remote (run by run-tests.ps1, or alone)
   phone-schedule-tests.ps1  scheduling from the phone against the real app and mock-claude.ps1 (run by run-tests.ps1, or alone)
+  batch-tests.ps1        Batches against the real app, mock-claude.ps1 and temporary Git repositories (run by run-tests.ps1, or alone)
   worker-icons.mjs       draws src\'s favicon, shortcut icon (clawde.ico) and notification images from phone.js's art (--check: are they current?)
   scheduler-tests.ps1    scheduler tests (run by run-tests.ps1) against mock-claude.ps1
   calendar-tests.ps1     Calendar tests (run by run-tests.ps1): lifecycle, waits, categories, persistence, layout, Codex, phone API
   calendar-browser.mjs   the phone's Calendar in headless Chrome (run-tests.ps1 -Browser)
   questionnaire-tests.ps1  Questionnaires: format, answered files, drafts, conflicts, replacement, submission, api/qn (or run alone)
   questionnaire-browser.mjs  the phone's Questions view end to end in headless Chrome (-Browser)
+docs/batches/            README.md: the Batches guide with screenshots (from a demo setup with the mock Claude)
 questionnaires/          QUESTIONNAIRE_GUIDE.md (copy it into any project), an example questionnaire and an example prompt
   mock-claude.ps1        stand-in for claude.exe speaking Claude Code's stream-json (no real Claude calls)
   vscode-tests.ps1       VS Code runner tests in real VS Code windows (isolated profile) with mock-interactive-claude.cs
@@ -1038,6 +1107,8 @@ powershell -ExecutionPolicy Bypass -File .\tests\run-tests.ps1 -Browser # + phon
 powershell -ExecutionPolicy Bypass -File .\tests\run-tests.ps1 -VSCode  # + real VS Code windows running scheduled tasks against a mock claude.exe (~5 min)
 powershell -ExecutionPolicy Bypass -File .\tests\vscode-smoke.ps1       # real Claude in VS Code (small haiku usage)
 ```
+
+The Batch tests (`batch-tests.ps1`, also runnable alone) drive the real app with `mock-claude.ps1` (never real Claude) and real Git in temporary repositories (never this project). A representative batch: a prompt changes a file, the Git runner commits it (exact message byte for byte, the repository's own author, no trailer, only that file, your unrelated edit left alone); the next step continues the same conversation (`--resume` with step 1's session id); the next switches projects with a fresh conversation and a handoff (visible block, complete handoff file, original prompt kept separately); a review checkpoint pauses and is continued **from the phone** over HTTP; the last step commits in the other repository. On every tick it checks that only the current step has started and at most one task runs. Also: validation (project switches, step 1, commit without a message or a repository, agent), commit scope (pre-existing dirty and staged files, a subfolder project, explicit picks and stale picks, branch switch, HEAD moved, no changes), failed / input-blocked / unclear / usage-limited / stopped prompts, Retry continuing only that step's conversation, Accept, Skip, Cancel, Pause after current step, Stop, a hook-rejected commit retried without rerunning the prompt, picking files on the phone, restart while a step runs (reattached, nothing rerun), a crash mid-prompt (paused, nothing rerun), an interrupted commit reconciled with Git history three ways, duplicate and stale phone actions, request protections, one batch at a time, a standalone task in the same repository waiting for the batch's commit, a conversation the batch owns, the Commit view waiting while a batch runs, frozen runs, and an existing `tasks.json` from before batches loading and running unchanged.
 
 The Questionnaire tests (`questionnaire-tests.ps1`, also runnable alone with `-Browser`) cover: every question type, the guide's own example, CRLF and BOM files, 20 kinds of invalid file (each error naming the question and line), code blocks holding directive-like lines, answer validation and statuses (Other, comments, Use recommendation then edited, Let the AI decide, Skip), answer text with headings, fences and directives exported literally and re-read as the same questionnaire, drafts across a laptop restart, stale-revision conflicts, replacement refusing stale drafts and submissions, gaps needing explicit consent, *delivered* only after the file is on disk, retries and four simultaneous submits writing one file, collision-safe names, a failing output folder, and `api/qn`'s request protections. `-Browser` walks the whole flow on a 360 px phone: import → answer → navigate → reload → offline and back → a conflict → review → submit (double tap) → *Delivered to laptop* → replacement, saving `phone-qn-*.png`.
 

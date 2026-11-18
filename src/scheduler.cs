@@ -62,6 +62,7 @@ namespace ClaudeStatus
         public string Model = "", ContinueWhy = "";
         public string Runner = "vscode";               // vscode (a terminal in the project's VS Code window) | headless (claude -p, no window)
         public string ManualReq = "";                  // a VS Code terminal you opened on this conversation yourself (the queue leaves it alone)
+        public string BatchRun = "", BatchStep = "";   // a step of a batch run (batch.cs): created and managed by the batch runner
         public string State = QState.Draft, Reason = "", Outcome = "", ResultText = "", Summary = "", ResetSource = "", Notified = "";
         public List<string> Denials = new List<string>();
         public double Order;
@@ -76,7 +77,11 @@ namespace ClaudeStatus
         public int Version = 1;
         public bool Paused;
         public List<QueueTask> Tasks = new List<QueueTask>();
+        public List<BatchDef> Batches = new List<BatchDef>();      // batch definitions (batch.cs)
+        public List<BatchRun> BatchRuns = new List<BatchRun>();    // each start of a batch: its frozen copy and progress
         public QueueTask Find(string id) { foreach (var t in Tasks) if (t.Id == id) return t; return null; }
+        public BatchDef FindBatch(string id) { foreach (var b in Batches) if (b.Id == id) return b; return null; }
+        public BatchRun FindRun(string id) { foreach (var r in BatchRuns) if (r.Id == id) return r; return null; }
     }
 
     // ---------- persistence: one JSON file, changed only under an exclusive cross-process lock ----------
@@ -106,6 +111,7 @@ namespace ClaudeStatus
                 if (d.Tasks == null) d.Tasks = new List<QueueTask>();
                 d.Tasks.RemoveAll(t => t == null);
                 foreach (var t in d.Tasks) Normalize(t);
+                Batching.Normalize(d);   // files written before batches existed have none
                 return d;
             }
             catch (Exception e)
@@ -139,7 +145,7 @@ namespace ClaudeStatus
 
         // Missing strings become "", and an unset time comes back as exactly DateTime.MinValue (the serializer
         // writes MinValue as a local time, so it reads back a few hours off).
-        static void Fix(object o)
+        public static void Fix(object o)
         {
             foreach (var f in o.GetType().GetFields())
             {
@@ -392,6 +398,13 @@ namespace ClaudeStatus
                 "If the log can't be written, put the same notes in your final message instead and carry on: the log is never a blocker.\n\n" +
                 "## Last line\n\nEnd your final message with exactly one of these lines:\n" + ResultTag + " completed\n" + ResultTag + " blocked: <what couldn't be done and what the user must do>\n" +
                 "Use blocked only when a required part couldn't be done (missing credentials, an action that needs authorization, an unavailable service), after finishing everything else.\n";
+        }
+
+        // The last verdict line's word: "completed", "blocked", or "" when Claude didn't state one.
+        public static string ResultWord(string text)
+        {
+            var all = Regex.Matches(text ?? "", @"^[ \t>*_`]*" + Regex.Escape(ResultTag) + @"[ \t]*(\w+)", RegexOptions.IgnoreCase | RegexOptions.Multiline);
+            return all.Count == 0 ? "" : all[all.Count - 1].Groups[1].Value.ToLowerInvariant();
         }
 
         // The worker's own verdict from its final message: null = completed or not stated; otherwise why it is blocked.
@@ -873,7 +886,7 @@ namespace ClaudeStatus
     public class ActiveSession { public string SessionId = "", Cwd = "", Status = "", Kind = ""; public int Pid; }
 
     // ---------- the engine ----------
-    public class QueueEngine : IDisposable
+    public partial class QueueEngine : IDisposable
     {
         public readonly QueueStore Store;
         public readonly string RunsDir, SessionsStateDir;
@@ -1016,6 +1029,7 @@ namespace ClaudeStatus
                 var cur = d.Find(t.Id);
                 if (cur != null && cur.Revision != expectedRevision) { err = "The task changed while you were editing it (" + QState.Label(cur.State) + "). Close the editor and try again."; return false; }
                 if (cur != null && cur.State == QState.Running) { err = "The task is running; its prompt can't change now. Duplicate it to queue a revised version."; return false; }
+                if (cur != null && cur.BatchRun != "") { err = "This task is a step of a batch run. Its prompt is frozen; manage it from the Batches tab."; return false; }
                 t.Revision = expectedRevision + 1;
                 t.UpdatedUtc = Now();
                 t.Notified = "";
@@ -1056,6 +1070,7 @@ namespace ClaudeStatus
                 copy.Denials = new List<string>(); copy.Notified = ""; copy.RetryCount = 0; copy.NeedsContinue = false; copy.RunNow = false;
                 copy.NextRetryUtc = DateTime.MinValue; copy.FinishedUtc = DateTime.MinValue; copy.Revision = 0; copy.CreatedUtc = Now();
                 copy.Order = t.Order + 0.5;
+                copy.BatchRun = ""; copy.BatchStep = "";   // a copy is an ordinary task
                 d.Tasks.Add(copy);
                 Renumber(d);
                 return true;
@@ -1077,6 +1092,7 @@ namespace ClaudeStatus
                 var t = d.Find(id);
                 if (t == null) return false;
                 if (t.State == QState.Running) { err = "Cancel the task before removing it."; return false; }
+                if (Batching.Holds(d, t)) { err = "This task is a step of a batch run that isn't finished. Cancel the batch first."; return false; }
                 d.Tasks.Remove(t);
                 return true;
             });
@@ -1164,7 +1180,7 @@ namespace ClaudeStatus
             var gone = new List<string>();
             Mutate(d =>
             {
-                foreach (var t in d.Tasks) if (QState.Finished(t.State) && !NeededBy(d, t.Id)) gone.Add(t.Id);
+                foreach (var t in d.Tasks) if (QState.Finished(t.State) && !NeededBy(d, t.Id) && !Batching.Holds(d, t)) gone.Add(t.Id);
                 d.Tasks.RemoveAll(t => gone.Contains(t.Id));
                 return gone.Count > 0;
             });
@@ -1243,6 +1259,7 @@ namespace ClaudeStatus
             if (run != null) Poll();
             if (run == null) Adopt();
             if (run != null && run.Vs) Poll();   // just picked up again: look at it now
+            BatchTick();   // batch.cs: advance batch runs (a finished step's commit, the next step's task) before anything new starts
             if ((now - lastPrune).TotalHours >= 1) { lastPrune = now; Prune(); }
             if (run != null) { SetAwake(true); return; }
             SetAwake(false);
@@ -1262,6 +1279,7 @@ namespace ClaudeStatus
                 {
                     string busy = t.RunNow ? null : ProjectBusy(t, d);
                     if (busy == null) busy = Held(t, d, now);
+                    if (busy == null) busy = Batching.HoldFor(d, t);
                     if (busy != null && busy.StartsWith("!")) { Finish(t, QState.NeedsAttention, "conversation", busy.Substring(1)); dirty = true; continue; }
                     if (busy != null) { if (t.Reason != busy) { t.Reason = busy; dirty = true; } continue; }
                     string why;
@@ -1290,7 +1308,7 @@ namespace ClaudeStatus
                 }
                 return dirty;
             });
-            if (pick != null) Launch(pick);
+            if (pick != null) { if (pick.BatchRun != "") BatchBaseline(pick); Launch(pick); }
         }
 
         // Works out each waiting task's state from its schedule, predecessor and the usage situation.
@@ -2199,9 +2217,10 @@ namespace ClaudeStatus
             var gone = new List<string>();
             Mutate(d =>
             {
-                foreach (var t in d.Tasks) if (QState.Finished(t.State) && t.FinishedUtc != DateTime.MinValue && t.FinishedUtc < cut && !NeededBy(d, t.Id)) gone.Add(t.Id);
+                foreach (var t in d.Tasks) if (QState.Finished(t.State) && t.FinishedUtc != DateTime.MinValue && t.FinishedUtc < cut && !NeededBy(d, t.Id) && !Batching.Holds(d, t)) gone.Add(t.Id);
                 d.Tasks.RemoveAll(t => gone.Contains(t.Id));
-                return gone.Count > 0;
+                int runs = d.BatchRuns.RemoveAll(r => Batching.Finished(r.State) && r.FinishedUtc != DateTime.MinValue && r.FinishedUtc < cut);
+                return gone.Count > 0 || runs > 0;
             });
             try
             {

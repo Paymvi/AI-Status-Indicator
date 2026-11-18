@@ -906,6 +906,7 @@ namespace ClaudeStatus
             ApplyQueueConfig();
             queue.UsageBlockedUntil = UsageBlockedUntil;
             queue.Notify += QueueNotify;
+            queue.BatchNotify += BatchNotify;
             queue.Changed += QueueChanged;
             queueTimer = new System.Windows.Forms.Timer { Interval = 10000 };
             queueTimer.Tick += (s, e) => QueueTick();
@@ -1117,6 +1118,7 @@ namespace ClaudeStatus
         // Clicking a notification: a scheduled task's opens its details in the Queue; any other worker's focuses it.
         void OpenToastTarget()
         {
+            if (toastTask.StartsWith("batch:")) { if (!Visible) Show(); SetView(false); if (queueView != null) queueView.SelectBatchRun(toastTask.Substring(6)); RestoreFromTray(); return; }
             var t = toastTask != "" ? queue.Data.Find(toastTask) : queue.TaskForSession(toastSession);
             if (t != null) { ShowTask(t.Id); return; }
             SessionInfo si;
@@ -1506,7 +1508,7 @@ namespace ClaudeStatus
         void QueueTick()
         {
             try { queue.Tick(); } catch { }
-            int want = queue.HasRun ? 2000 : 10000;
+            int want = queue.HasRun || queue.HasActiveBatch ? 2000 : 10000;
             if (queueTimer.Interval != want) queueTimer.Interval = want;
         }
 
@@ -1576,6 +1578,18 @@ namespace ClaudeStatus
             if (text.Length > 250) text = text.Substring(0, 249) + "…";
             if (t.State == QState.NeedsAttention && CfgBool("soundOnNeedsYou", true) && !testMode) SystemSounds.Exclamation.Play();
             Toast(title, text, icon, new SessionInfo { Id = t.SessionId, State = state }, t.Id);
+        }
+
+        // A batch paused (it needs you: a review, a failure, a commit to sort out) or finished.
+        void BatchNotify(BatchRun r)
+        {
+            if (!CfgBool("toastOnQueue", true)) return;
+            bool done = r.State == Batching.Completed;
+            string text = r.Name + " (" + Batching.Progress(r) + "): " + r.Reason;
+            if (text.Length > 250) text = text.Substring(0, 249) + "…";
+            if (!done && r.PauseKind != "user" && r.PauseKind != "review" && CfgBool("soundOnNeedsYou", true) && !testMode) SystemSounds.Exclamation.Play();
+            Toast(done ? "Batch finished" : r.PauseKind == "review" ? "Batch waiting for your review" : r.PauseKind == "user" ? "Batch paused" : "Batch needs you", text,
+                done ? ToolTipIcon.Info : ToolTipIcon.Warning, new SessionInfo { Id = "", State = done ? Board.Done : Board.NeedsYou }, "batch:" + r.Id);
         }
 
         static bool AutostartOn() { try { return File.Exists(AutostartLink); } catch { return false; } }

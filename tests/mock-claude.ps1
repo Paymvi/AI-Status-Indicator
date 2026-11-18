@@ -13,6 +13,9 @@
 #   MOCK:sleep=N      works for N seconds, then success
 #   MOCK:child        starts a child process and keeps running (for cancelling a process tree)
 #   MOCK:apikey       reports apiKeySource ANTHROPIC_API_KEY, then works for 20 s
+#   MOCK:edit=<file>  appends a line to <file> in its folder, then ends with "UNATTENDED-RESULT: completed" (batches)
+#   MOCK:ok           changes nothing and ends with "UNATTENDED-RESULT: completed"
+#   With MOCK_CONTINUE_DONE=1, the queue's "Continue the task from your previous turn" prompt completes that way too.
 # Every call is recorded in %MOCK_LOG_DIR%\calls.jsonl: arguments, working folder, the exact prompt bytes
 # (base64), whether ANTHROPIC_API_KEY was in its environment, and its process id.
 $ErrorActionPreference = 'Stop'
@@ -72,7 +75,15 @@ function Limit([bool]$withReset) {
     exit 1
 }
 
+if ($env:MOCK_CONTINUE_DONE -and $prompt.StartsWith('Continue the task from your previous turn')) { Result 'success' $false "Finished the rest.`nUNATTENDED-RESULT: completed"; exit 0 }
 switch -regex ($prompt) {
+    'MOCK:edit=(\S+)' {
+        $f = Join-Path $cwd $Matches[1]; $null = New-Item -ItemType Directory -Force (Split-Path $f)
+        [IO.File]::AppendAllText($f, "edited in $sid`n")
+        Tool 'Edit' @{ file_path = $f }
+        Result 'success' $false "Edited $($Matches[1]).`nUNATTENDED-RESULT: completed"; exit 0
+    }
+    'MOCK:ok\b' { Result 'success' $false "Checked it; nothing needed changing.`nUNATTENDED-RESULT: completed"; exit 0 }
     'MOCK:usage-midway' { Say 'Starting: step 1 done.'; Tool 'Edit' @{ file_path = 'notes.txt' }; Limit $true }
     'MOCK:usage-noreset' { Limit $false }
     'MOCK:usage\b' { Limit $true }

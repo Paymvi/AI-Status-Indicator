@@ -711,3 +711,17 @@ textarea.sf-prompt { min-height: 150px; box-sizing: border-box; }
 .qn-gaps .qn-opt { margin-top: 8px; border-color: #555; }
 .qn-ok { margin: 10px 0 4px; font-size: 18px; font-weight: 700; color: var(--green); }
 .board.stale .qn-body { opacity: 1; }
+
+/* ---------- Batches (in the Scheduled view) ---------- */
+.qitem.bdef { cursor: default; }
+.bdef .usage-btn { align-self: flex-start; margin: 6px 0 0; min-height: 44px; }
+.bdef-steps { margin: 2px 0 0; padding-left: 20px; font-size: 13.5px; color: #c8c8c8; overflow-wrap: anywhere; }
+.bwhy { margin: 8px 0 0; }
+.bsteps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.bstep.cur > .qitem { border-color: var(--yellow); }
+.bstep-detail { padding: 4px 4px 8px; }
+.bstep-detail .usage-btn { margin: 10px 0 0; min-height: 44px; }
+.bfiles { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.bfiles label { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-height: 44px; font-size: 14px; overflow-wrap: anywhere; }
+.bfiles input { width: 22px; height: 22px; flex: none; }
+.bfile { font-family: ui-monospace, Consolas, monospace; overflow-wrap: anywhere; }

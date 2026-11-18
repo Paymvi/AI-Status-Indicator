@@ -37,6 +37,7 @@ namespace ClaudeStatus
         public int Ahead, Behind;
         public List<GitFile> Files = new List<GitFile>();
         public List<string> Blockers = new List<string>(), Warnings = new List<string>();
+        public List<string> CommitBlockers = new List<string>();   // the Blockers that also stop a commit without a push (batch commits)
         public string PushRef { get { return "refs/heads/" + Branch + ":" + Merge; } }
         public string Dest { get { return Merge.StartsWith("refs/heads/") ? Merge.Substring(11) : Merge; } }
     }
@@ -320,18 +321,21 @@ namespace ClaudeStatus
             v.Fp = Sha(fp.ToString());
             v.PushUrl = Redact(v.PushUrl);
 
-            if (detached) v.Blockers.Add("HEAD is detached (not on a branch). Check out a branch on the laptop first.");
+            if (detached) v.CommitBlockers.Add("HEAD is detached (not on a branch). Check out a branch on the laptop first.");
+            if (detached) v.Blockers.Add(v.CommitBlockers[0]);
             else if (v.Remote == "" || v.Merge == "") v.Blockers.Add("Branch “" + v.Branch + "” has no upstream to push to. Set one up on the laptop first (for example: git push -u origin " + v.Branch + ").");
             else if (v.Remote == ".") v.Blockers.Add("Branch “" + v.Branch + "” tracks another local branch, not a remote. Set a remote upstream on the laptop first.");
             else if (!v.Merge.StartsWith("refs/heads/")) v.Blockers.Add("The upstream of “" + v.Branch + "” isn't a branch (" + v.Merge + ").");
             else if (v.PushUrl == "") v.Blockers.Add("Remote “" + v.Remote + "” has no URL.");
             var conflicts = v.Files.FindAll(x => x.Conflict);
-            if (conflicts.Count > 0) v.Blockers.Add("Git reports conflicts in " + Names(conflicts) + ". Resolve them on the laptop first.");
+            var cb = new List<string>();
+            if (conflicts.Count > 0) cb.Add("Git reports conflicts in " + Names(conflicts) + ". Resolve them on the laptop first.");
             foreach (var op in new[] { new[] { "MERGE_HEAD", "A merge" }, new[] { "rebase-merge", "A rebase" }, new[] { "rebase-apply", "A rebase or am" }, new[] { "CHERRY_PICK_HEAD", "A cherry-pick" }, new[] { "REVERT_HEAD", "A revert" }, new[] { "BISECT_LOG", "A bisect" } })
                 if (v.GitDir != "" && (File.Exists(Path.Combine(v.GitDir, op[0])) || Directory.Exists(Path.Combine(v.GitDir, op[0]))))
-                    v.Blockers.Add(op[1] + " is in progress in this repository. Finish or abort it on the laptop first.");
+                    cb.Add(op[1] + " is in progress in this repository. Finish or abort it on the laptop first.");
+            v.Blockers.AddRange(cb); v.CommitBlockers.AddRange(cb);
             if (v.Behind > 0) v.Blockers.Add("“" + v.Branch + "” is " + v.Behind + " commit" + (v.Behind == 1 ? "" : "s") + " behind " + v.Remote + "/" + v.Dest + " (as of the last fetch), so a push would be rejected. Bring it up to date on the laptop first.");
-            if (v.Files.Count > MaxFiles) v.Blockers.Add("There are more than " + MaxFiles + " changed files. Commit this one from the laptop.");
+            if (v.Files.Count > MaxFiles) { v.Blockers.Add("There are more than " + MaxFiles + " changed files. Commit this one from the laptop."); v.CommitBlockers.Add(v.Blockers[v.Blockers.Count - 1]); }
             if (v.Ahead > 0) v.Warnings.Add(v.Ahead + " earlier commit" + (v.Ahead == 1 ? "" : "s") + " on “" + v.Branch + "” not yet pushed will be pushed too.");
             return v;
         }
@@ -419,6 +423,12 @@ namespace ClaudeStatus
             return o;
         }
 
+        // One commit at a time per repository, whoever asks (the phone's Send / Retry Push, or a batch's commit step).
+        static readonly HashSet<string> held = new HashSet<string>();
+        public static bool TryHold(string top) { lock (held) return held.Add(Norm(top)); }
+        public static void Release(string top) { lock (held) held.Remove(Norm(top)); }
+        public static bool Held(string top) { lock (held) return held.Contains(Norm(top)); }
+
         public static bool AuthProblem(string output)
         {
             return Regex.IsMatch(output ?? "", @"(?i)authentication failed|could not read (username|password)|terminal prompts disabled|permission denied \(publickey|host key verification failed|invalid username or password|logon failed|access denied|returned error: 40[13]|gpg failed to sign|passphrase|credential");
@@ -444,6 +454,8 @@ namespace ClaudeStatus
         public Func<string, string> CwdOf = TranscriptCwd;
         // Scheduler project folders (offered by the manual Commit view too).
         public Func<List<string>> Projects;
+        // Why a running batch owns this repository right now ("" = it doesn't): manual commits wait until it's paused.
+        public Func<string, string> BatchBusy;
 
         public GitDesk(Func<string, string> token, Func<List<GitWorker>> workers) { this.token = token; this.workers = workers; }
 
@@ -492,6 +504,8 @@ namespace ClaudeStatus
         // Why a worker blocks committing in this repository right now ("" = none).
         string BusyReason(string top)
         {
+            if (BatchBusy != null) { string b = ""; try { b = BatchBusy(top) ?? ""; } catch { } if (b != "") return b; }
+            if (Git.Held(top) && RunningJobId(top) == "") return "A batch is committing in this repository right now. Refresh in a moment.";
             foreach (var w in workers())
             {
                 if (!Active(w.State)) continue;
@@ -601,7 +615,7 @@ namespace ClaudeStatus
             {
                 GitJob have;
                 if (jobs.TryGetValue(id, out have)) return Snapshot(have);   // the same Send arriving twice at once
-                if (RunningJobId(top) != "") return Says("busy", "Another commit or push is already running in this repository.");
+                if (RunningJobId(top) != "" || !Git.TryHold(top)) return Says("busy", "Another commit or push is already running in this repository.");
                 job = new GitJob { Id = id, Token = t, Top = top, Name = Path.GetFileName(top) };
                 jobs[id] = job;
                 Prune();
@@ -686,6 +700,7 @@ namespace ClaudeStatus
             {
                 if (!jobs.TryGetValue(id, out job)) return Unknown();
                 if (!job.CanRetry || job.PushAttempts != n) return Snapshot(job);
+                if (!Git.TryHold(job.Top)) return Says("busy", "Another commit or push is running in this repository.");
                 job.State = "running"; job.Result = ""; job.Message = ""; job.PushAttempts++; job.StartedUtc = DateTime.UtcNow;
                 foreach (var s in job.Steps) if (s.State != "ok") s.State = "skipped";
             }
@@ -735,6 +750,7 @@ namespace ClaudeStatus
             {
                 if (check != null) check.State = result == "pushed" ? "ok" : "failed";
                 foreach (var s in job.Steps) if (s.State == "waiting") s.State = "skipped";
+                if (job.State == "running") Git.Release(job.Top);
                 job.Result = result; job.Message = msg; job.State = "finished";
             }
             lock (gate) reposCache = null;

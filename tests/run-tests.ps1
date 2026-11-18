@@ -2038,7 +2038,7 @@ $out = & $winPs -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repo 'insta
 Check 're-running the installer is a no-op for settings.json and config.json' ((Get-Content (Join-Path $inst 'config.json') -Raw) -eq $cfgText -and (($out | Out-String) -match 'already up to date'))
 Check 'upgrade (re-running the installer) keeps phone notification registrations (state\push.dat)' ((Test-Path $pushDat) -and (([IO.File]::ReadAllBytes($pushDat)) -join ',') -eq '7,7,7')
 Check 'phone dashboard files installed; config gets phoneDashboard=false, phonePort=48521' ((@('phone.cs', 'phone.html', 'phone.css', 'phone.js', 'phone-setup.ps1', 'push.cs', 'sw.js', 'workers.png', 'favicon.ico', 'clawde.ico', 'worker-192.png', 'apple-touch-icon.png') | Where-Object { -not (Test-Path (Join-Path $inst $_)) }).Count -eq 0 -and $c.phoneDashboard -eq $false -and $c.phonePort -eq 48521)
-$out = & $winPs -NoProfile -Command "Add-Type -Path '$inst\indicator.cs', '$inst\phone.cs', '$inst\usage.cs', '$inst\push.cs', '$inst\scheduler.cs', '$inst\queue.cs', '$inst\vscode.cs', '$inst\git.cs', '$inst\calendar.cs', '$inst\questionnaire.cs' -ReferencedAssemblies System.Windows.Forms, System.Drawing, System.Web.Extensions, System.Core, System.Security, System.Numerics; 'ok'" 2>&1
+$out = & $winPs -NoProfile -Command "Add-Type -Path '$inst\indicator.cs', '$inst\phone.cs', '$inst\usage.cs', '$inst\push.cs', '$inst\scheduler.cs', '$inst\queue.cs', '$inst\vscode.cs', '$inst\git.cs', '$inst\batch.cs', '$inst\calendar.cs', '$inst\questionnaire.cs' -ReferencedAssemblies System.Windows.Forms, System.Drawing, System.Web.Extensions, System.Core, System.Security, System.Numerics; 'ok'" 2>&1
 Check 'installed indicator compiles with Windows PowerShell 5.1' (($out | Out-String).Trim() -eq 'ok') ($out | Out-String)
 Check 'VS Code runner files installed (vscode.cs and the bridge extension with its installer)' ((@('vscode.cs', 'vscode-bridge\package.json', 'vscode-bridge\extension.js', 'vscode-bridge\install-bridge.ps1') | Where-Object { -not (Test-Path (Join-Path $inst $_)) }).Count -eq 0)
 Check 'scheduler files installed; config gets the queue defaults' ((Test-Path (Join-Path $inst 'scheduler.cs')) -and (Test-Path (Join-Path $inst 'queue.cs')) -and $c.toastOnQueue -eq $true -and $c.queueHistoryDays -eq 30 -and $c.queueAllowApiBilling -eq $false)
@@ -2086,6 +2086,7 @@ Check 'uninstall restores your own status line exactly' ($s3.statusLine.command 
 
 . (Join-Path $PSScriptRoot 'git-tests.ps1')
 & { . (Join-Path $PSScriptRoot 'phone-schedule-tests.ps1') }   # own scope: its variables don't touch the rest
+& { . (Join-Path $PSScriptRoot 'batch-tests.ps1') -Browser:$Browser -RenderDir $RenderDir }   # own scope: batches against the real app, mock Claude and temporary Git repositories
 
 # ======================================================================================
 Section 'Privacy / no-network audit (static)'

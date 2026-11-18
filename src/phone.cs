@@ -22,6 +22,8 @@
 //   GET  /api/queue?op=projects           the projects a task can be scheduled in (friendly names + tokens)
 //   GET  /api/calendar?d=YYYY-MM-DD       the Calendar view: that week laid out exactly as the desktop shows it
 //                                         (calendar.cs; read-only, names, times and tokens only)
+//   POST /api/queue {"op":"brun"|"bact"}    batches (batch.cs): Run now a saved batch; act on a run (pause, resume,
+//                                         retry, skip, accept, commit picked files, stop, cancel), checked by the laptop
 //   POST /api/queue {"op":"save"|"cancel"|"stop"}  schedule / edit a task, cancel one that hasn't started, or
 //                                         stop a running one: the desktop's own QueueEngine actions, run on its
 //                                         UI thread. Projects and tasks are named by tokens; never a path.
@@ -316,6 +318,7 @@ namespace ClaudeStatus
                 return list;
             });
             GitOps.Projects = () => { lock (gate) return new List<string>(queueProjects); };
+            GitOps.BatchBusy = top => { var q = Queue; return q != null ? q.BatchBusyReason(top) : ""; };   // a running batch owns its repository
         }
 
         public bool Start()
@@ -420,10 +423,24 @@ namespace ClaudeStatus
             foreach (var t in d.Tasks) if (QState.Finished(t.State)) past.Add(t); else tasks.Add(QueueRow(t, d));
             past.Sort((a, b) => b.FinishedUtc.CompareTo(a.FinishedUtc));
             for (int i = 0; i < past.Count && i < QueuePastMax; i++) tasks.Add(QueueRow(past[i], d));
+            // Batches: every run that isn't finished, the latest finished ones, and the definitions (Run now).
+            var runs = new List<object>(); var done = new List<BatchRun>();
+            foreach (var r in d.BatchRuns) if (Batching.Finished(r.State)) done.Add(r); else runs.Add(BatchRow(r, d));
+            done.Sort((a, b) => b.FinishedUtc.CompareTo(a.FinishedUtc));
+            for (int i = 0; i < done.Count && i < BatchPastMax; i++) runs.Add(BatchRow(done[i], d));
+            var defs = new List<object>();
+            foreach (var b in d.Batches)
+            {
+                var open = d.BatchRuns.Find(r => r.BatchId == b.Id && !Batching.Finished(r.State));
+                var titles = new List<object>();
+                foreach (var st in b.Steps) titles.Add((st.Title != "" ? st.Title : Sched.FirstLine(st.Prompt, 60)) + " · " + Friendly(st.Project) + (st.Commit ? " · commit" : "") + (st.Review ? " · review" : ""));
+                defs.Add(new Dictionary<string, object> { { "k", Token("d|" + b.Id) }, { "nm", b.Name }, { "n", b.Steps.Count }, { "st", titles }, { "busy", open != null ? Batching.StateText(open) : "" },
+                    { "at", b.Start == "at" ? MsOr0(b.RunAtUtc) : 0 } });
+            }
             // The laptop's time zone (its name and current UTC offset), so the phone can say when its own clock differs.
             var tz = TimeZoneInfo.Local;
             DateTime nowLocal = DateTime.Now;
-            var q = new Dictionary<string, object> { { "paused", d.Paused }, { "warn", warning ?? "" }, { "tasks", tasks }, { "can", Queue != null },
+            var q = new Dictionary<string, object> { { "paused", d.Paused }, { "warn", warning ?? "" }, { "tasks", tasks }, { "can", Queue != null }, { "runs", runs }, { "defs", defs },
                 { "tz", tz.IsDaylightSavingTime(nowLocal) ? tz.DaylightName : tz.StandardName }, { "tzo", (int)tz.GetUtcOffset(nowLocal).TotalMinutes } };
             string sig = new JavaScriptSerializer { MaxJsonLength = int.MaxValue }.Serialize(q);
             var projects = new List<string>();
@@ -457,9 +474,47 @@ namespace ClaudeStatus
                 // for editing from the phone: the project's token, the revision the edit is based on, whether it may be
                 // edited / canceled there (not started; full prompt known), and the run time on the laptop's own clock
                 { "pk", ProjectToken(t.Project) }, { "rv", t.Revision }, { "lt", t.Schedule == "at" ? t.RunAtLocal : "" },
-                { "ed", (QState.Pending(t.State) || t.State == QState.Draft) && prompt.Length <= QueuePromptMax },
-                { "cx", QState.Pending(t.State) || t.State == QState.Draft || t.State == QState.NeedsAttention },
+                { "ed", (QState.Pending(t.State) || t.State == QState.Draft) && prompt.Length <= QueuePromptMax && t.BatchRun == "" },
+                { "cx", (QState.Pending(t.State) || t.State == QState.Draft || t.State == QState.NeedsAttention) && t.BatchRun == "" },
+                { "bk", t.BatchRun != "" ? Token("b|" + t.BatchRun) : "" },   // a step of that batch run: managed there
                 { "cp", t.AllowCommit || t.AllowPush || t.AllowDelete },
+            };
+        }
+
+        public const int BatchPastMax = 10, BatchTextMax = 4000;
+        string Friendly(string folder) { try { return Board.FriendlyName(Path.GetFileName((folder ?? "").TrimEnd('\\', '/')), Aliases); } catch { return ""; } }
+        static string Cut(string s, int max) { s = s ?? ""; return s.Length > max ? s.Substring(0, max) + "\n…(shortened; the full text is on the laptop)" : s; }
+
+        // A batch run as the phone shows it: display data and the actions the laptop allows now (with their confirmations).
+        // No folder paths or session ids; only the file names Git lists as changed (for picking what to commit).
+        Dictionary<string, object> BatchRow(BatchRun r, QueueData d)
+        {
+            var steps = new List<object>();
+            var cur = Batching.Cur(r);
+            foreach (var s in r.Steps)
+            {
+                var t = s.TaskId != "" ? d.Find(s.TaskId) : null;
+                var files = new List<object>();
+                if (s == cur && r.PauseKind == "commit" && s.CommitState == "select")
+                    foreach (var c in s.Choices) { var f = c.Split('\t'); if (f.Length >= 4) files.Add(new Dictionary<string, object> { { "p", f[0] }, { "h", f[1] }, { "kd", f[2] }, { "why", f[3] } }); }
+                steps.Add(new Dictionary<string, object>
+                {
+                    { "ti", s.Title }, { "pj", Friendly(s.Project) }, { "cv", s.Conversation }, { "ho", s.Handoff }, { "rv", s.Review }, { "cm", s.Commit },
+                    { "msg", s.Commit ? s.CommitMessage : "" }, { "st", s.State }, { "lb", Batching.StepLabel(s, t) }, { "cl", s.Commit ? Batching.CommitLabel(s) : "" },
+                    { "ch", s.CommitHash }, { "cn", s.CommitNote }, { "co", Cut(s.CommitOut, BatchTextMax) }, { "cf", s.Committed },
+                    { "sum", t != null && t.Summary != "" ? t.Summary : s.Summary }, { "res", t != null ? Cut(t.ResultText, BatchTextMax) : "" }, { "why", t != null && s.State == "prompt" ? t.Reason : "" },
+                    { "p", Cut(s.Prompt, QueuePromptMax) }, { "sa", MsOr0(s.StartedUtc) }, { "fi", MsOr0(s.EndedUtc) }, { "n", t != null ? t.Attempts.Count : 0 },
+                    { "q", t != null ? Token("q|" + t.Id) : "" }, { "files", files },
+                });
+            }
+            var ops = new List<object>();
+            foreach (var op in Batching.Ops(r, d)) ops.Add(new Dictionary<string, object> { { "op", op }, { "l", Batching.OpLabel(op, r) }, { "c", Batching.Confirm(op, r) } });
+            return new Dictionary<string, object>
+            {
+                { "k", Token("b|" + r.Id) }, { "nm", r.Name }, { "st", r.State }, { "lb", Batching.StateText(r) }, { "pg", Batching.Progress(r) }, { "pk", r.PauseKind },
+                { "why", r.Reason }, { "cur", r.Current }, { "n", r.Steps.Count }, { "sq", r.Seq }, { "pa", r.PauseAfterStep }, { "rn", r.Runner },
+                { "pj", cur != null && Batching.Active(r.State) ? Friendly(cur.Project) : "" },
+                { "at", MsOr0(r.StartAtUtc) }, { "sa", MsOr0(r.StartedUtc) }, { "fi", MsOr0(r.FinishedUtc) }, { "ops", ops }, { "steps", steps },
             };
         }
 
@@ -1110,7 +1165,7 @@ namespace ClaudeStatus
             Dictionary<string, object> d = null;
             try { d = new JavaScriptSerializer { MaxJsonLength = MaxGitBody, RecursionLimit = 4 }.Deserialize<Dictionary<string, object>>(Encoding.UTF8.GetString(req.Body)); } catch { }
             string op = Str(d, "op"), id = Str(d, "id");
-            if (id == null || !TokenRx.IsMatch(id) || (op != "save" && op != "cancel" && op != "stop")) { Json(ns, 400, "{\"result\":\"bad_request\",\"msg\":\"The laptop didn't understand that request.\"}"); return; }
+            if (id == null || !TokenRx.IsMatch(id) || (op != "save" && op != "cancel" && op != "stop" && op != "brun" && op != "bact")) { Json(ns, 400, "{\"result\":\"bad_request\",\"msg\":\"The laptop didn't understand that request.\"}"); return; }
             if (Queue == null) { Json(ns, 503, "{\"result\":\"unavailable\",\"msg\":\"Scheduling isn't available on the laptop.\"}"); return; }
             string key;
             using (var sha = SHA256.Create()) key = id + "|" + Convert.ToBase64String(sha.ComputeHash(req.Body));
@@ -1128,7 +1183,7 @@ namespace ClaudeStatus
                 try { r = QueueAction(op, id, d); }
                 catch (Exception e) { r = Fail("error", "The laptop couldn't do that: " + e.Message); }
                 // Only done changes are remembered; a refusal can be fixed and sent again.
-                lock (opsGate) { if (r.ContainsKey("task") && Str(r, "result") != null && !r.ContainsKey("msg")) queueOps[key] = r; else queueOps.Remove(key); }
+                lock (opsGate) { if ((r.ContainsKey("task") || r.ContainsKey("batch")) && Str(r, "result") != null && !r.ContainsKey("msg")) queueOps[key] = r; else queueOps.Remove(key); }
                 return r;
             };
             object res;
@@ -1156,12 +1211,59 @@ namespace ClaudeStatus
         }
 
         public static readonly string[] PhoneModes = { "acceptEdits", "dontAsk", "plan" };
+        static readonly string[] BatchOps = { "pause", "unpause", "resume", "accept", "retry", "skip", "commit", "stop", "cancel" };
+
+        // Batches from the phone: Run now (its run id comes from the request id, so a resend finds the run it started)
+        // and actions on a run. The laptop checks the run's version (sq) and which actions are valid now inside its
+        // locked write: a stale page or a second tap can't act twice, or on a run that has moved on.
+        Dictionary<string, object> BatchOp(string op, string opId, Dictionary<string, object> d)
+        {
+            var eng = Queue;
+            string k = Str(d, "k");
+            if (k == null) return Fail("bad_request", "The laptop didn't understand that request.");
+            if (op == "brun")
+            {
+                BatchDef b = null;
+                foreach (var x in eng.Data.Batches) if (Token("d|" + x.Id) == k) b = x;
+                if (b == null) return Fail("gone", "This batch is no longer on the laptop.");
+                string rid, started;
+                using (var sha = SHA256.Create()) rid = BitConverter.ToString(sha.ComputeHash(Encoding.UTF8.GetBytes("phone-batch|" + opId))).Replace("-", "").Substring(0, 32).ToLowerInvariant();
+                string err = eng.StartBatch(b.Id, rid, out started);
+                if (err != null) return Fail("invalid", err);
+                var run = eng.Data.FindRun(started);
+                return new Dictionary<string, object> { { "result", "started" }, { "batch", run == null ? null : BatchRow(run, eng.Data) } };
+            }
+            BatchRun cur = null;
+            foreach (var x in eng.Data.BatchRuns) if (Token("b|" + x.Id) == k) cur = x;
+            if (cur == null) return Fail("gone", "This batch run is no longer on the laptop.");
+            string a = Str(d, "a");
+            object sqv;
+            if (a == null || Array.IndexOf(BatchOps, a) < 0 || !d.TryGetValue("sq", out sqv) || !(sqv is int)) return Fail("bad_request", "The laptop didn't understand that request.");
+            List<string> picked = null;
+            object fv;
+            if (a == "commit")
+            {
+                picked = new List<string>();
+                if (!d.TryGetValue("files", out fv) || !(fv is System.Collections.IList)) return Fail("bad_request", "The laptop didn't understand that request.");
+                foreach (var f in (System.Collections.IList)fv)
+                {
+                    var fs = f as string;
+                    if (fs == null || fs.Length > 8192 || fs.IndexOf('\t') <= 0) return Fail("bad_request", "The laptop didn't understand that request.");
+                    picked.Add(fs);
+                }
+            }
+            string e2 = eng.BatchAction(cur.Id, a, (int)sqv, picked);
+            var now = eng.Data.FindRun(cur.Id);
+            if (e2 != null) return new Dictionary<string, object> { { "result", "refused" }, { "msg", e2 }, { "batch", now == null ? null : BatchRow(now, eng.Data) } };
+            return new Dictionary<string, object> { { "result", "done" }, { "batch", now == null ? null : BatchRow(now, eng.Data) } };
+        }
 
         // Runs on the indicator's UI thread, like every other scheduler action. The engine re-checks state inside its
         // own locked write (Save's revision check, CancelPending), so a task that started meanwhile is never changed.
         Dictionary<string, object> QueueAction(string op, string opId, Dictionary<string, object> d)
         {
             var eng = Queue;
+            if (op == "brun" || op == "bact") return BatchOp(op, opId, d);
             string k = Str(d, "k");
             QueueTask cur = null;
             if (k != null)

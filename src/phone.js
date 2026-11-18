@@ -866,10 +866,12 @@
     var empty = function (text) { var p = el('p', 'sched-empty', text); schedList.appendChild(p); };
     if (!data) { if (schedOpen) schedBody.appendChild(el('p', 'sched-empty', 'Connecting to the laptop…')); empty(conn === 'offline' ? "Can't reach Claude Status on the laptop" : 'Connecting to the laptop…'); return; }
     if (!q) { empty("The laptop didn't send its schedule. Restart Claude Status on the laptop after updating it."); if (schedOpen) schedBody.appendChild(el('p', 'sched-empty', 'Task details are unavailable.')); return; }
-    if (schedOpen) { renderDetail(q, now); return; }
+    if (schedOpen) { if (schedOpen.indexOf('b:') === 0) renderBatch(q, now); else renderDetail(q, now); return; }
     if (q.warn) schedList.appendChild(el('p', 'sched-warn', q.warn));
     if (q.paused) schedList.appendChild(el('p', 'sched-warn', 'The queue is paused on the laptop: nothing new starts until you resume it there.'));
     var g = schedGroups(q.tasks);
+    renderBatches(q);
+    if (!q.tasks.length && ((q.runs || []).length || (q.defs || []).length)) return;
     if (!q.tasks.length) { empty(q.can ? 'Nothing scheduled yet. Tap Schedule task to have Claude run a prompt on the laptop later.' : 'Nothing scheduled. Schedule prompts from the Queue view on the laptop.'); return; }
     [['attn', 'NEEDS ATTENTION'], ['run', 'RUNNING'], ['up', 'UPCOMING']].forEach(function (s) {
       if (!g[s[0]].length) return;
@@ -950,6 +952,7 @@
     schedBody.appendChild(el('div', 'qd-prompt', t.p || '(empty)'));
     if (t.pc) schedBody.appendChild(el('p', 'qd-note', 'Shortened: the full prompt is on the laptop.'));
     if (t.cp) schedBody.appendChild(el('p', 'qd-note', 'This task may also commit, push or delete files (set on the laptop). Editing it here keeps that.'));
+    if (t.bk) { var bb = el('button', 'usage-btn', 'Open its batch'); bb.type = 'button'; bb.addEventListener('click', function () { schedOpen = 'b:' + t.bk; renderSched(false); }); schedBody.appendChild(el('p', 'qd-note', 'This task is a step of a batch run: the batch decides when it runs, so manage it from the batch.')); schedBody.appendChild(bb); }
     if (!q.can) schedBody.appendChild(el('p', 'qd-note', 'View only. Change or run tasks from the Queue view on the laptop.'));
   }
 
@@ -993,6 +996,162 @@
         if (tries < 1) { setTimeout(function () { send(tries + 1); }, 1500); return; }
         acting = null;
         note("Not confirmed: the laptop didn't answer. Check the task's status when it's LIVE again.");
+        schedSig = ''; renderSched(false);
+      });
+    };
+    send(0);
+  }
+
+  // ---------- Batches (batch.cs): an ordered series of prompts run one after another on the laptop ----------
+  // Looking uses api/board like the rest of the page. Actions are POSTs to api/queue with a one-time id and the run's
+  // version (sq): the laptop checks both, so a double tap or a stale page can't act twice. What a run shows changes only
+  // when the laptop's own state does; a disconnected phone never stops a batch.
+  var B_COLOR = { Running: 'yellow', Completed: 'green', Canceled: 'grey', Scheduled: 'blue' };
+  var batchActing = null, batchPick = {}, batchStepOpen = {};
+  function batchColor(b) { return b.st === 'Paused' ? (b.pk === 'review' || b.pk === 'user' ? 'blue' : 'red') : B_COLOR[b.st] || 'grey'; }
+
+  function renderBatches(q) {
+    var runs = q.runs || [], defs = q.defs || [], live = conn === 'live';
+    var open = runs.filter(function (b) { return b.st !== 'Completed' && b.st !== 'Canceled'; }), past = runs.filter(function (b) { return b.st === 'Completed' || b.st === 'Canceled'; });
+    if (!runs.length && !defs.length) return;
+    var item = function (b) {
+      var li = el('li'), btn = el('button', 'qitem');
+      btn.type = 'button';
+      btn.appendChild(el('span', 'qtitle', b.nm));
+      btn.appendChild(el('span', 'qmeta', b.pg + (b.pj ? DOT + b.pj : '') + DOT + 'Claude Code'));
+      var line = el('span', 'qstat'); line.appendChild(el('span', 'qword c-' + batchColor(b), b.lb));
+      if (b.why) line.appendChild(el('span', 'qwhen', DOT + b.why));
+      btn.appendChild(line);
+      btn.addEventListener('click', function () { schedScroll = window.scrollY; schedOpen = 'b:' + b.k; renderSched(false); window.scrollTo(0, schedEl.offsetTop); });
+      li.appendChild(btn);
+      return li;
+    };
+    if (open.length) {
+      schedList.appendChild(el('h2', 'sched-h', 'BATCHES · ' + open.length));
+      var ul = el('ul', 'qlist'); open.forEach(function (b) { ul.appendChild(item(b)); }); schedList.appendChild(ul);
+    }
+    if (defs.length) {
+      schedList.appendChild(el('h2', 'sched-h', 'SAVED BATCHES · ' + defs.length));
+      var dl = el('ul', 'qlist');
+      defs.forEach(function (d) {
+        var li = el('li', 'qitem bdef');
+        li.appendChild(el('span', 'qtitle', d.nm));
+        li.appendChild(el('span', 'qmeta', d.n + ' step' + (d.n === 1 ? '' : 's') + (d.at ? DOT + 'starts ' + fullTime(d.at) : '') + (d.busy ? DOT + 'run: ' + d.busy : '')));
+        var steps = el('ol', 'bdef-steps'); (d.st || []).forEach(function (t) { steps.appendChild(el('li', '', t)); }); li.appendChild(steps);
+        if (q.can) {
+          var b = el('button', 'usage-btn', batchActing && batchActing.k === d.k ? 'Starting…' : 'Run now');
+          b.type = 'button'; b.disabled = !live || !!batchActing || !!d.busy;
+          b.addEventListener('click', function () { if (confirm('Run “' + d.nm + '” now on the laptop?\n\nIts ' + d.n + ' step' + (d.n === 1 ? '' : 's') + ' run one after another, unattended, with Claude Code.')) batchSend({ op: 'brun', id: newId(), k: d.k }); });
+          li.appendChild(b);
+        }
+        dl.appendChild(li);
+      });
+      schedList.appendChild(dl);
+    }
+    if (past.length) {
+      var ph = el('button', 'sched-h sched-past', 'PAST BATCHES · ' + past.length + (schedPastOpen ? '  ▾' : '  ▸ show'));
+      ph.type = 'button'; ph.setAttribute('aria-expanded', String(schedPastOpen));
+      ph.addEventListener('click', function () { schedPastOpen = !schedPastOpen; renderSched(false); });
+      schedList.appendChild(ph);
+      if (schedPastOpen) { var pl = el('ul', 'qlist past'); past.forEach(function (b) { pl.appendChild(item(b)); }); schedList.appendChild(pl); }
+    }
+  }
+
+  function renderBatch(q, now) {
+    var k = schedOpen.slice(2), b = (q.runs || []).filter(function (x) { return x.k === k; })[0], live = conn === 'live';
+    if (!b) { schedBody.appendChild(el('p', 'sched-empty', 'This batch run is no longer on the laptop (history is cleared after a while).')); return; }
+    schedBody.appendChild(el('h2', 'qd-title', b.nm));
+    var s = el('p', 'qd-status'); s.appendChild(el('span', 'qword c-' + batchColor(b), b.lb)); s.appendChild(document.createTextNode(DOT + b.pg + (b.pj ? DOT + b.pj : '') + DOT + 'Claude Code'));
+    schedBody.appendChild(s);
+    if (b.why) { var w = el('p', 'sched-warn bwhy', b.why); w.setAttribute('role', 'status'); schedBody.appendChild(w); }
+    var cur = b.steps[b.cur] || null, files = cur && cur.files && cur.files.length ? cur.files : null;
+    if (files) {
+      var picks = batchPick[b.k + '|' + b.sq];
+      if (!picks) { picks = batchPick[b.k + '|' + b.sq] = {}; files.forEach(function (f) { picks[f.p] = f.why === 'changed during this step'; }); }
+      schedBody.appendChild(el('h3', 'qd-h', 'Pick the files to commit (step ' + (b.cur + 1) + ')'));
+      var fl = el('ul', 'bfiles');
+      files.forEach(function (f) {
+        var li = el('li'), lab = el('label'), cb = el('input');
+        cb.type = 'checkbox'; cb.checked = !!picks[f.p]; cb.disabled = !live || !!batchActing;
+        cb.addEventListener('change', function () { picks[f.p] = cb.checked; });
+        lab.appendChild(cb); lab.appendChild(el('span', 'bfile', f.p)); lab.appendChild(el('span', 'qmeta', ' ' + f.kd + DOT + f.why));
+        li.appendChild(lab); fl.appendChild(li);
+      });
+      schedBody.appendChild(fl);
+      schedBody.appendChild(el('p', 'qd-explain', 'Only the files you tick are added and committed, with the step\'s message. Files staged on the laptop must be ticked too (or unstaged there). The laptop checks each file is unchanged since this list.'));
+    }
+    if (q.can && b.ops.length) {
+      var box = el('div', 'qd-actions');
+      b.ops.forEach(function (o) {
+        var btn = el('button', 'usage-btn' + (o.op === 'cancel' || o.op === 'stop' ? ' danger' : ''), batchActing && batchActing.k === b.k && batchActing.a === o.op ? 'Sending…' : o.l);
+        btn.type = 'button'; btn.disabled = !live || !!batchActing;
+        btn.addEventListener('click', function () {
+          if (o.c && !confirm(o.c)) return;
+          var body = { op: 'bact', id: newId(), k: b.k, a: o.op, sq: b.sq };
+          if (o.op === 'commit') {
+            var pk = batchPick[b.k + '|' + b.sq] || {};
+            body.files = (files || []).filter(function (f) { return pk[f.p]; }).map(function (f) { return f.p + '\t' + f.h; });
+            if (!body.files.length) { note('Tick at least one file, or use Skip commit and continue.'); return; }
+          }
+          batchSend(body);
+        });
+        box.appendChild(btn);
+      });
+      schedBody.appendChild(box);
+      schedBody.appendChild(el('p', 'qd-explain', !live ? 'Not connected to the laptop: actions are unavailable until it is LIVE again. The batch keeps running there.' :
+        batchActing ? 'Sending to the laptop… The status above changes once the laptop confirms.' :
+        'Pause after current step waits for the running prompt and its commit. Cancel stops what comes next; it never undoes changes. A paused batch leaves the Commit view free for committing by hand.'));
+    }
+    var dl = el('dl', 'qd-facts');
+    var fact = function (kk, v) { if (!v) return; dl.appendChild(el('dt', '', kk)); dl.appendChild(el('dd', '', v)); };
+    if (b.st === 'Scheduled' && b.at) fact('Starts', fullTime(b.at) + ' (' + rel(b.at, now) + ')');
+    if (b.sa) fact('Started', fullTime(b.sa));
+    if (b.fi) fact('Finished', fullTime(b.fi));
+    fact('Runs', (b.rn === 'headless' ? 'in the background' : "in each project's VS Code window") + ', unattended');
+    if (b.pa) fact('Pause', 'after the current step (its prompt and its commit)');
+    schedBody.appendChild(dl);
+    schedBody.appendChild(el('h3', 'qd-h', 'Steps'));
+    var ol = el('ol', 'bsteps');
+    b.steps.forEach(function (st, i) {
+      var li = el('li', 'bstep' + (i === b.cur && (b.st === 'Running' || b.st === 'Paused') ? ' cur' : '')), key = b.k + '|' + i;
+      var head = el('button', 'qitem');
+      head.type = 'button'; head.setAttribute('aria-expanded', String(!!batchStepOpen[key]));
+      var mark = st.st === 'done' ? '✓ ' : st.st === 'skipped' ? '↷ ' : st.st === 'canceled' ? '– ' : i === b.cur && b.st !== 'Completed' ? '▶ ' : '';
+      head.appendChild(el('span', 'qtitle', mark + (i + 1) + '. ' + st.ti));
+      head.appendChild(el('span', 'qmeta', st.pj + DOT + (st.cv === 'continue' ? 'continues the conversation' : st.ho ? 'fresh conversation + handoff' : 'fresh conversation') + (st.rv ? DOT + 'review' : '')));
+      var line = el('span', 'qstat'); line.appendChild(el('span', 'qword', st.lb)); if (st.cm && st.st !== 'done' && st.st !== 'commit') line.appendChild(el('span', 'qwhen', DOT + st.cl)); head.appendChild(line);
+      head.addEventListener('click', function () { batchStepOpen[key] = !batchStepOpen[key]; schedSig = ''; renderSched(false); });
+      li.appendChild(head);
+      if (batchStepOpen[key]) {
+        var d2 = el('div', 'bstep-detail');
+        var add = function (h, t, cls) { if (!t) return; d2.appendChild(el('h3', 'qd-h', h)); d2.appendChild(el(cls === 'pre' ? 'div' : 'p', cls === 'pre' ? 'qd-prompt' : 'qd-text', t)); };
+        add('Status note', st.why); add('Result', st.res || st.sum, 'pre');
+        if (st.cm) { add('Commit', st.cl + (st.cn ? ': ' + st.cn : '')); add('Commit message', st.msg, 'pre'); if (st.cf && st.cf.length) add('Committed files', st.cf.join(', ')); add('Git output', st.co, 'pre'); }
+        if (st.n) add('Attempts', String(st.n));
+        add('Prompt (as written)', st.p, 'pre');
+        if (st.q) { var ot = el('button', 'usage-btn', 'Open its task'); ot.type = 'button'; ot.addEventListener('click', function () { schedOpen = st.q; renderSched(false); }); d2.appendChild(ot); }
+        li.appendChild(d2);
+      }
+      ol.appendChild(li);
+    });
+    schedBody.appendChild(ol);
+  }
+
+  function batchSend(body) {
+    if (batchActing || conn !== 'live') return;
+    batchActing = body;
+    schedSig = ''; renderSched(false);
+    var send = function (tries) {
+      queueApi('', body).then(function (j) {
+        if (j.result === 'pending' && tries < 6) { setTimeout(function () { send(tries + 1); }, 2000); return; }
+        batchActing = null;
+        if (j.status === 200 && body.op === 'brun' && j.batch) { schedOpen = 'b:' + j.batch.k; note('Started on the laptop.'); }
+        else note(j.status === 200 ? 'Done on the laptop.' : (j.msg || 'The laptop refused (' + j.status + ').'));
+        schedSig = ''; renderSched(false);
+      }, function () {
+        if (tries < 1) { setTimeout(function () { send(tries + 1); }, 1500); return; }   // the same request again is harmless (same id)
+        batchActing = null;
+        note("Not confirmed: the laptop didn't answer. Check the batch's status when it's LIVE again.");
         schedSig = ''; renderSched(false);
       });
     };

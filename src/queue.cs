@@ -213,7 +213,8 @@ namespace ClaudeStatus
         TaskEditor editor;
         // The Calendar tab (calendar.cs): null when no calendar source was given (the tests' plain Queue).
         readonly CalendarView calendar;
-        readonly Button tasksTab, calendarTab, qnTab;
+        readonly Button tasksTab, calendarTab, qnTab, batchTab;
+        readonly BatchView batches;   // the Batches tab (batch.cs)
         readonly Control tasksArea, bannerArea;
         // The Questionnaires tab (questionnaire.cs): null without a desk.
         readonly QuestionnaireView questionnaires;
@@ -245,9 +246,10 @@ namespace ClaudeStatus
             if (calendarSource != null)
             {
                 tasksTab = QTheme.Btn("Tasks", (s, e) => ShowCalendar(false));
+                batchTab = QTheme.Btn("Batches", (s, e) => ShowTab(3));
                 calendarTab = QTheme.Btn("Calendar", (s, e) => ShowCalendar(true));
-                tasksTab.Margin = new Padding(0, 0, 0, S(6)); calendarTab.Margin = new Padding(0, 0, S(14), S(6));
-                buttons.Controls.Add(tasksTab); buttons.Controls.Add(calendarTab);
+                tasksTab.Margin = new Padding(0, 0, 0, S(6)); batchTab.Margin = new Padding(0, 0, 0, S(6)); calendarTab.Margin = new Padding(0, 0, S(14), S(6));
+                buttons.Controls.Add(tasksTab); buttons.Controls.Add(batchTab); buttons.Controls.Add(calendarTab);
                 if (qnDesk != null)
                 {
                     qnTab = QTheme.Btn("Questionnaires", (s, e) => ShowTab(2));
@@ -338,6 +340,8 @@ namespace ClaudeStatus
             tasksArea = split; bannerArea = bannerPanel;
             if (calendarSource != null)
             {
+                batches = new BatchView(eng, scale) { Dock = DockStyle.Fill, Visible = false };
+                Controls.Add(batches);
                 calendar = new CalendarView(calendarSource, scale) { Dock = DockStyle.Fill, Visible = false };
                 calendar.OpenTask = id => { ShowCalendar(false); SelectTask(id); };
                 Controls.Add(calendar);
@@ -356,7 +360,7 @@ namespace ClaudeStatus
             {
                 // the shown tab is drawn bold: both get room for that, so nothing shifts when you switch
                 var tabFont = new Font(SystemFonts.MessageBoxFont, FontStyle.Bold);
-                foreach (var b in qnTab != null ? new[] { tasksTab, calendarTab, qnTab } : new[] { tasksTab, calendarTab }) b.MinimumSize = new Size(TextRenderer.MeasureText(b.Text, tabFont).Width + S(18), pause.PreferredSize.Height);
+                foreach (var b in qnTab != null ? new[] { tasksTab, calendarTab, qnTab, batchTab } : new[] { tasksTab, calendarTab, batchTab }) b.MinimumSize = new Size(TextRenderer.MeasureText(b.Text, tabFont).Width + S(18), pause.PreferredSize.Height);
                 ShowCalendar(false);
             }
             newTask.MinimumSize = new Size(0, pause.PreferredSize.Height);
@@ -405,21 +409,26 @@ namespace ClaudeStatus
         // Tasks (the list and details) or Calendar. Only what's shown changes; the queue keeps running either way.
         public void ShowCalendar(bool on) { ShowTab(on ? 1 : 0); }
 
-        // 0 Tasks, 1 Calendar, 2 Questionnaires.
+        public BatchView Batches { get { return batches; } }
+        public void SelectBatchRun(string id) { ShowTab(3); if (batches != null) batches.SelectRun(id); }
+
+        // 0 Tasks, 1 Calendar, 2 Questionnaires, 3 Batches.
         public void ShowTab(int tab)
         {
             if (calendar == null || (tab == 2 && questionnaires == null)) return;
             shownTab = tab;
             calendar.Visible = tab == 1;
             if (questionnaires != null) questionnaires.Visible = tab == 2;
+            batches.Visible = tab == 3;
             tasksArea.Visible = tab == 0;
             if (tab != 0) bannerArea.Visible = false; else RefreshView();
             // the shown tab looks pressed (aria-pressed for screen readers comes from the name)
             // (selected, not the accent: + New task stays the one primary button)
-            var tabs = qnTab != null ? new[] { tasksTab, calendarTab, qnTab } : new[] { tasksTab, calendarTab };
-            var names = new[] { "Tasks", "Calendar", "Questionnaires" };
+            var tabs = qnTab != null ? new[] { tasksTab, calendarTab, qnTab, batchTab } : new[] { tasksTab, calendarTab, null, batchTab };
+            var names = new[] { "Tasks", "Calendar", "Questionnaires", "Batches" };
             for (int i = 0; i < tabs.Length; i++)
             {
+                if (tabs[i] == null) continue;
                 QTheme.Normal(tabs[i]);
                 tabs[i].Font = i == tab ? new Font(SystemFonts.MessageBoxFont, FontStyle.Bold) : SystemFonts.MessageBoxFont;
                 tabs[i].AccessibleName = names[i] + (i == tab ? " (shown)" : "");
@@ -427,6 +436,7 @@ namespace ClaudeStatus
             }
             if (tab == 1) calendar.RefreshData();
             if (tab == 2) questionnaires.RefreshView();
+            if (tab == 3) batches.RefreshView();
         }
 
         public void SelectTask(string id)
