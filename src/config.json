@@ -18,7 +18,8 @@
   "queueAllowApiBilling": false,
   "includeCodex": true,
   "projectCategories": {
-    "Guest_Booking_Form": "toahnipi"
+    "Guest_Booking_Form": "toahnipi",
+    "tnocr_gemini": "toahnipi"
   },
   "projectAliases": {
     "Toah_Nipi_Booking_Software": "Booking Software",
