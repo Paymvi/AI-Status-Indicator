@@ -538,11 +538,6 @@ textarea.sf-prompt { min-height: 150px; box-sizing: border-box; }
 .board.stale #git-list, .board.stale #git-detail { opacity: .55; }
 
 /* ---------- Calendar: when the workers worked (one block per prompt), and what's planned ---------- */
-@media (max-width: 440px) {
-  /* five views: two rows of buttons instead of a strip that doesn't fit */
-  .viewbar .segs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; flex: 1 1 auto; }
-  .viewbar .seg { border-radius: 5px; border-left: 1px solid #3a3a3a; padding: 0 4px; }
-}
 .cal[hidden], .cal-sheet[hidden], .cal-notes[hidden], .cal-days[hidden], #cal-sh-open[hidden], #cal-sh-note[hidden] { display: none; }
 .cal { --hh: 44px; --tn: 63, 185, 80; --ot: 255, 200, 61; padding-bottom: 0; }
 .cal-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 8px 12px 0 14px; }
@@ -616,3 +611,103 @@ textarea.sf-prompt { min-height: 150px; box-sizing: border-box; }
 .cal-sheet-head .usage-btn { margin: 10px 0 0; min-width: 44px; min-height: 44px; }
 #cal-sh-open { margin: 12px 0 0; min-height: 44px; }
 .board.stale .cal-grid { opacity: .55; }
+
+/* ---------- Questions: one question at a time from the laptop's questionnaire ---------- */
+/* six views: two rows of three buttons (one strip doesn't fit even the board's full 560 px) */
+.viewbar .segs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; flex: 1 1 auto; }
+.viewbar .seg { border-radius: 5px; border-left: 1px solid #3a3a3a; padding: 0 4px; }
+.qn[hidden], .qn-banner[hidden] { display: none; }
+.qn { padding-bottom: 0; }
+.qn-banner { margin: 8px 14px 0; }
+.qn-bmsg { margin: 0; }
+.qn-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.qn-row .usage-btn, .qn-row .tog { margin: 8px 0 0; }
+.qn-body { min-width: 0; }
+.qn-proj { margin: 0 0 8px; color: var(--muted); font-size: 14px; }
+.qn-wide { display: block; width: 100%; }
+.qn-start .sf-send { margin-top: 14px; }
+.qn-list, .qn-rlist { list-style: none; margin: 0; padding: 0; }
+.qn-item {
+  display: flex; align-items: center; gap: 8px; width: 100%; min-height: 48px; margin: 0; padding: 8px 4px;
+  border: 0; border-bottom: 1px solid var(--line); background: transparent; color: var(--name); text-align: left;
+  font: inherit; font-size: 14.5px; touch-action: manipulation; -webkit-tap-highlight-color: transparent;
+}
+.qn-item:focus-visible { outline: 2px solid var(--muted); outline-offset: -2px; }
+.qn-num { flex: none; color: var(--muted); min-width: 1.6em; }
+.qn-itext { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.qn-st { flex: none; padding: 1px 7px; border-radius: 9px; font-size: 12px; font-weight: 700; white-space: nowrap; border: 1px solid; }
+.qn-answered { color: var(--green); border-color: rgba(63, 185, 80, .5); }
+.qn-delegated { color: var(--blue); border-color: rgba(88, 166, 255, .5); }
+.qn-skipped { color: var(--orange); border-color: rgba(240, 136, 62, .5); }
+.qn-unanswered { color: var(--muted); border-color: #4a4a4a; }
+.qn-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.qn-top .usage-btn { margin: 0; }
+.qn-prog { font-size: 14px; font-weight: 700; }
+.qn-bar { height: 4px; margin: 10px 0 0; border-radius: 2px; background: #333; overflow: hidden; }
+.qn-bar span { display: block; height: 100%; background: var(--blue); }
+.qn-jump { margin: 8px 0 0; }
+.qn-jump summary, .qn-ctx summary { min-height: 40px; display: flex; align-items: center; font-size: 14px; color: var(--name); cursor: pointer; touch-action: manipulation; }
+.qn-jump summary:focus-visible, .qn-ctx summary:focus-visible { outline: 2px solid var(--muted); outline-offset: -2px; }
+.qn-chips { display: flex; flex-wrap: wrap; gap: 6px; padding: 2px 0 6px; }
+.qn-chip {
+  min-width: 40px; min-height: 40px; margin: 0; padding: 0 6px; border: 1px solid; border-radius: 6px; background: transparent;
+  font: inherit; font-size: 14px; font-weight: 700; touch-action: manipulation; -webkit-tap-highlight-color: transparent;
+}
+.qn-chip.qn-unanswered { border-style: dashed; }
+.qn-chip.qn-here { background: #353535; color: #fff; }
+.qn-chip:focus-visible { outline: 2px solid var(--name); outline-offset: 1px; }
+.qn-of { margin: 8px 0 0; font-size: 12.5px; color: var(--muted); overflow-wrap: anywhere; }
+.qn-qtext { margin-top: 6px; }
+.qn-meta { margin: 0 0 8px; font-size: 13px; color: var(--muted); display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.qn-req { font-weight: 700; color: var(--name); }
+.qn-ctx { margin: 8px 0 0; border-top: 1px solid var(--line); }
+.qn-mode { margin: 12px 0 0; padding: 8px 10px; border-left: 3px solid var(--blue); background: #262626; font-size: 14px; line-height: 1.4; }
+.qn-form { margin-top: 10px; }
+.qn-dim .qn-opts, .qn-dim .qn-recbox, .qn-dim #qn-text { opacity: .6; }
+.qn-recbox { margin: 0 0 10px; padding: 8px 10px 10px; border: 1px solid rgba(88, 166, 255, .45); border-radius: 6px; background: #20262e; }
+.qn-recbox .usage-btn { margin-top: 8px; }
+.qn-rech { margin: 0; font-size: 14px; font-weight: 700; color: var(--blue); overflow-wrap: anywhere; }
+.qn-opts { display: flex; flex-direction: column; gap: 6px; }
+.qn-opt {
+  display: flex; align-items: center; gap: 10px; min-height: 48px; padding: 6px 10px;
+  border: 1px solid #3a3a3a; border-radius: 6px; font-size: 15px; line-height: 1.35; cursor: pointer; touch-action: manipulation;
+}
+.qn-opt input { flex: none; width: 20px; height: 20px; margin: 0; accent-color: var(--blue); }
+.qn-opt:has(input:checked) { border-color: var(--blue); background: #22272e; }
+.qn-opt:has(input:focus-visible) { outline: 2px solid var(--name); outline-offset: 1px; }
+.qn-olabel { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.qn-rectag { display: inline-block; margin-left: 6px; padding: 0 6px; border-radius: 8px; background: rgba(88, 166, 255, .18); color: var(--blue); font-size: 12px; font-weight: 700; vertical-align: 1px; }
+.qn-area { min-height: 80px; resize: none; overflow-y: auto; }
+#qn-other { margin-top: 8px; }
+.qn-modes { margin-top: 12px; }
+.qn-modes .tog { margin-left: 0; min-height: 44px; }
+.qn-nav {
+  position: sticky; bottom: 0; display: flex; gap: 10px; margin: 14px -14px 0; padding: 10px 14px max(10px, env(safe-area-inset-bottom));
+  background: var(--bg); border-top: 1px solid var(--line);
+}
+.qn-nav .usage-btn { margin: 0; flex: 0 0 auto; min-height: 48px; }
+.qn-nav .sf-send { margin: 0; flex: 1 1 auto; }
+.qn-md { font-size: 14.5px; line-height: 1.45; overflow-wrap: anywhere; min-width: 0; }
+.qn-md p, .qn-md ul, .qn-md ol, .qn-md blockquote { margin: 8px 0; }
+.qn-md ul, .qn-md ol { padding-left: 1.4em; }
+.qn-md .qn-mh { margin: 12px 0 4px; font-size: 15px; }
+.qn-md blockquote { padding-left: 10px; border-left: 3px solid #444; color: var(--muted); }
+.qn-md a { color: var(--blue); }
+.qn-md code { font-family: ui-monospace, "Cascadia Mono", Consolas, Menlo, monospace; font-size: 13px; background: #2a2a2a; border-radius: 3px; padding: 0 3px; }
+.qn-md pre.qn-code { margin: 8px 0; padding: 8px 10px; max-width: 100%; overflow-x: auto; background: #181818; border: 1px solid var(--line); border-radius: 5px; }
+.qn-md pre.qn-code code { background: none; padding: 0; white-space: pre; }
+.qn-md pre.qn-code:focus-visible { outline: 2px solid var(--muted); }
+.qn-img { display: inline-block; padding: 2px 6px; border: 1px dashed #555; border-radius: 4px; color: var(--muted); font-size: 13px; }
+.qn-ritem { padding: 10px 0; border-bottom: 1px solid var(--line); }
+.qn-rhead { display: flex; align-items: flex-start; gap: 8px; }
+.qn-rq { flex: 1 1 auto; min-width: 0; font-size: 14.5px; font-weight: 700; overflow-wrap: anywhere; }
+.qn-sel { margin: 6px 0 0; padding-left: 1.3em; font-size: 14.5px; }
+.qn-ans { margin: 6px 0 0; font-size: 14.5px; }
+.qn-gap { color: var(--orange); }
+.qn-pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.qn-note { font-size: 13px; color: var(--muted); margin: 4px 0 0; }
+.qn-edit { margin-top: 8px; min-height: 36px; }
+.qn-submit { margin: 14px 0 0; }
+.qn-gaps .qn-opt { margin-top: 8px; border-color: #555; }
+.qn-ok { margin: 10px 0 4px; font-size: 18px; font-weight: 700; color: var(--green); }
+.board.stale .qn-body { opacity: 1; }

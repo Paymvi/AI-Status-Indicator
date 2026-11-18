@@ -765,6 +765,7 @@ namespace ClaudeStatus
         // Calendar (calendar.cs): the activity history, Codex's logs (read in the background) and which Claude sessions
         // are verifiably on a prompt right now (rebuilt by every Reload; read from the phone server's thread too).
         readonly CalendarSource calendar;
+        readonly QuestionnaireDesk questionnaires;
         readonly CodexWatch codex;
         readonly System.Windows.Forms.Timer codexTimer;
         volatile HashSet<string> liveClaude = new HashSet<string>();
@@ -919,6 +920,13 @@ namespace ClaudeStatus
             codexTimer = new System.Windows.Forms.Timer { Interval = 15000 };
             codexTimer.Tick += (s, e) => PollCodex();
 
+            // Questionnaires (questionnaire.cs): state in the app folder; answered files in Documents by default, so an
+            // uninstall (which deletes the app folder) never takes them along. Tests keep everything in their own folder.
+            questionnaires = new QuestionnaireDesk(Path.Combine(root, "state\\questionnaires"),
+                testMode ? Path.Combine(root, "answered") : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "Claude Status\\Questionnaires"));
+            questionnaires.SetOutputDir(CfgStr("questionnaireOutputDir", ""));
+            questionnaires.Changed += () => { var p = phone; if (p != null) p.Bump(); };
+
             Reload();
             // Settings from the removed Compact view open in Status (the regular board).
             if (string.Equals(CfgStr("startupView", ""), "compact", StringComparison.OrdinalIgnoreCase)) SetCfg("startupView", "workerBoard");
@@ -955,6 +963,7 @@ namespace ClaudeStatus
         public QueueEngine Queue { get { return queue; } }
         public QueueView QueueViewControl { get { return queueView; } }
         public CalendarSource Calendar { get { return calendar; } }
+        public QuestionnaireDesk Questionnaires { get { return questionnaires; } }
         public void ShowQueue(bool on) { SetView(!on); }
         public List<SessionInfo> Workers { get { return new List<SessionInfo>(ordered); } }
         public SessionInfo Surfaced { get { return current; } }
@@ -1186,6 +1195,7 @@ namespace ClaudeStatus
                 p.OnUi = PhoneOnUi;
                 p.Aliases = CfgDict("projectAliases");
                 p.Calendar = calendar;
+                p.Questionnaires = questionnaires;
                 if (p.Start()) { phone = p; phoneError = ""; phoneFailedPort = 0; return; }
                 phoneError = p.Error;
             }
@@ -1409,8 +1419,10 @@ namespace ClaudeStatus
             {
                 if (queueView == null)
                 {
-                    queueView = new QueueView(queue, scale, calendar) { Dock = DockStyle.Fill };
+                    queueView = new QueueView(queue, scale, calendar, questionnaires) { Dock = DockStyle.Fill };
                     queueView.Calendar.SetCategory = SetCategory;
+                    queueView.Questionnaires.SetOutputDir = dir => SetCfg("questionnaireOutputDir", dir);
+                    queueView.Questionnaires.GuidePath = Path.Combine(root, "QUESTIONNAIRE_GUIDE.md");
                     Controls.Add(queueView);
                 }
                 Padding = new Padding(S(Edge), S(HeadH), S(Edge), S(Edge));
@@ -1474,6 +1486,8 @@ namespace ClaudeStatus
         // ---------- scheduler (scheduler.cs) ----------
         void ApplyQueueConfig()
         {
+            if (questionnaires != null && questionnaires.OutputDir != (CfgStr("questionnaireOutputDir", "") == "" ? questionnaires.DefaultOutputDir : CfgStr("questionnaireOutputDir", "")))
+                questionnaires.SetOutputDir(CfgStr("questionnaireOutputDir", ""));
             if (queue == null) return;
             object v;
             var list = cfg.TryGetValue("queueClaudeCommand", out v) ? v as System.Collections.ArrayList : null;
@@ -2184,6 +2198,7 @@ namespace ClaudeStatus
             fresh[key] = value;
             cfg = fresh; cfgOk = true;
             try { Json.WriteAtomic(cfgPath, Json.Pretty(new JavaScriptSerializer().Serialize(fresh))); } catch { }
+            if (key == "questionnaireOutputDir") questionnaires.SetOutputDir(value as string);
             Reload();
             RefreshCalendar();
         }

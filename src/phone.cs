@@ -25,6 +25,9 @@
 //   POST /api/queue {"op":"save"|"cancel"|"stop"}  schedule / edit a task, cancel one that hasn't started, or
 //                                         stop a running one: the desktop's own QueueEngine actions, run on its
 //                                         UI thread. Projects and tasks are named by tokens; never a path.
+//   GET  /api/qn                          the active questionnaire (questionnaire.cs): its questions and the saved draft
+//   POST /api/qn {"op":"save"|"submit"}   save the phone's draft answers (revision-checked) / submit them: the laptop writes
+//                                         a NEW answered file in its own folder, and only then answers "delivered"
 // Only display data leaves the process: friendly name, state, when that state began, a short error type,
 // a creature look number, that session's context-window percentage (and whether that reading is older than
 // its latest activity), and opaque tokens. No session IDs, process IDs, folder paths or window data.
@@ -220,7 +223,7 @@ namespace ClaudeStatus
     public sealed class PhoneServer
     {
         public const int DefaultPort = 48521;
-        const int MaxHeader = 8192, MaxBody = 1024, MaxGitBody = 512 * 1024, MaxConnections = 32, WaitMs = 20000, RepeatMs = 1500;
+        const int MaxHeader = 8192, MaxBody = 1024, MaxGitBody = 512 * 1024, MaxQnBody = 4 * 1024 * 1024, MaxConnections = 32, WaitMs = 20000, RepeatMs = 1500;
         // Creature looks: phone.js draws look L as hat (L % Hats) on body colour (L / Hats); see HATS and
         // BODIES there. Bodies 0 .. OrangeBodies-1 are the orange family.
         public const int Hats = 13, Bodies = 8, OrangeBodies = 4, Looks = Hats * Bodies;
@@ -281,6 +284,7 @@ namespace ClaudeStatus
         public Func<Func<object>, object> OnUi;
         public IDictionary<string, object> Aliases;           // "projectAliases", for friendly project names
         public CalendarSource Calendar;                       // the Calendar view's week (calendar.cs); null = not available
+        public QuestionnaireDesk Questionnaires;              // the Questions view (questionnaire.cs); null = not available
         public string ClaudeProjectsDir = Sessions.ProjectsDir();
         readonly object opsGate = new object();
         readonly Dictionary<string, Dictionary<string, object>> queueOps = new Dictionary<string, Dictionary<string, object>>();   // request -> its answer (null = in progress)
@@ -385,6 +389,12 @@ namespace ClaudeStatus
                 published = true; version++;
                 Monitor.PulseAll(gate);
             }
+        }
+
+        // Something the board doesn't hold changed (the questionnaire): wake the long-polls so the page refetches it.
+        public void Bump()
+        {
+            lock (gate) { if (!published) return; version++; Monitor.PulseAll(gate); }
         }
 
         // Called by the indicator when the Claude Usage figures change (see Usage.ToPhone).
@@ -559,16 +569,18 @@ namespace ClaudeStatus
                 if (req.Path == "/api/git") { GitGet(ns, req); return; }
                 if (req.Path == "/api/queue") { QueueGet(ns, req); return; }
                 if (req.Path == "/api/calendar") { CalendarGet(ns, req); return; }
+                if (req.Path == "/api/qn") { QnGet(ns, req); return; }
                 Text(ns, 404, "Not found");
                 return;
             }
             if (req.Method == "POST" && req.Path == "/api/git") { GitPost(ns, req); return; }
             if (req.Method == "POST" && req.Path == "/api/queue") { QueuePost(ns, req); return; }
+            if (req.Method == "POST" && req.Path == "/api/qn") { QnPost(ns, req); return; }
             if (req.Method == "POST" && req.Path == "/api/dismiss") { DismissRequest(ns, req); return; }
             if (req.Method == "POST" && req.Path == "/api/focus") { FocusRequest(ns, req); return; }
             if (req.Method == "POST" && req.Path == "/api/usage-refresh") { UsageRefreshRequest(ns, req); return; }
             if (req.Method == "POST" && req.Path == "/api/push") { PushRequest(ns, req); return; }
-            if (req.Path == "/api/dismiss" || req.Path == "/api/focus" || req.Path == "/api/usage-refresh" || req.Path == "/api/push" || req.Path == "/api/git" || req.Path == "/api/queue" || req.Path == "/api/calendar" || Pages.ContainsKey(req.Path) || req.Path == "/api/board") { Text(ns, 405, "Method not allowed"); return; }
+            if (req.Path == "/api/dismiss" || req.Path == "/api/focus" || req.Path == "/api/usage-refresh" || req.Path == "/api/push" || req.Path == "/api/git" || req.Path == "/api/queue" || req.Path == "/api/calendar" || req.Path == "/api/qn" || Pages.ContainsKey(req.Path) || req.Path == "/api/board") { Text(ns, 405, "Method not allowed"); return; }
             Text(ns, 404, "Not found");
         }
 
@@ -608,7 +620,7 @@ namespace ClaudeStatus
             string cl;
             int len = 0;
             if (req.Headers.TryGetValue("Content-Length", out cl) && (!int.TryParse(cl, out len) || len < 0)) return null;
-            if (len > (req.Path == "/api/git" || req.Path == "/api/queue" ? MaxGitBody : MaxBody)) { status = 413; return null; }   // a commit / a task carries its message / prompt
+            if (len > (req.Path == "/api/qn" ? MaxQnBody : req.Path == "/api/git" || req.Path == "/api/queue" ? MaxGitBody : MaxBody)) { status = 413; return null; }   // a commit / a task carries its message / prompt
             var body = new byte[len];
             int have = Math.Min(len, n - end - 4);
             Array.Copy(buf, end + 4, body, 0, have);
@@ -653,7 +665,7 @@ namespace ClaudeStatus
             var list = new List<object>();
             foreach (var r in rows)
                 list.Add(new Dictionary<string, object> { { "k", r.Key }, { "n", r.Name }, { "s", r.State }, { "t", r.Since }, { "e", r.Err }, { "d", r.Occ }, { "c", r.Look }, { "x", r.Ctx } });
-            var o = new Dictionary<string, object> { { "v", version }, { "now", Ms(DateTime.UtcNow) }, { "summary", summaryOn }, { "text", summaryOn ? summaryText : "" }, { "rows", list }, { "usage", usageData }, { "queue", queueData } };
+            var o = new Dictionary<string, object> { { "v", version }, { "now", Ms(DateTime.UtcNow) }, { "summary", summaryOn }, { "text", summaryOn ? summaryText : "" }, { "rows", list }, { "usage", usageData }, { "queue", queueData }, { "qn", Questionnaires == null ? null : Questionnaires.Marker } };
             return new JavaScriptSerializer { MaxJsonLength = int.MaxValue }.Serialize(o);
         }
 
@@ -915,6 +927,40 @@ namespace ClaudeStatus
             }
             if (res == null) { Json(ns, 400, "{\"result\":\"bad_request\"}"); return; }
             Json(ns, 200, new JavaScriptSerializer { MaxJsonLength = int.MaxValue }.Serialize(res));
+        }
+
+        // ---------- questionnaires (questionnaire.cs) ----------
+        // Reading needs the page's own header too (it shows the questions and your answers). Saving and submitting have the
+        // action protections; the phone sends only the questionnaire's id, a revision and answers. The laptop alone picks
+        // where the answered file goes (never a path from the phone or from the imported document).
+        void QnGet(NetworkStream ns, Request req)
+        {
+            string marker, site;
+            if (!req.Headers.TryGetValue("X-Claude-Status", out marker) || marker != "qn" || (req.Headers.TryGetValue("Sec-Fetch-Site", out site) && site != "same-origin")) { Json(ns, 403, "{\"error\":\"forbidden\"}"); return; }
+            var desk = Questionnaires;
+            if (desk == null) { Json(ns, 503, "{\"result\":\"unavailable\"}"); return; }
+            Json(ns, 200, new JavaScriptSerializer { MaxJsonLength = int.MaxValue }.Serialize(desk.PhoneData()));
+        }
+
+        void QnPost(NetworkStream ns, Request req)
+        {
+            if (!ActionAllowed(ns, req, "qn")) return;
+            var desk = Questionnaires;
+            if (desk == null) { Json(ns, 503, "{\"result\":\"unavailable\",\"msg\":\"Questionnaires aren't available on the laptop.\"}"); return; }
+            Dictionary<string, object> d = null;
+            try { d = new JavaScriptSerializer { MaxJsonLength = MaxQnBody, RecursionLimit = 6 }.Deserialize<Dictionary<string, object>>(Encoding.UTF8.GetString(req.Body)); } catch { }
+            string op = Str(d, "op"), qid = Str(d, "qid"), sid = Str(d, "sid");
+            object o;
+            int baseRev = d != null && d.TryGetValue("base", out o) && o is int ? (int)o : -1;
+            bool flag = d != null && d.TryGetValue("force", out o) && o is bool && (bool)o;   // save: keep this phone's version; submit: accept the gaps
+            object answers = d != null && d.TryGetValue("answers", out o) ? o : null;
+            if (qid == null || !TokenRx.IsMatch(qid) || baseRev < 0 || !(answers is Dictionary<string, object>) || (op != "save" && op != "submit") || (op == "submit" && (sid == null || !TokenRx.IsMatch(sid))))
+            { Json(ns, 400, "{\"result\":\"bad_request\",\"msg\":\"The laptop didn't understand that request.\"}"); return; }
+            Dictionary<string, object> r;
+            try { r = op == "save" ? desk.Save(qid, baseRev, answers, flag) : desk.Submit(qid, sid, baseRev, answers, flag); }
+            catch (Exception e) { r = Fail("error", "The laptop couldn't do that: " + e.Message); }
+            string res = Str(r, "result");
+            Json(ns, res == "saved" || res == "delivered" ? 200 : res == "bad_request" ? 400 : res == "error" ? 500 : 409, new JavaScriptSerializer { MaxJsonLength = int.MaxValue }.Serialize(r));
         }
 
         // ---------- scheduling from the phone (the desktop's QueueEngine; scheduler.cs) ----------

@@ -81,7 +81,7 @@ if (-not (Get-Command claude -ErrorAction SilentlyContinue)) {
 $src = Join-Path $PSScriptRoot 'src'
 $appFiles = @('hook.ps1', 'indicator.cs', 'indicator.ps1', 'start-indicator.vbs', 'stop-indicator.ps1', 'autostart.ps1', 'uninstall.ps1',
               'phone.cs', 'phone.html', 'phone.css', 'phone.js', 'phone-setup.ps1', 'usage.cs', 'statusline.ps1',
-              'push.cs', 'sw.js', 'workers.png', 'favicon.ico', 'clawde.ico', 'worker-192.png', 'apple-touch-icon.png', 'scheduler.cs', 'queue.cs', 'vscode.cs', 'git.cs', 'calendar.cs',
+              'push.cs', 'sw.js', 'workers.png', 'favicon.ico', 'clawde.ico', 'worker-192.png', 'apple-touch-icon.png', 'scheduler.cs', 'queue.cs', 'vscode.cs', 'git.cs', 'calendar.cs', 'questionnaire.cs',
               'vscode-bridge\package.json', 'vscode-bridge\extension.js', 'vscode-bridge\install-bridge.ps1')
 foreach ($f in $appFiles + 'config.json') {
     if (-not (Test-Path -LiteralPath (Join-Path $src $f))) { Fail "Missing source file src\$f. Run install.ps1 from the root of the Claude Status repository." }
@@ -202,6 +202,9 @@ $null = New-Item -ItemType Directory -Force -Path (Join-Path $installDir 'state\
 foreach ($f in $appFiles) {
     Copy-Item -LiteralPath (Join-Path $src $f) -Destination (Join-Path $installDir $f) -Force
 }
+# The questionnaire format guide, for the Questionnaires tab's "Open the format guide" (the repo's copy is the one to share).
+$qnGuide = Join-Path $PSScriptRoot 'questionnaires\QUESTIONNAIRE_GUIDE.md'
+if (Test-Path -LiteralPath $qnGuide) { Copy-Item -LiteralPath $qnGuide -Destination (Join-Path $installDir 'QUESTIONNAIRE_GUIDE.md') -Force }
 
 # config.json: keep the user's existing choices, only add settings introduced by newer versions.
 $cfgDest = Join-Path $installDir 'config.json'

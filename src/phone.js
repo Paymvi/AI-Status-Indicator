@@ -306,7 +306,111 @@
   // Calendar dates are the laptop's ("2026-11-14"), so they're moved by whole days without any time zone involved.
   function addDays(ymd, n) { var d = new Date(ymd + 'T12:00:00Z'); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); }
 
-  if (typeof module === 'object' && module.exports) module.exports = { addDays: addDays, clock: clock, span: span, ago: ago, statusText: statusText, HATS: HATS, BODIES: BODIES, creatureLayers: creatureLayers, countdown: countdown, percentText: percentText, remainingText: remainingText, isAsleep: isAsleep, SLEEP_MS: SLEEP_MS, contextInfo: contextInfo, schedGroups: schedGroups, localInput: localInput, parseLocalInput: parseLocalInput, quickTime: quickTime, schedProblem: schedProblem, gitCommands: gitCommands, gitProblem: gitProblem, showArg: showArg };
+  // ---------- Questionnaires: answer status (the same rules as QnAnswer.StatusOf / RecOf in questionnaire.cs) ----------
+  // An answer: { m: '' | 'delegate' | 'skip', s: [option ids], o: Other ticked, ot: Other text, t: text, c: comment, r: used recommendation }.
+  function qnChoice(q) { return q.t === 'single' || q.t === 'multiple'; }
+  function qnStatus(q, a) {
+    if (!a) return 'unanswered';
+    if (a.m === 'delegate') return 'delegated';
+    if (a.m === 'skip') return 'skipped';
+    if (qnChoice(q)) return (a.s && a.s.length) || (a.o && (a.ot || '').trim()) ? 'answered' : 'unanswered';
+    return (a.t || '').trim() ? 'answered' : 'unanswered';
+  }
+  function qnRec(q, a) {
+    if (!a || !a.r || !q.rc || !q.rc.length) return 'no';
+    var s = (a.s || []).slice().sort().join('\n');
+    return !a.o && s === q.rc.slice().sort().join('\n') ? 'used' : 'edited';
+  }
+  function qnBlank() { return { m: '', s: [], o: false, ot: '', t: '', c: '', r: false }; }
+  // Required questions without an answer (skipped or unanswered); "Let the AI decide" counts as an answer.
+  function qnGaps(qs, answers) { return qs.filter(function (q) { var st = qnStatus(q, answers[q.id]); return q.r && (st === 'skipped' || st === 'unanswered'); }); }
+
+  // ---------- Markdown, read-only and safe: parsed into plain blocks / inline pieces, later built with textContent ----------
+  // Paragraphs, headings, lists, quotes, rules, fenced code, tables (shown as monospace), `code`, **bold**, *italic*, links
+  // (http/https/mailto only), images (a placeholder; never fetched). Raw HTML is just text.
+  function mdBlocks(text) {
+    var lines = String(text || '').replace(/\r\n?/g, '\n').split('\n'), out = [], para = [], i = 0, m;
+    function flush() { if (para.length) { out.push({ k: 'p', v: para.join(' ') }); para = []; } }
+    while (i < lines.length) {
+      var l = lines[i];
+      if ((m = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(l)) && !(m[1][0] === '`' && m[2].indexOf('`') >= 0)) {
+        flush();
+        var fc = m[1][0], fl = m[1].length, body = [];
+        for (i++; i < lines.length; i++) {
+          var t = lines[i].replace(/^ {0,3}/, '');
+          if (t.length >= fl && t.replace(/\s+$/, '').split(fc).join('') === '' && t.trim().length >= fl) break;
+          body.push(lines[i]);
+        }
+        out.push({ k: 'code', lang: m[2].trim(), v: body.join('\n') });
+        i++; continue;
+      }
+      if (!l.trim()) { flush(); i++; continue; }
+      if ((m = /^ {0,3}(#{1,6})\s+(.*?)\s*#*\s*$/.exec(l))) { flush(); out.push({ k: 'h', n: m[1].length, v: m[2] }); i++; continue; }
+      if (/^ {0,3}([-*_])( *\1){2,} *$/.test(l)) { flush(); out.push({ k: 'hr' }); i++; continue; }
+      if (/^ {0,3}>/.test(l)) {
+        flush();
+        var q = [];
+        while (i < lines.length && /^ {0,3}>/.test(lines[i])) { q.push(lines[i].replace(/^ {0,3}> ?/, '')); i++; }
+        out.push({ k: 'quote', c: mdBlocks(q.join('\n')) });
+        continue;
+      }
+      if (/^ {0,3}\|/.test(l)) {
+        flush();
+        var rows = [];
+        while (i < lines.length && /^ {0,3}\|/.test(lines[i])) { rows.push(lines[i]); i++; }
+        out.push({ k: 'code', lang: 'table', v: rows.join('\n') });
+        continue;
+      }
+      if ((m = /^( *)([-*+]|\d{1,9}[.)])\s+(.*)$/.exec(l))) {
+        flush();
+        var ordered = /\d/.test(m[2]), items = [];
+        while (i < lines.length) {
+          var lm = /^( *)([-*+]|\d{1,9}[.)])\s+(.*)$/.exec(lines[i]);
+          if (lm && /\d/.test(lm[2]) === ordered) { items.push({ d: Math.min(3, Math.floor(lm[1].length / 2)), v: lm[3] }); i++; }
+          else if (lm) break;
+          else if (items.length && /^\s{2,}\S/.test(lines[i])) { items[items.length - 1].v += ' ' + lines[i].trim(); i++; }
+          else break;
+        }
+        out.push({ k: ordered ? 'ol' : 'ul', items: items });
+        continue;
+      }
+      para.push(l.trim());
+      i++;
+    }
+    flush();
+    return out;
+  }
+
+  function mdSafeHref(u) { return /^(https?:|mailto:)/i.test(u) ? u : ''; }
+  function mdInline(s) {
+    var out = [], buf = '', i = 0, m;
+    function text() { if (buf) { out.push({ k: 't', v: buf }); buf = ''; } }
+    while (i < s.length) {
+      var c = s[i], rest = s.slice(i);
+      if (c === '\\' && i + 1 < s.length && /[\\`*_[\]()#+\-.!<>~|]/.test(s[i + 1])) { buf += s[i + 1]; i += 2; continue; }
+      if (c === '`') {
+        var run = /^`+/.exec(rest)[0], end = s.indexOf(run, i + run.length);
+        while (end >= 0 && s[end + run.length] === '`') end = s.indexOf(run, end + run.length + 1);
+        if (end > 0) { text(); out.push({ k: 'code', v: s.slice(i + run.length, end).replace(/^ (.*) $/, '$1') }); i = end + run.length; continue; }
+        buf += run; i += run.length; continue;
+      }
+      if ((m = /^!\[([^\]]*)\]\(\s*<?([^)\s>]*)>?(?:\s+"[^"]*")?\s*\)/.exec(rest))) { text(); out.push({ k: 'img', alt: m[1], src: m[2] }); i += m[0].length; continue; }
+      if ((m = /^\[([^\]]+)\]\(\s*<?([^)\s>]*)>?(?:\s+"[^"]*")?\s*\)/.exec(rest))) {
+        text();
+        var h = mdSafeHref(m[2]);
+        if (h) out.push({ k: 'a', href: h, c: mdInline(m[1]) }); else out.push({ k: 't', v: m[1] + (m[2] ? ' (' + m[2] + ')' : '') });
+        i += m[0].length; continue;
+      }
+      if ((m = /^<((?:https?:|mailto:)[^\s<>]+)>/i.exec(rest))) { text(); out.push({ k: 'a', href: m[1], c: [{ k: 't', v: m[1] }] }); i += m[0].length; continue; }
+      if ((m = /^(\*\*|__)(?=\S)([\s\S]*?\S)\1/.exec(rest))) { text(); out.push({ k: 'b', c: mdInline(m[2]) }); i += m[0].length; continue; }
+      if ((m = /^\*(?=[^\s*])([\s\S]*?[^\s*])\*/.exec(rest))) { text(); out.push({ k: 'i', c: mdInline(m[1]) }); i += m[0].length; continue; }
+      buf += c; i++;
+    }
+    text();
+    return out;
+  }
+
+  if (typeof module === 'object' && module.exports) module.exports = { qnStatus: qnStatus, qnRec: qnRec, qnGaps: qnGaps, mdBlocks: mdBlocks, mdInline: mdInline, addDays: addDays, clock: clock, span: span, ago: ago, statusText: statusText, HATS: HATS, BODIES: BODIES, creatureLayers: creatureLayers, countdown: countdown, percentText: percentText, remainingText: remainingText, isAsleep: isAsleep, SLEEP_MS: SLEEP_MS, contextInfo: contextInfo, schedGroups: schedGroups, localInput: localInput, parseLocalInput: parseLocalInput, quickTime: quickTime, schedProblem: schedProblem, gitCommands: gitCommands, gitProblem: gitProblem, showArg: showArg };
   if (typeof document === 'undefined') return;
 
   // ---------- connection ----------
@@ -315,7 +419,7 @@
   var $ = function (id) { return document.getElementById(id); };
   var boardEl = $('board'), connEl = $('conn'), summaryEl = $('summary'), rowsEl = $('rows'), noteEl = $('note');
   var bannerEl = $('banner'), bannerTitle = $('banner-title'), bannerWhen = $('banner-when'), bannerWhy = $('banner-why');
-  var creaturesEl = $('creatures'), petsEl = $('pets'), hintEl = $('pet-hint'), viewBtns = [$('view-list'), $('view-creatures'), $('view-sched'), $('view-git'), $('view-cal')];
+  var creaturesEl = $('creatures'), petsEl = $('pets'), hintEl = $('pet-hint'), viewBtns = [$('view-list'), $('view-creatures'), $('view-sched'), $('view-git'), $('view-cal'), $('view-qn')];
   var schedEl = $('sched'), schedInfo = $('sched-info'), schedList = $('sched-list'), schedDetail = $('sched-detail'), schedBody = $('sched-body');
   var schedRefresh = $('sched-refresh'), schedBack = $('sched-back');
 
@@ -336,7 +440,7 @@
   // List (default) or Creatures; remembered in this browser only.
   var VIEW_KEY = 'claudeStatus.view';
   var view = 'list';
-  try { var v0 = localStorage.getItem(VIEW_KEY); if (v0 === 'creatures' || v0 === 'sched' || v0 === 'git' || v0 === 'cal') view = v0; } catch (e) { }
+  try { var v0 = localStorage.getItem(VIEW_KEY); if (v0 === 'creatures' || v0 === 'sched' || v0 === 'git' || v0 === 'cal' || v0 === 'qn') view = v0; } catch (e) { }
 
   // Creatures view options, each remembered in this browser only and off unless turned on: Compact (three
   // columns instead of two; unrelated to the desktop's Compact view) and Show context (a context-window
@@ -392,6 +496,7 @@
     conn = 'live';
     render(changed || was !== 'live');
     gitOnBoard();
+    qnOnBoard(b.qn || '');
     if (view === 'cal' && changed && Date.now() - calAt > 3000) loadCal();   // a worker changed: its block did too
   }
 
@@ -474,7 +579,12 @@
     }
 
     if (full) renderOffers();
-    if (full && view === 'cal') {
+    if (full && view === 'qn') {
+      rowsEl.textContent = '';
+      rowEls = [];
+      clearPets();
+      qnRender(false);   // never rebuilt by a board update while you're on a question: your typing stays
+    } else if (full && view === 'cal') {
       rowsEl.textContent = '';
       rowEls = [];
       clearPets();
@@ -1186,7 +1296,7 @@
       var done = r.workers.filter(function (w) { return w.s === 'DONE'; });
       if (r.n > 0 && !r.busy && done.length && gitSeen[r.path] !== r.sig && !(job && job.r === r.r)) items.push({ r: r, w: done[0] });
     });
-    offersEl.hidden = !items.length || view === 'git' || view === 'sched';
+    offersEl.hidden = !items.length || view === 'git' || view === 'sched' || view === 'qn';
     items.forEach(function (it) {
       var li = el('li', 'git-offer'), b = el('button', 'git-offer-open');
       b.type = 'button';
@@ -1519,7 +1629,7 @@
 
   // ---------- view switch ----------
   function setView(v, remember) {
-    view = v === 'creatures' || v === 'sched' || v === 'git' || v === 'cal' ? v : 'list';
+    view = v === 'creatures' || v === 'sched' || v === 'git' || v === 'cal' || v === 'qn' ? v : 'list';
     calEl.hidden = view !== 'cal';
     if (view !== 'cal') calSheet.hidden = true;
     if (view === 'cal' && Date.now() - calAt > 3000) loadCal();
@@ -1527,6 +1637,8 @@
     rowsEl.hidden = view !== 'list';
     schedEl.hidden = view !== 'sched';
     gitEl.hidden = view !== 'git';
+    qnEl.hidden = view !== 'qn';
+    if (view === 'qn') { qnRender(true); if (conn === 'live') qnLoad(); }
     gitShown = false;
     if (view === 'git' && !gitOpen && Date.now() - reposAt > 3000) loadRepos(false);
     creaturesEl.hidden = view !== 'creatures';
@@ -2179,6 +2291,527 @@
     clearTimeout(noteTimer);
     noteTimer = setTimeout(function () { noteEl.hidden = true; }, 4000);
   }
+
+  // ---------- Questions: answer the laptop's questionnaire (questionnaire.cs via api/qn) ----------
+  // Everything you answer is kept in this browser first (localStorage), then saved on the laptop with the revision it's
+  // based on, so a dropped connection, a reload or a closed tab loses nothing and an older copy never overwrites a newer
+  // one. Submitting carries a one-time id: a retry or a double tap gets the laptop's first answer, never a second file.
+  // "Delivered to laptop" appears only when the laptop says it has written the answered file to disk.
+  var QN_KEY = 'claudeStatus.qn', QN_SPARE_KEY = 'claudeStatus.qn.discarded';
+  var qnEl = $('qn'), qnBody = $('qn-body'), qnSyncEl = $('qn-sync'), qnBanner = $('qn-banner');
+  var qn = null;            // { q, answers, base, rev, dirty, pos, screen, sub, conflict, replaced, subs, gapsOk }
+  var qnMarker = null, qnLoading = false, qnSaving = false, qnErr = '', qnSaveTimer = null, qnLoadedOnce = false;
+  try { qn = JSON.parse(localStorage.getItem(QN_KEY) || 'null'); } catch (e) { qn = null; }
+  if (qn && (!qn.q || !Array.isArray(qn.q.qs))) qn = null;
+  if (qn && qn.sub && qn.sub.state === 'sending') qn.sub.state = 'pending';   // the page closed mid-send: ask the laptop again
+
+  function qnKeep() {
+    try { if (qn) localStorage.setItem(QN_KEY, JSON.stringify(qn)); else localStorage.removeItem(QN_KEY); return true; }
+    catch (e) { qnErr = "This phone couldn't keep a copy of your answers (browser storage is full or blocked)."; return false; }
+  }
+  function qnFresh(d) { return { q: d.q, answers: d.answers || {}, base: d.rev, rev: d.rev, dirty: false, pos: 0, screen: 'start', sub: null, conflict: null, replaced: false, subs: d.subs || [], gapsOk: false }; }
+  function qnAns(id) { var a = qn.answers[id]; if (!a) { a = qn.answers[id] = qnBlank(); } return a; }
+  function qnSig(a) { return JSON.stringify(a || {}); }
+  function qnHeaders(post) { var h = { Accept: 'application/json', 'X-Claude-Status': 'qn' }; if (post) h['Content-Type'] = 'application/json'; return h; }
+
+  // The board's long-poll carries a marker (id.revision.submissions): refetch when it changes or the connection returns.
+  function qnOnBoard(m) {
+    var changed = m !== qnMarker;
+    qnMarker = m;
+    if (changed || !qnLoadedOnce) qnLoad();
+    else { qnFlush(); }
+  }
+
+  function qnLoad() {
+    if (qnLoading) return;
+    qnLoading = true;
+    var c = new AbortController(), timer = setTimeout(function () { c.abort(); }, 15000);
+    fetch('api/qn', { cache: 'no-store', credentials: 'same-origin', signal: c.signal, headers: qnHeaders(false) })
+      .then(function (r) { if (!r.ok) throw { status: r.status }; return r.json(); })
+      .then(function (d) { qnLoadedOnce = true; qnAdopt(d); })
+      .catch(function () { })
+      .then(function () { clearTimeout(timer); qnLoading = false; qnRender(false); qnFlush(); });
+  }
+
+  function qnAdopt(d) {
+    if (!d || !d.q) {
+      if (qn && !qn.replaced && (qn.dirty || (qn.sub && qn.sub.state !== 'delivered'))) { qn.replaced = true; qnKeep(); qnRender(true); }
+      else if (qn && !qn.replaced) { qn = null; qnKeep(); qnRender(true); }
+      return;
+    }
+    if (!qn || qn.q.id !== d.q.id) {
+      // a different questionnaire on the laptop: unsent answers to the old one stay here until you let them go
+      if (qn && !qn.replaced && (qn.dirty || (qn.sub && qn.sub.state !== 'delivered'))) { qn.replaced = true; qn.next = d; qnKeep(); qnRender(true); return; }
+      if (qn && qn.replaced) { qn.next = d; qnKeep(); qnRender(true); return; }
+      qn = qnFresh(d); qnKeep(); qnRender(true); return;
+    }
+    qn.q = d.q; qn.rev = d.rev; qn.subs = d.subs || [];
+    if (qnSaving || (qn.sub && qn.sub.state === 'sending')) { qnKeep(); return; }   // its own answer settles it (and names a real conflict)
+    if (qn.sub && qn.sub.state !== 'delivered') {
+      var got = qn.subs.filter(function (s) { return s.sid === qn.sub.sid; })[0];
+      if (got) { qn.sub.state = 'delivered'; qn.sub.file = got.file; qn.sub.at = got.at; qn.base = got.rev; if (qnSig(qn.answers) === qn.sub.sig) qn.dirty = false; qn.screen = 'done'; }
+    }
+    var adopted = false;
+    // adopting rebuilds the screen, so the fields edit the adopted answers (never a stale copy)
+    if (!qn.dirty) { if (d.rev !== qn.base || qnSig(d.answers) !== qnSig(qn.answers)) { qn.answers = d.answers || {}; qn.base = d.rev; adopted = true; } }
+    else if (d.rev !== qn.base && qnSig(d.answers) !== qnSig(qn.answers)) qn.conflict = { rev: d.rev, answers: d.answers || {} };
+    else if (qnSig(d.answers) === qnSig(qn.answers)) { qn.base = d.rev; qn.dirty = false; }
+    qnKeep();
+    qnRender(adopted || !!qn.conflict);
+  }
+
+  function qnChanged() {
+    qn.dirty = true;
+    if (qn.sub && qn.sub.state !== 'delivered' && qn.sub.state !== 'sending') qn.sub = null;   // a pending submission was of other answers
+    qnKeep();
+    clearTimeout(qnSaveTimer);
+    qnSaveTimer = setTimeout(qnFlush, 700);
+    qnRender(false);
+  }
+
+  // Sends what's waiting: a submission first (it carries the answers), else the draft.
+  function qnFlush() {
+    if (!qn || qn.replaced || qn.conflict || conn !== 'live') { qnRender(false); return; }
+    if (qn.sub && (qn.sub.state === 'pending' || qn.sub.state === 'sending')) { qnSendSubmit(); return; }
+    if (qn.dirty) qnSave(false);
+  }
+
+  function qnPost(body) {
+    var c = new AbortController(), timer = setTimeout(function () { c.abort(); }, 20000);
+    return fetch('api/qn', { method: 'POST', cache: 'no-store', credentials: 'same-origin', signal: c.signal, headers: qnHeaders(true), body: JSON.stringify(body) })
+      .then(function (r) { return r.json().catch(function () { return { result: 'error', msg: 'The laptop answered with an error (' + r.status + ').' }; }); })
+      .then(function (j) { clearTimeout(timer); return j || {}; }, function (e) { clearTimeout(timer); throw e; });
+  }
+
+  function qnSave(force) {
+    if (qnSaving) return;
+    qnSaving = true; qnErr = '';
+    var sent = qnSig(qn.answers), qid = qn.q.id;
+    qnRender(false);
+    qnPost({ op: 'save', qid: qid, base: qn.base, answers: qn.answers, force: !!force }).then(function (j) {
+      if (!qn || qn.q.id !== qid) return;
+      if (j.result === 'saved') { qn.base = qn.rev = j.rev; if (qnSig(qn.answers) === sent) qn.dirty = false; if (force) qn.conflict = null; }
+      else if (j.result === 'conflict') qn.conflict = { rev: j.rev, answers: j.answers || {} };
+      else if (j.result === 'replaced') { qnLoad(); }
+      else qnErr = j.msg || 'The laptop refused these answers.';
+      qnKeep();
+    }, function () { qnErr = ''; }).then(function () {
+      qnSaving = false;
+      qnRender(!!(qn && qn.conflict));
+      if (qn && qn.dirty && !qn.conflict && !qnErr && conn === 'live') { clearTimeout(qnSaveTimer); qnSaveTimer = setTimeout(qnFlush, 1500); }
+    });
+  }
+
+  function qnSubmit() {
+    if (!qn || qn.sub && qn.sub.state === 'sending') return;
+    var sig = qnSig(qn.answers);
+    if (!qn.sub || qn.sub.state === 'delivered' || qn.sub.sig !== sig) qn.sub = { sid: newId(), sig: sig, state: 'pending', gaps: qn.gapsOk };
+    qn.sub.msg = '';
+    qnKeep();
+    if (conn === 'live') qnSendSubmit(); else qnRender(true);
+  }
+
+  function qnSendSubmit() {
+    if (!qn || !qn.sub || qn.sub.state === 'sending' || qn.sub.state === 'delivered') return;
+    var sub = qn.sub, qid = qn.q.id;
+    sub.state = 'sending'; qnKeep(); qnRender(true);
+    qnPost({ op: 'submit', qid: qid, sid: sub.sid, base: qn.base, answers: qn.answers, force: !!sub.gaps }).then(function (j) {
+      if (!qn || qn.q.id !== qid || qn.sub !== sub) return;
+      if (j.result === 'delivered') {
+        sub.state = 'delivered'; sub.file = j.file; sub.at = j.at;
+        qn.base = qn.rev = j.rev; if (qnSig(qn.answers) === sub.sig) qn.dirty = false;
+        qn.screen = 'done';
+      } else if (j.result === 'conflict') { sub.state = 'failed'; sub.msg = 'Not submitted: ' + (j.msg || 'changed elsewhere.'); qn.conflict = { rev: j.rev, answers: j.answers || {} }; }
+      else if (j.result === 'replaced') { sub.state = 'failed'; sub.msg = j.msg; qnLoad(); }
+      else if (j.result === 'gaps') { sub.state = 'failed'; sub.msg = 'Not submitted: some required questions are skipped or unanswered. Tick "Submit anyway" to send it like this.'; }
+      else { sub.state = 'failed'; sub.msg = 'Not submitted: ' + (j.msg || 'the laptop refused it.') + ' Your answers are kept on this phone.'; }
+    }, function () {
+      if (qn && qn.sub === sub) { sub.state = 'pending'; sub.msg = 'No answer from the laptop. Delivery is pending: it will be retried when the laptop is reachable.'; }
+    }).then(function () { qnKeep(); qnRender(true); });
+  }
+
+  function qnSyncText() {
+    if (!qn) return '';
+    if (qn.replaced) return 'Replaced on the laptop';
+    if (qn.conflict) return 'Changed on another device · choose below';
+    if (qn.sub && qn.sub.state === 'sending') return 'Submitting…';
+    if (qn.sub && qn.sub.state === 'pending') return 'Delivery pending · saved on this phone';
+    if (qnErr) return 'Not saved on the laptop · saved on this phone';
+    if (!qn.dirty) return conn === 'live' ? 'Saved on the laptop' : 'Saved on the laptop · offline now';
+    if (conn !== 'live') return 'Saved on this phone · syncs when the laptop is reachable';
+    return 'Saving…';
+  }
+
+  // ---------- rendering ----------
+  function md(text, cls) {
+    var box = el('div', 'qn-md' + (cls ? ' ' + cls : ''));
+    mdBlocks(text).forEach(function (b) { box.appendChild(mdBlock(b)); });
+    return box;
+  }
+  function mdBlock(b) {
+    var e;
+    if (b.k === 'p') { e = el('p'); mdInto(e, b.v); return e; }
+    if (b.k === 'h') { e = el(b.n <= 2 ? 'h3' : 'h4', 'qn-mh'); mdInto(e, b.v); return e; }
+    if (b.k === 'hr') return el('hr');
+    if (b.k === 'quote') { e = el('blockquote'); b.c.forEach(function (x) { e.appendChild(mdBlock(x)); }); return e; }
+    if (b.k === 'code') { e = el('pre', 'qn-code'); e.tabIndex = 0; e.appendChild(el('code', null, b.v)); return e; }
+    e = el(b.k);
+    b.items.forEach(function (it) { var li = el('li'); if (it.d) li.style.marginLeft = (it.d * 1.2) + 'em'; mdInto(li, it.v); e.appendChild(li); });
+    return e;
+  }
+  function mdInto(parent, s) { mdInline(s).forEach(function (p) { mdPiece(parent, p); }); }
+  function mdPiece(parent, p) {
+    if (p.k === 't') { parent.appendChild(document.createTextNode(p.v)); return; }
+    if (p.k === 'code') { parent.appendChild(el('code', null, p.v)); return; }
+    if (p.k === 'img') { parent.appendChild(el('span', 'qn-img', 'Image not shown here' + (p.alt ? ': ' + p.alt : '') + (p.src ? ' (' + p.src + ')' : ''))); return; }
+    var e = el(p.k === 'a' ? 'a' : p.k === 'b' ? 'strong' : 'em');
+    if (p.k === 'a') { e.href = p.href; e.target = '_blank'; e.rel = 'noopener noreferrer'; }
+    p.c.forEach(function (x) { mdPiece(e, x); });
+    parent.appendChild(e);
+  }
+
+  var QN_LABEL = { answered: 'Answered', delegated: 'AI decides', skipped: 'Skipped', unanswered: 'Unanswered' };
+  function qnBadge(st) { return el('span', 'qn-st qn-' + st, QN_LABEL[st]); }
+  function qnBtn(text, cls, fn) { var b = el('button', cls || 'usage-btn', text); b.type = 'button'; b.addEventListener('click', fn); return b; }
+  function qnGo(screen, pos) { qn.screen = screen; if (pos != null) qn.pos = pos; qnKeep(); qnRender(true); window.scrollTo(0, qnEl.offsetTop - 8); }
+
+  // full = rebuild the screen; otherwise only the sync line, banner and status chips (never while you type in a field).
+  function qnRender(full) {
+    if (!qnEl) return;
+    qnSyncEl.textContent = qn ? qnSyncText() : '';
+    if (view !== 'qn') return;
+    qnRenderBanner();
+    if (!full && qnBody.childNodes.length && qn && !qn.replaced && (qn.screen === 'q' || qn.screen === 'review')) { qnRefreshChips(); qnRefreshSubmit(); return; }
+    qnBody.textContent = '';
+    if (!qn) {
+      qnBody.appendChild(el('p', 'sched-empty', !qnLoadedOnce && conn !== 'live' ? (conn === 'offline' ? "Can't reach Claude Status on the laptop." : 'Connecting to the laptop…')
+        : 'No questionnaire on the laptop. Import one there: Queue window → Questionnaires → Import questionnaire…'));
+      return;
+    }
+    if (qn.replaced) { qnRenderReplaced(); return; }
+    if (qn.screen === 'q') qnRenderQuestion();
+    else if (qn.screen === 'review') qnRenderReview();
+    else if (qn.screen === 'done') qnRenderDone();
+    else qnRenderStart();
+  }
+
+  function qnRenderBanner() {
+    qnBanner.textContent = '';
+    var msg = qn && !qn.replaced && qn.conflict ? 'These answers were also changed on another device (or another tab) since this phone last saved. Both versions are kept until you choose.'
+      : qnErr ? qnErr : '';
+    qnBanner.hidden = !msg;
+    if (!msg) return;
+    qnBanner.appendChild(el('p', 'qn-bmsg', msg));
+    if (qn && qn.conflict) {
+      var row = el('div', 'qn-row');
+      row.appendChild(qnBtn("Keep this phone's answers", 'usage-btn', function () { qnSave(true); }));
+      row.appendChild(qnBtn('Use the other version', 'usage-btn', function () {
+        try { localStorage.setItem(QN_SPARE_KEY, JSON.stringify({ q: qn.q.id, answers: qn.answers, at: Date.now() })); } catch (e) { }
+        qn.answers = qn.conflict.answers; qn.base = qn.rev = qn.conflict.rev; qn.conflict = null; qn.dirty = false; qnKeep(); qnRender(true);
+      }));
+      qnBanner.appendChild(row);
+    } else if (qnErr) qnBanner.appendChild(qnBtn('Try again', 'usage-btn', function () { qnErr = ''; qnFlush(); }));
+  }
+
+  function qnHead(box) {
+    box.appendChild(el('h2', 'qd-title', qn.q.title));
+    if (qn.q.project) box.appendChild(el('p', 'qn-proj', qn.q.project));
+  }
+
+  function qnCounts() {
+    var c = { answered: 0, delegated: 0, skipped: 0, unanswered: 0 };
+    qn.q.qs.forEach(function (q) { c[qnStatus(q, qn.answers[q.id])]++; });
+    return c;
+  }
+
+  function qnResumeAt() {
+    if (qn.pos > 0 && qn.pos < qn.q.qs.length) return qn.pos;
+    for (var i = 0; i < qn.q.qs.length; i++) if (qnStatus(qn.q.qs[i], qn.answers[qn.q.qs[i].id]) === 'unanswered') return i;
+    return 0;
+  }
+
+  function qnRenderStart() {
+    var box = el('div', 'sched-detail qn-start');
+    qnHead(box);
+    var c = qnCounts(), n = qn.q.qs.length;
+    box.appendChild(el('p', 'qd-status', n + (n === 1 ? ' question' : ' questions') + ' · ' + c.answered + ' answered' + (c.delegated ? ', ' + c.delegated + ' AI decides' : '') + (c.skipped ? ', ' + c.skipped + ' skipped' : '')));
+    if (qn.q.intro) box.appendChild(md(qn.q.intro));
+    var started = c.answered + c.delegated + c.skipped > 0;
+    box.appendChild(qnBtn(started ? 'Resume at question ' + (qnResumeAt() + 1) : 'Start', 'sf-send', function () { qnGo('q', qnResumeAt()); }));
+    if (started) box.appendChild(qnBtn('Review and submit', 'usage-btn qn-wide', function () { qnGo('review'); }));
+    box.appendChild(el('h3', 'qd-h', 'QUESTIONS'));
+    var ol = el('ol', 'qn-list');
+    qn.q.qs.forEach(function (q, i) {
+      var li = el('li');
+      var b = qnBtn('', 'qn-item', function () { qnGo('q', i); });
+      b.appendChild(el('span', 'qn-num', (i + 1) + '.'));
+      b.appendChild(el('span', 'qn-itext', q.x + (q.r ? '' : ' (optional)')));
+      b.appendChild(qnBadge(qnStatus(q, qn.answers[q.id])));
+      li.appendChild(b); ol.appendChild(li);
+    });
+    box.appendChild(ol);
+    if (qn.sub && qn.sub.state === 'delivered') box.appendChild(qnBtn('Show the submission', 'usage-btn qn-wide', function () { qnGo('done'); }));
+    qnBody.appendChild(box);
+  }
+
+  var qnChipsEl = null, qnSubmitEl = null;
+  function qnChips() {
+    var d = el('details', 'qn-jump'), s = el('summary', null, 'All questions');
+    d.appendChild(s);
+    var wrap = el('div', 'qn-chips');
+    qn.q.qs.forEach(function (q, i) {
+      var b = qnBtn(String(i + 1), 'qn-chip', function () { qnGo('q', i); });
+      b.dataset.i = i;
+      wrap.appendChild(b);
+    });
+    d.appendChild(wrap);
+    qnChipsEl = wrap;
+    qnRefreshChips();
+    return d;
+  }
+  function qnRefreshChips() {
+    if (!qnChipsEl || !qnChipsEl.isConnected || !qn) return;
+    [].forEach.call(qnChipsEl.children, function (b) {
+      var q = qn.q.qs[+b.dataset.i], st = qnStatus(q, qn.answers[q.id]);
+      b.className = 'qn-chip qn-' + st + (+b.dataset.i === qn.pos && qn.screen === 'q' ? ' qn-here' : '');
+      b.setAttribute('aria-label', 'Question ' + (+b.dataset.i + 1) + ': ' + QN_LABEL[st] + (+b.dataset.i === qn.pos ? ' (this one)' : ''));
+    });
+    var st = $('qn-this-st');
+    if (st && qn.screen === 'q') { var q = qn.q.qs[qn.pos]; var s2 = qnStatus(q, qn.answers[q.id]); st.className = 'qn-st qn-' + s2; st.textContent = QN_LABEL[s2]; }
+  }
+
+  function qnRenderQuestion() {
+    var qs = qn.q.qs, i = Math.max(0, Math.min(qn.pos, qs.length - 1)), q = qs[i], a = qnAns(q.id);
+    qn.pos = i;
+    var box = el('div', 'sched-detail qn-q');
+    var top = el('div', 'qn-top');
+    top.appendChild(qnBtn('‹ Overview', 'usage-btn', function () { qnGo('start'); }));
+    top.appendChild(el('span', 'qn-prog', 'Question ' + (i + 1) + ' of ' + qs.length));
+    box.appendChild(top);
+    var bar = el('div', 'qn-bar'), fill = el('span');
+    fill.style.width = Math.round((i + 1) / qs.length * 100) + '%';
+    bar.appendChild(fill); bar.setAttribute('aria-hidden', 'true');
+    box.appendChild(bar);
+    box.appendChild(qnChips());
+    box.appendChild(el('p', 'qn-of', qn.q.title + (qn.q.project ? ' · ' + qn.q.project : '')));
+    var h = el('h2', 'qd-title qn-qtext', q.x);
+    h.id = 'qn-qtext';
+    box.appendChild(h);
+    var meta = el('p', 'qn-meta');
+    meta.appendChild(el('span', 'qn-req', q.r ? 'Required' : 'Optional'));
+    meta.appendChild(document.createTextNode(' · ' + ({ single: 'Pick one', multiple: 'Pick any', short: 'Short answer', long: 'Long answer' })[q.t] + ' · '));
+    var st = qnBadge(qnStatus(q, a)); st.id = 'qn-this-st'; meta.appendChild(st);
+    box.appendChild(meta);
+    if (q.e) box.appendChild(md(q.e));
+    if (q.c) { var dc = el('details', 'qn-ctx'); dc.appendChild(el('summary', null, 'Context')); dc.appendChild(md(q.c)); box.appendChild(dc); }
+    if (qn.q.intro) { var di = el('details', 'qn-ctx'); di.appendChild(el('summary', null, 'About this questionnaire')); di.appendChild(md(qn.q.intro)); box.appendChild(di); }
+
+    var mode = a.m;
+    if (mode) box.appendChild(el('p', 'qn-mode', mode === 'delegate' ? 'Let the AI decide is chosen for this question. Picking or typing an answer below switches back to your own answer.' : 'Skipped. Picking or typing an answer below un-skips it.'));
+    var form = el('div', 'qn-form' + (mode ? ' qn-dim' : ''));
+    form.setAttribute('role', 'group'); form.setAttribute('aria-labelledby', 'qn-qtext');
+    if (qnChoice(q)) qnChoiceControls(form, q, a);
+    else qnTextControls(form, q, a);
+    box.appendChild(form);
+
+    var modes = el('div', 'qn-row qn-modes');
+    var dl = qnBtn('Let the AI decide', 'tog', function () { a.m = a.m === 'delegate' ? '' : 'delegate'; qnChanged(); qnRender(true); });
+    dl.setAttribute('aria-pressed', String(a.m === 'delegate'));
+    var sk = qnBtn('Skip', 'tog', function () { var was = a.m === 'skip'; a.m = was ? '' : 'skip'; qnChanged(); if (!was && i < qs.length - 1) qnGo('q', i + 1); else qnRender(true); });
+    sk.setAttribute('aria-pressed', String(a.m === 'skip'));
+    modes.appendChild(dl); modes.appendChild(sk);
+    box.appendChild(modes);
+
+    var nav = el('div', 'qn-nav');
+    nav.appendChild(qnBtn('‹ Back', 'usage-btn', function () { if (i > 0) qnGo('q', i - 1); else qnGo('start'); }));
+    nav.appendChild(qnBtn(i < qs.length - 1 ? 'Next ›' : 'Review ›', 'sf-send', function () { if (i < qs.length - 1) qnGo('q', i + 1); else qnGo('review'); }));
+    box.appendChild(nav);
+    qnBody.appendChild(box);
+    qnRefreshChips();   // now that the chips are on the page
+  }
+
+  function qnLeaveMode(a) { if (a.m) { a.m = ''; return true; } return false; }
+
+  function qnChoiceControls(form, q, a) {
+    var single = q.t === 'single', name = 'qn-' + q.id;
+    if (q.rc && q.rc.length) {
+      var rec = el('div', 'qn-recbox');
+      var labels = q.rc.map(function (id) { var o = q.o.filter(function (x) { return x.id === id; })[0]; return o ? o.l : id; });
+      rec.appendChild(el('p', 'qn-rech', 'Recommended: ' + labels.join(', ')));
+      if (q.rw) rec.appendChild(md(q.rw));
+      var use = qnBtn(qnRec(q, a) === 'used' && !a.m ? 'Recommendation applied' : 'Use recommendation', 'usage-btn', function () {
+        a.s = q.rc.slice(); a.o = false; a.r = true; a.m = ''; qnChanged(); qnRender(true);
+      });
+      use.disabled = qnRec(q, a) === 'used' && !a.m;
+      rec.appendChild(use);
+      form.appendChild(rec);
+    }
+    var list = el('div', 'qn-opts');
+    function opt(id, label, checked, onChange, isRec) {
+      var lab = el('label', 'qn-opt'), inp = el('input');
+      inp.type = single ? 'radio' : 'checkbox'; inp.name = name; inp.checked = checked; inp.value = id;
+      inp.addEventListener('change', onChange);
+      lab.appendChild(inp);
+      var t = el('span', 'qn-olabel', label);
+      if (isRec) t.appendChild(el('span', 'qn-rectag', 'Recommended'));
+      lab.appendChild(t);
+      list.appendChild(lab);
+      return inp;
+    }
+    var otherText;
+    q.o.forEach(function (o) {
+      opt(o.id, o.l, !a.o || !single ? a.s.indexOf(o.id) >= 0 : false, function (e) {
+        var on = e.target.checked;
+        if (single) { a.s = on ? [o.id] : []; a.o = false; }
+        else { a.s = a.s.filter(function (x) { return x !== o.id; }); if (on) a.s.push(o.id); a.s.sort(function (x, y) { return q.o.findIndex(function (p) { return p.id === x; }) - q.o.findIndex(function (p) { return p.id === y; }); }); }
+        var left = qnLeaveMode(a);
+        qnChanged(); if (left || single || q.rc.length) qnRender(true);
+      }, q.rc.indexOf(o.id) >= 0);
+    });
+    opt('__other', 'Other', a.o, function (e) {
+      a.o = e.target.checked;
+      if (single && a.o) a.s = [];
+      var left = qnLeaveMode(a);
+      qnChanged(); qnRender(true);
+      if (a.o) setTimeout(function () { var t = $('qn-other'); if (t) t.focus(); }, 0);
+    }, false);
+    form.appendChild(list);
+    if (a.o) {
+      otherText = qnArea('qn-other', 'Your own answer', a.ot, 4000, function (v) { a.ot = v; qnLeaveMode(a); qnChanged(); });
+      form.appendChild(otherText);
+    }
+    var cl = el('label', 'sf-label', 'Comment (optional)'); cl.htmlFor = 'qn-comment';
+    form.appendChild(cl);
+    form.appendChild(qnArea('qn-comment', 'Anything the AI should know about this answer', a.c, 20000, function (v) { a.c = v; qnChanged(); }));
+  }
+
+  function qnTextControls(form, q, a) {
+    var lab = el('label', 'sf-label', 'Your answer'); lab.htmlFor = 'qn-text';
+    form.appendChild(lab);
+    if (q.t === 'short') {
+      var inp = el('input', 'sf-field');
+      inp.type = 'text'; inp.id = 'qn-text'; inp.value = a.t; inp.maxLength = 2000; inp.spellcheck = true; inp.setAttribute('autocomplete', 'off'); inp.enterKeyHint = 'next';
+      inp.addEventListener('input', function () { a.t = inp.value; qnLeaveMode(a); qnChanged(); });
+      inp.addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); inp.blur(); } });
+      form.appendChild(inp);
+    } else form.appendChild(qnArea('qn-text', 'Type or dictate your answer', a.t, 20000, function (v) { a.t = v; qnLeaveMode(a); qnChanged(); }));
+    form.appendChild(el('p', 'sf-note', 'Use the keyboard’s microphone to dictate. Markdown and code are kept exactly as typed.'));
+  }
+
+  // A textarea that grows with its text (the phone keyboard and its built-in dictation work as usual).
+  function qnArea(id, ph, value, max, onInput) {
+    var t = el('textarea', 'sf-prompt qn-area');
+    t.id = id; t.placeholder = ph; t.value = value || ''; t.maxLength = max; t.rows = 3; t.spellcheck = true;
+    function fit() { t.style.height = 'auto'; t.style.height = Math.min(Math.max(t.scrollHeight + 2, 80), 600) + 'px'; }
+    t.addEventListener('input', function () { fit(); onInput(t.value); });
+    setTimeout(fit, 0);
+    return t;
+  }
+
+  function qnAnswerLines(q, a, box) {
+    var st = qnStatus(q, a);
+    if (st === 'delegated') box.appendChild(el('p', 'qn-ans', 'Let the AI decide'));
+    else if (st === 'skipped') box.appendChild(el('p', 'qn-ans qn-gap', 'Skipped: no answer'));
+    else if (st === 'unanswered') box.appendChild(el('p', 'qn-ans qn-gap', 'Unanswered'));
+    else if (qnChoice(q)) {
+      var ul = el('ul', 'qn-sel');
+      a.s.forEach(function (id) { var o = q.o.filter(function (x) { return x.id === id; })[0]; ul.appendChild(el('li', null, o ? o.l : id)); });
+      if (a.o && a.ot.trim()) { var li = el('li', null, 'Other: '); li.appendChild(el('span', 'qn-pre', a.ot)); ul.appendChild(li); }
+      box.appendChild(ul);
+      var r = qnRec(q, a);
+      if (r !== 'no') box.appendChild(el('p', 'qn-note', r === 'used' ? 'Used the recommendation' : 'Started from the recommendation, then changed it'));
+    } else box.appendChild(el('p', 'qn-ans qn-pre', a.t));
+    if (a && a.c && a.c.trim()) { var c = el('p', 'qn-ans'); c.appendChild(el('span', 'qn-note', 'Comment: ')); c.appendChild(el('span', 'qn-pre', a.c)); box.appendChild(c); }
+  }
+
+  function qnRenderReview() {
+    var box = el('div', 'sched-detail qn-review');
+    box.appendChild(qnBtn('‹ Back to questions', 'usage-btn', function () { qnGo('q', qnResumeAt()); }));
+    qnHead(box);
+    box.appendChild(el('p', 'qd-status', 'Review your answers, then submit. The laptop saves them as a new answered file.'));
+    var gaps = qnGaps(qn.q.qs, qn.answers);
+    var ol = el('ol', 'qn-rlist');
+    qn.q.qs.forEach(function (q, i) {
+      var li = el('li', 'qn-ritem'), a = qn.answers[q.id];
+      var hd = el('div', 'qn-rhead');
+      hd.appendChild(el('span', 'qn-rq', (i + 1) + '. ' + q.x + (q.r ? '' : ' (optional)')));
+      hd.appendChild(qnBadge(qnStatus(q, a)));
+      li.appendChild(hd);
+      qnAnswerLines(q, a || qnBlank(), li);
+      li.appendChild(qnBtn('Edit', 'usage-btn qn-edit', function () { qnGo('q', i); }));
+      ol.appendChild(li);
+    });
+    box.appendChild(ol);
+    var foot = el('div', 'qn-submit');
+    qnSubmitEl = foot;
+    box.appendChild(foot);
+    qnBody.appendChild(box);
+    qnRefreshSubmit();
+  }
+
+  function qnRefreshSubmit() {
+    if (!qnSubmitEl || !qnSubmitEl.isConnected || !qn || qn.screen !== 'review') return;
+    var foot = qnSubmitEl, gaps = qnGaps(qn.q.qs, qn.answers), sub = qn.sub, busy = sub && sub.state === 'sending';
+    foot.textContent = '';
+    if (gaps.length) {
+      var w = el('div', 'sched-warn qn-gaps');
+      w.appendChild(el('p', null, gaps.length + ' required ' + (gaps.length === 1 ? 'question is' : 'questions are') + ' skipped or unanswered: ' + gaps.map(function (q) { return (qn.q.qs.indexOf(q) + 1) + '. ' + q.x; }).join('; ')));
+      var lab = el('label', 'qn-opt'), cb = el('input');
+      cb.type = 'checkbox'; cb.id = 'qn-gapsok'; cb.checked = !!qn.gapsOk;
+      cb.addEventListener('change', function () { qn.gapsOk = cb.checked; if (qn.sub && qn.sub.state !== 'delivered') qn.sub.gaps = cb.checked; qnKeep(); qnRefreshSubmit(); });
+      lab.appendChild(cb); lab.appendChild(el('span', 'qn-olabel', 'Submit anyway, with these gaps'));
+      w.appendChild(lab);
+      foot.appendChild(w);
+    }
+    if (sub && sub.msg && sub.state !== 'delivered') foot.appendChild(el('p', 'sf-problem', sub.msg));
+    var send = qnBtn(busy ? 'Submitting…' : sub && sub.state === 'pending' ? 'Retry submitting' : 'Submit answers', 'sf-send', function () { qn.sub && qn.sub.state === 'pending' && conn === 'live' ? qnSendSubmit() : qnSubmit(); });
+    send.id = 'qn-submit';
+    send.disabled = busy || (gaps.length > 0 && !qn.gapsOk) || !!qn.conflict;
+    foot.appendChild(send);
+    if (conn !== 'live' && !busy) foot.appendChild(el('p', 'sf-note', sub && sub.state === 'pending' ? 'Delivery pending: it will be sent when the laptop is reachable. Your answers are saved on this phone.'
+      : "The laptop isn't reachable right now. You can still submit: it will be delivered once the connection is back."));
+  }
+
+  function qnRenderDone() {
+    var box = el('div', 'sched-detail qn-done'), sub = qn.sub;
+    qnHead(box);
+    if (sub && sub.state === 'delivered') {
+      box.appendChild(el('p', 'qn-ok', '✓ Delivered to laptop'));
+      box.appendChild(el('p', 'qd-text', 'Saved there as ' + sub.file + (sub.at ? ' · ' + new Date(sub.at).toLocaleString() : '') + '.'));
+      box.appendChild(el('p', 'sf-note', 'On the laptop: Queue window → Questionnaires → Copy answered Markdown (or Open file). Then give it to your AI assistant in your project. Nothing was sent to any AI.'));
+      if (qn.dirty || qnSig(qn.answers) !== sub.sig) box.appendChild(el('p', 'sched-warn', 'You changed answers after submitting. Submit again to write a new answered file with them.'));
+    } else box.appendChild(el('p', 'qd-status', 'Not submitted yet.'));
+    box.appendChild(qnBtn('Review answers', 'usage-btn qn-wide', function () { qnGo('review'); }));
+    box.appendChild(qnBtn('Edit answers', 'usage-btn qn-wide', function () { qnGo('q', 0); }));
+    qnBody.appendChild(box);
+  }
+
+  function qnRenderReplaced() {
+    var box = el('div', 'sched-detail');
+    box.appendChild(el('h2', 'qd-title', qn.next ? 'A new questionnaire replaced this one' : 'This questionnaire was removed on the laptop'));
+    box.appendChild(el('p', 'qd-text', '"' + qn.q.title + '" had answers that weren’t saved on the laptop or submitted. They’re still on this phone, and won’t be attached to the new questionnaire.'));
+    box.appendChild(qnBtn('Copy those answers as text', 'usage-btn qn-wide', function () {
+      var lines = [qn.q.title, ''];
+      qn.q.qs.forEach(function (q, i) {
+        var a = qn.answers[q.id], st = qnStatus(q, a);
+        lines.push((i + 1) + '. ' + q.x + ' [' + q.id + ']: ' + QN_LABEL[st]);
+        if (a && st === 'answered') lines.push(qnChoice(q) ? '   ' + a.s.join(', ') + (a.o ? ' / Other: ' + a.ot : '') : '   ' + a.t);
+        if (a && a.c) lines.push('   Comment: ' + a.c);
+      });
+      var t = lines.join('\n');
+      (navigator.clipboard && navigator.clipboard.writeText ? navigator.clipboard.writeText(t) : Promise.reject()).then(function () { note('Copied.'); }, function () {
+        var ta = el('textarea', 'sf-prompt'); ta.value = t; ta.readOnly = true; box.appendChild(ta); ta.select(); note('Select the text and copy it.');
+      });
+    }));
+    box.appendChild(qnBtn(qn.next ? 'Let them go and open the new questionnaire' : 'Let them go', 'sf-send', function () {
+      try { localStorage.setItem(QN_SPARE_KEY, JSON.stringify({ q: qn.q.id, answers: qn.answers, at: Date.now() })); } catch (e) { }
+      qn = qn.next ? qnFresh(qn.next) : null; qnKeep(); qnRender(true);
+    }));
+    qnBody.appendChild(box);
+  }
+
+  $('qn-refresh').addEventListener('click', function () { qnErr = ''; qnLoad(); });
+  window.addEventListener('pagehide', qnKeep);
 
   applyPetOptions();
   setView(view, false);

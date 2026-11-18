@@ -213,14 +213,18 @@ namespace ClaudeStatus
         TaskEditor editor;
         // The Calendar tab (calendar.cs): null when no calendar source was given (the tests' plain Queue).
         readonly CalendarView calendar;
-        readonly Button tasksTab, calendarTab;
+        readonly Button tasksTab, calendarTab, qnTab;
         readonly Control tasksArea, bannerArea;
+        // The Questionnaires tab (questionnaire.cs): null without a desk.
+        readonly QuestionnaireView questionnaires;
+        int shownTab;
 
         int S(float v) { return (int)Math.Round(v * scale); }
 
-        public QueueView(QueueEngine engine, float scale) : this(engine, scale, null) { }
+        public QueueView(QueueEngine engine, float scale) : this(engine, scale, null, null) { }
+        public QueueView(QueueEngine engine, float scale, CalendarSource calendarSource) : this(engine, scale, calendarSource, null) { }
 
-        public QueueView(QueueEngine engine, float scale, CalendarSource calendarSource)
+        public QueueView(QueueEngine engine, float scale, CalendarSource calendarSource, QuestionnaireDesk qnDesk)
         {
             eng = engine;
             this.scale = scale;
@@ -244,6 +248,12 @@ namespace ClaudeStatus
                 calendarTab = QTheme.Btn("Calendar", (s, e) => ShowCalendar(true));
                 tasksTab.Margin = new Padding(0, 0, 0, S(6)); calendarTab.Margin = new Padding(0, 0, S(14), S(6));
                 buttons.Controls.Add(tasksTab); buttons.Controls.Add(calendarTab);
+                if (qnDesk != null)
+                {
+                    qnTab = QTheme.Btn("Questionnaires", (s, e) => ShowTab(2));
+                    calendarTab.Margin = new Padding(0, 0, 0, S(6)); qnTab.Margin = new Padding(0, 0, S(14), S(6));
+                    buttons.Controls.Add(qnTab);
+                }
             }
             buttons.Controls.Add(newTask); buttons.Controls.Add(pause);
             var info = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.TopDown, WrapContents = false, Margin = new Padding(S(8), 0, 0, 0) };
@@ -331,6 +341,11 @@ namespace ClaudeStatus
                 calendar = new CalendarView(calendarSource, scale) { Dock = DockStyle.Fill, Visible = false };
                 calendar.OpenTask = id => { ShowCalendar(false); SelectTask(id); };
                 Controls.Add(calendar);
+                if (qnTab != null)
+                {
+                    questionnaires = new QuestionnaireView(qnDesk, scale) { Dock = DockStyle.Fill, Visible = false };
+                    Controls.Add(questionnaires);
+                }
             }
             Controls.Add(split);
             Controls.Add(bannerPanel);
@@ -341,7 +356,7 @@ namespace ClaudeStatus
             {
                 // the shown tab is drawn bold: both get room for that, so nothing shifts when you switch
                 var tabFont = new Font(SystemFonts.MessageBoxFont, FontStyle.Bold);
-                foreach (var b in new[] { tasksTab, calendarTab }) b.MinimumSize = new Size(TextRenderer.MeasureText(b.Text, tabFont).Width + S(18), pause.PreferredSize.Height);
+                foreach (var b in qnTab != null ? new[] { tasksTab, calendarTab, qnTab } : new[] { tasksTab, calendarTab }) b.MinimumSize = new Size(TextRenderer.MeasureText(b.Text, tabFont).Width + S(18), pause.PreferredSize.Height);
                 ShowCalendar(false);
             }
             newTask.MinimumSize = new Size(0, pause.PreferredSize.Height);
@@ -385,23 +400,33 @@ namespace ClaudeStatus
 
         public CalendarView Calendar { get { return calendar; } }
         public bool CalendarShown { get { return calendar != null && calendar.Visible; } }
+        public QuestionnaireView Questionnaires { get { return questionnaires; } }
 
         // Tasks (the list and details) or Calendar. Only what's shown changes; the queue keeps running either way.
-        public void ShowCalendar(bool on)
+        public void ShowCalendar(bool on) { ShowTab(on ? 1 : 0); }
+
+        // 0 Tasks, 1 Calendar, 2 Questionnaires.
+        public void ShowTab(int tab)
         {
-            if (calendar == null) return;
-            calendar.Visible = on;
-            tasksArea.Visible = !on;
-            if (on) bannerArea.Visible = false; else RefreshView();
+            if (calendar == null || (tab == 2 && questionnaires == null)) return;
+            shownTab = tab;
+            calendar.Visible = tab == 1;
+            if (questionnaires != null) questionnaires.Visible = tab == 2;
+            tasksArea.Visible = tab == 0;
+            if (tab != 0) bannerArea.Visible = false; else RefreshView();
             // the shown tab looks pressed (aria-pressed for screen readers comes from the name)
             // (selected, not the accent: + New task stays the one primary button)
-            QTheme.Normal(tasksTab); QTheme.Normal(calendarTab);
-            var shown = on ? calendarTab : tasksTab;
-            shown.BackColor = QTheme.Select; shown.ForeColor = QTheme.SelectText; shown.FlatAppearance.BorderColor = QTheme.Focus;
-            shown.Font = new Font(SystemFonts.MessageBoxFont, FontStyle.Bold);
-            (on ? tasksTab : calendarTab).Font = SystemFonts.MessageBoxFont;
-            tasksTab.AccessibleName = "Tasks" + (on ? "" : " (shown)"); calendarTab.AccessibleName = "Calendar" + (on ? " (shown)" : "");
-            if (on) calendar.RefreshData();
+            var tabs = qnTab != null ? new[] { tasksTab, calendarTab, qnTab } : new[] { tasksTab, calendarTab };
+            var names = new[] { "Tasks", "Calendar", "Questionnaires" };
+            for (int i = 0; i < tabs.Length; i++)
+            {
+                QTheme.Normal(tabs[i]);
+                tabs[i].Font = i == tab ? new Font(SystemFonts.MessageBoxFont, FontStyle.Bold) : SystemFonts.MessageBoxFont;
+                tabs[i].AccessibleName = names[i] + (i == tab ? " (shown)" : "");
+                if (i == tab) { tabs[i].BackColor = QTheme.Select; tabs[i].ForeColor = QTheme.SelectText; tabs[i].FlatAppearance.BorderColor = QTheme.Focus; }
+            }
+            if (tab == 1) calendar.RefreshData();
+            if (tab == 2) questionnaires.RefreshView();
         }
 
         public void SelectTask(string id)
@@ -481,7 +506,7 @@ namespace ClaudeStatus
                 bButton = "Install VS Code bridge"; bAct = InstallBridge;
             }
             else if (d.Paused && upcoming.Count > 0) { bText = "The queue is paused: nothing new starts. A task that is already running continues."; bButton = "▶  Resume queue"; bAct = () => eng.SetPaused(false); }
-            bp.Visible = bText != "" && !CalendarShown;
+            bp.Visible = bText != "" && shownTab == 0;
             banner.Text = bText;
             bannerAction.Visible = bButton != ""; bannerAction.Text = bButton; bannerAction.Tag = bAct;
             bp.BackColor = eng.Store.Warning != "" ? QTheme.ErrorBg : QTheme.AttentionBg;
