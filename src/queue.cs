@@ -36,7 +36,111 @@ namespace ClaudeStatus
             Orange = HighContrast ? SystemColors.WindowText : Color.FromArgb(240, 136, 62),
             Grey = HighContrast ? SystemColors.GrayText : Color.FromArgb(150, 150, 150),
             AttentionBg = HighContrast ? SystemColors.Window : Color.FromArgb(58, 44, 24),
-            ErrorBg = HighContrast ? SystemColors.Window : Color.FromArgb(64, 30, 30);
+            ErrorBg = HighContrast ? SystemColors.Window : Color.FromArgb(64, 30, 30),
+            Disabled = HighContrast ? SystemColors.GrayText : Color.FromArgb(140, 140, 140),   // ~5:1 on Bg: dim, still readable
+            FieldFocus = HighContrast ? SystemColors.Window : Color.FromArgb(52, 52, 56);
+
+        // The editors' font: Windows' message font, enlarged when `scale` exceeds the screen's DPI (tests render 125-150% that way).
+        public static Font UiFont(Control c, float scale)
+        {
+            float dpi; using (var g = c.CreateGraphics()) dpi = g.DpiY / 96f;
+            var f = SystemFonts.MessageBoxFont;
+            return scale > dpi + 0.01f ? new Font(f.FontFamily, f.SizeInPoints * scale / dpi) : f;
+        }
+
+        public static Font Mono(Font ui) { return new Font("Consolas", ui.SizeInPoints + 0.5f); }
+
+        [System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+        static extern IntPtr SendMessage(IntPtr h, int msg, IntPtr w, string l);
+
+        // Placeholder text shown while a single-line text box is empty.
+        public static void Cue(TextBox t, string text) { t.HandleCreated += (s, e) => SendMessage(t.Handle, 0x1501 /* EM_SETCUEBANNER */, IntPtr.Zero, text); }
+
+        // Text fields brighten slightly while they have the keyboard focus (the caret alone is easy to lose on dark).
+        public static void FocusTint(Control root)
+        {
+            foreach (Control c in root.Controls) FocusTint(c);
+            var t = root as TextBox;
+            if (t == null || HighContrast) return;
+            t.GotFocus += (s, e) => { if (!t.ReadOnly) t.BackColor = FieldFocus; };
+            t.LostFocus += (s, e) => { if (!t.ReadOnly) t.BackColor = Field; };
+        }
+
+        // A field that doesn't apply right now: read-only and dimmed, its text kept (not Enabled = false, which Windows greys unreadably).
+        public static void Dim(TextBox t, bool off)
+        {
+            t.ReadOnly = off; t.TabStop = !off;
+            t.BackColor = off ? Bg : t.Focused ? FieldFocus : Field; t.ForeColor = off ? Disabled : Text;
+        }
+
+        static int Box(Control c) { return Math.Max(13, (int)Math.Round(c.Font.Height * 0.78f)); }
+        const TextFormatFlags Measure = TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine,   // (EndEllipsis would measure "W…")
+            CheckText = Measure | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis;
+
+        public static Size CheckSize(ButtonBase c)
+        {
+            var t = TextRenderer.MeasureText(c.Text, c.Font, Size.Empty, Measure);
+            int box = Box(c);
+            return new Size(box + box / 2 + 4 + t.Width + c.Padding.Horizontal, Math.Max(t.Height, box) + c.Padding.Vertical + 4);
+        }
+
+        // Check box / radio button in the theme's colors, for normal, hover, focus, checked and disabled.
+        public static void PaintCheck(ButtonBase c, Graphics g, bool radio, bool on, bool hot, bool focus)
+        {
+            Color back = c.BackColor;
+            g.Clear(back);
+            int box = Box(c);
+            var r = new Rectangle(c.Padding.Left + 1, (c.Height - box) / 2, box - 1, box - 1);
+            bool en = c.Enabled;
+            Color edge = !en ? Line : on ? Accent : hot || focus ? Text : Muted, fill = !en ? (on ? Line : back) : on && !radio ? Accent : Field;
+            using (var fb = new SolidBrush(fill)) using (var pen = new Pen(edge))
+            {
+                if (radio)
+                {
+                    g.SmoothingMode = SmoothingMode.AntiAlias;
+                    using (var field = new SolidBrush(en ? Field : back)) g.FillEllipse(field, r);
+                    g.DrawEllipse(pen, r);
+                    float d = box * 0.5f, o = (box - 1 - d) / 2f;
+                    if (on) using (var dot = new SolidBrush(en ? Accent : Muted)) g.FillEllipse(dot, r.X + o, r.Y + o, d, d);
+                }
+                else
+                {
+                    g.FillRectangle(fb, r); g.DrawRectangle(pen, r);
+                    if (on)
+                    {
+                        g.SmoothingMode = SmoothingMode.AntiAlias;
+                        using (var tick = new Pen(en ? AccentText : Muted, Math.Max(1.6f, box / 7f)))
+                            g.DrawLines(tick, new[] { new PointF(r.X + box * 0.22f, r.Y + box * 0.52f), new PointF(r.X + box * 0.42f, r.Y + box * 0.72f), new PointF(r.X + box * 0.78f, r.Y + box * 0.28f) });
+                    }
+                }
+            }
+            g.SmoothingMode = SmoothingMode.None;
+            int x = r.Right + box / 2 + 2;
+            var tr = new Rectangle(x, 0, Math.Max(0, c.Width - x - c.Padding.Right), c.Height);
+            TextRenderer.DrawText(g, c.Text, c.Font, tr, en ? c.ForeColor : Disabled, CheckText);
+            if (focus)
+            {
+                var ts = TextRenderer.MeasureText(c.Text, c.Font, Size.Empty, Measure);
+                using (var fp = new Pen(Focus)) g.DrawRectangle(fp, x - 2, (c.Height - ts.Height) / 2 - 1, Math.Min(ts.Width, tr.Width) + 3, ts.Height + 1);
+            }
+        }
+
+        // The flat combo box's drop-down button and border, redrawn dark (Windows draws them light).
+        public static void PaintCombo(ComboBox c, Graphics g, bool hot)
+        {
+            var r = c.ClientRectangle;
+            int bw = SystemInformation.HorizontalScrollBarArrowWidth;
+            Color back = c.Enabled ? c.BackColor : Bg;
+            if (!c.Enabled && c.DropDownStyle == ComboBoxStyle.DropDownList)
+                using (var b = new SolidBrush(back)) { g.FillRectangle(b, 1, 1, r.Width - 2, r.Height - 2); TextRenderer.DrawText(g, c.Text, c.Font, new Rectangle(3, 0, r.Width - bw - 6, r.Height), Disabled, CheckText); }
+            using (var b = new SolidBrush(back)) g.FillRectangle(b, r.Width - bw - 2, 1, bw + 1, r.Height - 2);
+            float cx = r.Width - 1 - bw / 2f, cy = r.Height / 2f, w = Math.Max(3f, bw / 5f);
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            using (var p = new Pen(c.Enabled ? (hot ? Text : Muted) : Line, Math.Max(1.3f, bw / 12f)))
+                g.DrawLines(p, new[] { new PointF(cx - w, cy - w / 2), new PointF(cx, cy + w / 2), new PointF(cx + w, cy - w / 2) });
+            g.SmoothingMode = SmoothingMode.None;
+            using (var p = new Pen(c.ContainsFocus || c.DroppedDown ? Focus : hot && c.Enabled ? Muted : Line)) g.DrawRectangle(p, 0, 0, r.Width - 1, r.Height - 1);
+        }
 
         public static Color For(string state)
         {
@@ -186,6 +290,103 @@ namespace ClaudeStatus
             if (Width <= 0) return;
             int h = Text == "" ? 0 : TextRenderer.MeasureText(Text, Font, new Size(Math.Max(10, Width - Padding.Horizontal), int.MaxValue), TextFormatFlags.WordBreak | TextFormatFlags.TextBoxControl).Height + Padding.Vertical;
             if (Height != h) Height = h;
+        }
+    }
+
+    // Check box and radio button drawn in the theme (WinForms etches a disabled one's text, unreadable on dark).
+    // High contrast keeps the system drawing.
+    class QCheck : CheckBox
+    {
+        bool hot;
+        public QCheck() { AutoSize = true; SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint, true); }
+        public override Size GetPreferredSize(Size proposed) { return QTheme.HighContrast ? base.GetPreferredSize(proposed) : QTheme.CheckSize(this); }
+        protected override void OnMouseEnter(EventArgs e) { hot = true; base.OnMouseEnter(e); Invalidate(); }
+        protected override void OnMouseLeave(EventArgs e) { hot = false; base.OnMouseLeave(e); Invalidate(); }
+        protected override void OnPaint(PaintEventArgs e) { if (QTheme.HighContrast) base.OnPaint(e); else QTheme.PaintCheck(this, e.Graphics, false, Checked, hot, Focused && ShowFocusCues); }
+    }
+
+    class QRadio : RadioButton
+    {
+        bool hot;
+        public QRadio() { AutoSize = true; SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint, true); }
+        public override Size GetPreferredSize(Size proposed) { return QTheme.HighContrast ? base.GetPreferredSize(proposed) : QTheme.CheckSize(this); }
+        protected override void OnMouseEnter(EventArgs e) { hot = true; base.OnMouseEnter(e); Invalidate(); }
+        protected override void OnMouseLeave(EventArgs e) { hot = false; base.OnMouseLeave(e); Invalidate(); }
+        protected override void OnPaint(PaintEventArgs e) { if (QTheme.HighContrast) base.OnPaint(e); else QTheme.PaintCheck(this, e.Graphics, true, Checked, hot, Focused && ShowFocusCues); }
+    }
+
+    // Flat combo box with a dark drop-down button and a focus-colored border.
+    class QCombo : ComboBox
+    {
+        bool hot;
+        public QCombo() { FlatStyle = FlatStyle.Flat; }
+        protected override void OnMouseEnter(EventArgs e) { hot = true; base.OnMouseEnter(e); Invalidate(); }
+        protected override void OnMouseLeave(EventArgs e) { hot = false; base.OnMouseLeave(e); Invalidate(); }
+        protected override void OnEnter(EventArgs e) { base.OnEnter(e); Invalidate(); }
+        protected override void OnLeave(EventArgs e) { base.OnLeave(e); Invalidate(); }
+        protected override void WndProc(ref Message m)
+        {
+            base.WndProc(ref m);
+            if (m.Msg == 0x000F && !QTheme.HighContrast) using (var g = Graphics.FromHwnd(Handle)) QTheme.PaintCombo(this, g, hot);   // after WM_PAINT
+        }
+    }
+
+    // A local date and time as two editable dark combo boxes (the native DateTimePicker can't be drawn dark): type any
+    // date or time, or pick one of the next 60 days / every half hour. Value keeps the last valid entry; Valid says
+    // whether both boxes currently hold one.
+    class QWhen : FlowLayoutPanel
+    {
+        const string DateFmt = "ddd d MMM yyyy";
+        static string TimeFmt { get { return System.Globalization.CultureInfo.CurrentCulture.DateTimeFormat.ShortTimePattern; } }
+        readonly QCombo date, time;
+        DateTime value;
+        bool setting;
+        public event EventHandler ValueChanged;
+        public bool Valid { get; private set; }
+        public Control DateBox { get { return date; } }
+
+        public QWhen(DateTime v, int dateWidth, int timeWidth, string name)
+        {
+            AutoSize = true; WrapContents = false; Margin = new Padding(0);
+            date = new QCombo { DropDownStyle = ComboBoxStyle.DropDown, Width = dateWidth, MaxDropDownItems = 14, AccessibleName = name + " date", Margin = new Padding(0, 0, 4, 0) };
+            time = new QCombo { DropDownStyle = ComboBoxStyle.DropDown, Width = timeWidth, MaxDropDownItems = 14, AccessibleName = name + " time", Margin = new Padding(0) };
+            for (int i = 0; i < 60; i++) date.Items.Add(DateTime.Today.AddDays(i).ToString(DateFmt));
+            for (int m = 0; m < 1440; m += 30) time.Items.Add(DateTime.Today.AddMinutes(m).ToString(TimeFmt));
+            Value = v;
+            date.TextChanged += (s, e) => Parse(); time.TextChanged += (s, e) => Parse();
+            // a typed entry is shown in the standard form once you leave it
+            date.Leave += (s, e) => { if (Valid) Value = value; }; time.Leave += (s, e) => { if (Valid) Value = value; };
+            Controls.Add(date); Controls.Add(time);
+        }
+
+        public DateTime Value
+        {
+            get { return value; }
+            set { setting = true; this.value = value; date.Text = value.ToString(DateFmt); time.Text = value.ToString(TimeFmt); Parse(); setting = false; }
+        }
+
+        public static bool TryDate(string s, out DateTime d)
+        {
+            var c = System.Globalization.CultureInfo.CurrentCulture; var st = System.Globalization.DateTimeStyles.AllowWhiteSpaces;
+            return DateTime.TryParseExact((s ?? "").Trim(), DateFmt, c, st, out d) || DateTime.TryParse(s ?? "", c, st, out d);
+        }
+
+        public static bool TryTime(string s, out DateTime t)
+        {
+            return DateTime.TryParse(s ?? "", System.Globalization.CultureInfo.CurrentCulture, System.Globalization.DateTimeStyles.AllowWhiteSpaces | System.Globalization.DateTimeStyles.NoCurrentDateDefault, out t);
+        }
+
+        void Parse()
+        {
+            DateTime d, t;
+            bool dok = TryDate(date.Text, out d), tok = TryTime(time.Text, out t);
+            date.ForeColor = dok ? QTheme.Text : QTheme.Red; time.ForeColor = tok ? QTheme.Text : QTheme.Red;
+            Valid = dok && tok;
+            if (!Valid) return;
+            var nv = new DateTime(d.Year, d.Month, d.Day, t.Hour, t.Minute, 0);
+            if (nv == value) return;
+            value = nv;
+            if (!setting && ValueChanged != null) ValueChanged(this, EventArgs.Empty);
         }
     }
 
@@ -903,10 +1104,10 @@ namespace ClaudeStatus
             {
                 var flow = new FlowLayoutPanel { FlowDirection = FlowDirection.TopDown, AutoSize = true, WrapContents = false };
                 flow.Controls.Add(new Label { Text = "Try again at (your local time):", AutoSize = true });
-                var dt = new DateTimePicker { Format = DateTimePickerFormat.Custom, CustomFormat = "ddd d MMM yyyy   h:mm tt", Width = S(260), Value = t.NextRetryUtc > DateTime.UtcNow ? t.NextRetryUtc.ToLocalTime() : DateTime.Now.AddMinutes(30) };
+                var dt = new QWhen(t.NextRetryUtc > DateTime.UtcNow ? t.NextRetryUtc.ToLocalTime() : DateTime.Now.AddMinutes(30), S(160), S(100), "Next try");
                 flow.Controls.Add(dt);
                 flow.Controls.Add(new Label { Text = "Claude Status doesn't know your remaining usage; it only knows\r\nreset times Claude Code reports.", AutoSize = true, ForeColor = QTheme.Muted });
-                var ok = QTheme.Primary(QTheme.Btn("Set", (s, e) => f.DialogResult = DialogResult.OK));
+                var ok = QTheme.Primary(QTheme.Btn("Set", (s, e) => { if (dt.Valid) f.DialogResult = DialogResult.OK; else dt.DateBox.Focus(); }));
                 flow.Controls.Add(ok);
                 f.Controls.Add(flow); f.AcceptButton = ok;
                 QTheme.Style(f); f.BackColor = QTheme.Bg;
@@ -955,7 +1156,7 @@ namespace ClaudeStatus
         readonly TextBox title, prompt, sessionId, commands, model;
         readonly ComboBox project, sessions, after, mode, missed, whenKind, runner;
         readonly RadioButton cNew, cResume, cPred;
-        readonly DateTimePicker atDate, atTime, reset;
+        readonly QWhen at, reset;
         readonly CheckBox resetKnown, unattended, allowCommit, allowPush, allowDelete;
         readonly Button advancedToggle;
         readonly Wrap review, sessionNote, error, whenNote, promptInfo;
@@ -984,15 +1185,14 @@ namespace ClaudeStatus
             using (var g = CreateGraphics()) this.scale = Math.Max(scale, g.DpiX / 96f);
             bool running = task.State == QState.Running;
             Text = isNew ? "New task" : running ? "Task (running)" : "Edit task";
-            Font = SystemFonts.MessageBoxFont;
+            Font = QTheme.UiFont(this, this.scale);
             StartPosition = FormStartPosition.CenterScreen;
             ShowInTaskbar = true; MinimizeBox = false;
             BackColor = QTheme.Bg; ForeColor = QTheme.Text;
             KeyPreview = true;
-            Size = new Size(S(720), S(800));
-            MinimumSize = new Size(S(540), S(480));
             Rectangle wa = Screen.FromPoint(Cursor.Position).WorkingArea;
-            if (Height > wa.Height) Height = wa.Height;
+            MinimumSize = new Size(Math.Min(S(540), wa.Width), Math.Min(S(480), wa.Height));
+            Size = new Size(Math.Min(S(720), wa.Width), Math.Min(S(800), wa.Height));
             var bold = new Font(Font, FontStyle.Bold);
             var heading = new Font(Font.FontFamily, Font.Size * 1.15f, FontStyle.Bold);
 
@@ -1005,7 +1205,7 @@ namespace ClaudeStatus
             step("1", "Project");
             var projRow = new TableLayoutPanel { ColumnCount = 2, AutoSize = true, Height = S(28) };
             projRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); projRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-            project = new ComboBox { Dock = DockStyle.Fill, DropDownStyle = ComboBoxStyle.DropDown, AccessibleName = "Project folder" };
+            project = new QCombo { Dock = DockStyle.Fill, DropDownStyle = ComboBoxStyle.DropDown, AccessibleName = "Project folder" };
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var x in eng.Data.Tasks) if (x.Project != "" && seen.Add(Sched.NormPath(x.Project))) project.Items.Add(x.Project);
             project.Text = task.Project;
@@ -1021,7 +1221,8 @@ namespace ClaudeStatus
 
             // 2. prompt
             step("2", "Prompt");
-            prompt = new TextBox { Multiline = true, AcceptsReturn = true, AcceptsTab = false, ScrollBars = ScrollBars.Vertical, WordWrap = true, Height = S(190), Text = (task.Prompt ?? "").Replace("\r\n", "\n").Replace("\n", "\r\n"), Font = new Font("Consolas", Font.Size + 0.5f), AccessibleName = "Prompt" };
+            prompt = new TextBox { Multiline = true, AcceptsReturn = true, AcceptsTab = false, ScrollBars = ScrollBars.Vertical, WordWrap = true, Height = S(190), Text = (task.Prompt ?? "").Replace("\r\n", "\n").Replace("\n", "\r\n"), AccessibleName = "Prompt" };
+            prompt.Font = QTheme.Mono(Font);
             prompt.TextChanged += (s, e) => UpdateReview();
             add(prompt);
             promptInfo = new Wrap { ForeColor = QTheme.Muted, Dock = DockStyle.None };
@@ -1036,10 +1237,10 @@ namespace ClaudeStatus
 
             // 3. conversation
             step("3", "Conversation");
-            cNew = new RadioButton { Text = "New conversation", AutoSize = true, Checked = task.Conversation == "new" };
-            cResume = new RadioButton { Text = "Continue an existing conversation in this project", AutoSize = true, Checked = task.Conversation == "resume" };
-            cPred = new RadioButton { Text = "Continue the conversation of the task it runs after", AutoSize = true, Checked = task.Conversation == "predecessor" };
-            sessions = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = S(480), AccessibleName = "Conversation to continue" };
+            cNew = new QRadio { Text = "New conversation", AutoSize = true, Checked = task.Conversation == "new" };
+            cResume = new QRadio { Text = "Continue an existing conversation in this project", AutoSize = true, Checked = task.Conversation == "resume" };
+            cPred = new QRadio { Text = "Continue the conversation of the task it runs after", AutoSize = true, Checked = task.Conversation == "predecessor" };
+            sessions = new QCombo { DropDownStyle = ComboBoxStyle.DropDownList, Width = S(480), AccessibleName = "Conversation to continue" };
             sessions.SelectedIndexChanged += (s, e) => { int i = sessions.SelectedIndex; if (i >= 0 && i < found.Count) { sessionId.Text = found[i].Id; cResume.Checked = true; } };
             sessionId = new TextBox { Text = task.ResumeSession, Width = S(300), AccessibleName = "Session ID" };
             sessionId.TextChanged += (s, e) => { if (sessionId.Text.Trim() != "") cResume.Checked = true; UpdateReview(); };
@@ -1053,26 +1254,25 @@ namespace ClaudeStatus
 
             // 4. when
             step("4", "When");
-            whenKind = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = S(420), AccessibleName = "When it runs" };
+            whenKind = new QCombo { DropDownStyle = ComboBoxStyle.DropDownList, Width = S(420), AccessibleName = "When it runs" };
             whenKind.Items.AddRange(new object[] { "As soon as possible (in queue order)", "At a date and time", "After another task completes successfully", "When usage is available again" });
             whenKind.SelectedIndex = Math.Max(0, Array.IndexOf(new[] { "asap", "at", "after", "usage" }, task.Schedule));
             whenKind.SelectedIndexChanged += (s, e) => { UpdateVisibility(); UpdateReview(); };
             whenKind.Dock = DockStyle.None;
             body.Controls.Add(whenKind); whenKind.Margin = new Padding(S(22), S(2), 0, S(2));
             DateTime atLocal = task.RunAtUtc != DateTime.MinValue ? task.RunAtUtc.ToLocalTime() : DateTime.Now.Date.AddDays(1).AddHours(2);
-            atDate = new DateTimePicker { Format = DateTimePickerFormat.Custom, CustomFormat = "ddd d MMM yyyy", Width = S(170), Value = atLocal.Date, AccessibleName = "Date" };
-            atTime = new DateTimePicker { Format = DateTimePickerFormat.Custom, CustomFormat = "h:mm tt", ShowUpDown = true, Width = S(110), Value = atLocal, AccessibleName = "Time" };
-            atDate.ValueChanged += (s, e) => UpdateReview(); atTime.ValueChanged += (s, e) => UpdateReview();
+            at = new QWhen(atLocal, S(160), S(100), "Run");
+            at.ValueChanged += (s, e) => UpdateReview();
             tzLabel = new Label { AutoSize = true, ForeColor = QTheme.Muted, Margin = new Padding(S(6), S(4), 0, 0), Text = TimeZoneInfo.Local.IsDaylightSavingTime(DateTime.Now) ? TimeZoneInfo.Local.DaylightName : TimeZoneInfo.Local.StandardName };
-            whenAt = Indent(Pair(atDate, atTime, tzLabel));
-            after = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = S(440), AccessibleName = "Task it runs after" };
+            whenAt = Indent(Pair(at, tzLabel));
+            after = new QCombo { DropDownStyle = ComboBoxStyle.DropDownList, Width = S(440), AccessibleName = "Task it runs after" };
             foreach (var x in eng.Data.Tasks)
                 if (x.Id != task.Id && (!QState.Finished(x.State) || x.Id == task.After))
                 { afterChoices.Add(x); after.Items.Add(x.Title + "  ·  " + QLook.Label(QLook.Kind(x))); if (x.Id == task.After) after.SelectedIndex = after.Items.Count - 1; }
             after.SelectedIndexChanged += (s, e) => UpdateReview();
             whenAfter = Indent(after);
-            resetKnown = new CheckBox { Text = "I know when it resets:", AutoSize = true, Checked = task.UsageResetUtc != DateTime.MinValue };
-            reset = new DateTimePicker { Format = DateTimePickerFormat.Custom, CustomFormat = "ddd d MMM yyyy   h:mm tt", Width = S(240), Value = task.UsageResetUtc != DateTime.MinValue ? task.UsageResetUtc.ToLocalTime() : DateTime.Now.AddHours(1), AccessibleName = "Usage reset time" };
+            resetKnown = new QCheck { Text = "I know when it resets:", AutoSize = true, Checked = task.UsageResetUtc != DateTime.MinValue };
+            reset = new QWhen(task.UsageResetUtc != DateTime.MinValue ? task.UsageResetUtc.ToLocalTime() : DateTime.Now.AddHours(1), S(160), S(100), "Usage reset") { Margin = new Padding(S(4), 0, 0, 0) };
             reset.ValueChanged += (s, e) => { resetKnown.Checked = true; UpdateReview(); };
             resetKnown.CheckedChanged += (s, e) => UpdateReview();
             whenUsage = Indent(Pair(resetKnown, reset));
@@ -1093,35 +1293,36 @@ namespace ClaudeStatus
                 c.Dock = DockStyle.Fill; c.Margin = new Padding(0, S(3), 0, S(3));
                 at2.Controls.Add(l); at2.Controls.Add(c);
             };
-            runner = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, AccessibleName = "Where it runs" };
+            runner = new QCombo { DropDownStyle = ComboBoxStyle.DropDownList, AccessibleName = "Where it runs" };
             runner.Items.Add("VS Code: a terminal in the project's window (watch it, answer it there)");
             runner.Items.Add("Background: no window (claude -p); Claude can't ask you anything");
             runner.SelectedIndex = task.Runner == "headless" ? 1 : 0;
             runner.SelectedIndexChanged += (s, e) => UpdateReview();
             arow("Runs in", runner);
-            unattended = new CheckBox { Text = "Run unattended: don't stop for questions or routine approvals", AutoSize = true, Checked = task.Unattended };
+            unattended = new QCheck { Text = "Run unattended: don't stop for questions or routine approvals", AutoSize = true, Checked = task.Unattended };
             unattended.CheckedChanged += (s, e) => UpdateReview();
             arow("Unattended", unattended);
             arow("", new Wrap { ForeColor = QTheme.Muted, Text = "Claude chooses the recommended option for routine decisions and records each one in the run's Markdown log. With \"Edit files in the project\" it runs in Claude Code's auto mode: other local work in this project (builds, tests, project commands) is approved without asking, and its safety check blocks risky actions. Only this task's runs change; your other Claude sessions and settings don't." });
-            mode = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, AccessibleName = "Claude may" };
+            mode = new QCombo { DropDownStyle = ComboBoxStyle.DropDownList, AccessibleName = "Claude may" };
             foreach (var m in Modes) mode.Items.Add(Sched.ModeLabel(m));
             mode.SelectedIndex = Math.Max(0, Array.IndexOf(Modes, task.PermissionMode));
             mode.SelectedIndexChanged += (s, e) => UpdateReview();
             arow("Claude may", mode);
-            commands = new TextBox { Multiline = true, AcceptsReturn = true, ScrollBars = ScrollBars.Vertical, Height = S(120), Text = string.Join("\r\n", task.AllowCommands), Font = new Font("Consolas", Font.Size), AccessibleName = "Allowed commands" };
+            commands = new TextBox { Multiline = true, AcceptsReturn = true, ScrollBars = ScrollBars.Vertical, Height = S(120), Text = string.Join("\r\n", task.AllowCommands), AccessibleName = "Allowed commands" };
+            commands.Font = QTheme.Mono(Font);
             commands.TextChanged += (s, e) => UpdateReview();
             arow("Allowed commands", commands);
             arow("", new Wrap { ForeColor = QTheme.Muted, Text = "One command pattern per line (\"npm test *\"), allowed in both Bash and PowerShell; or a full Claude Code rule such as WebFetch(domain:docs.python.org). Read-only commands are always allowed." });
-            allowCommit = new CheckBox { Text = "Allow git commit", AutoSize = true, Checked = task.AllowCommit };
-            allowPush = new CheckBox { Text = "Allow git push (publishes your code)", AutoSize = true, Checked = task.AllowPush };
-            allowDelete = new CheckBox { Text = "Allow deleting files (rm, Remove-Item, git clean, git reset --hard, …)", AutoSize = true, Checked = task.AllowDelete };
+            allowCommit = new QCheck { Text = "Allow git commit", AutoSize = true, Checked = task.AllowCommit };
+            allowPush = new QCheck { Text = "Allow git push (publishes your code)", AutoSize = true, Checked = task.AllowPush };
+            allowDelete = new QCheck { Text = "Allow deleting files (rm, Remove-Item, git clean, git reset --hard, …)", AutoSize = true, Checked = task.AllowDelete };
             foreach (var cb in new[] { allowCommit, allowPush, allowDelete }) cb.CheckedChanged += (s, e) => UpdateReview();
             arow("Also authorize", Stack(allowCommit, allowPush, allowDelete));
             model = new TextBox { Text = task.Model, AccessibleName = "Model" };
             model.TextChanged += (s, e) => UpdateReview();
             arow("Model", model);
             arow("", new Wrap { ForeColor = QTheme.Muted, Text = "Blank = your Claude Code default. For example sonnet, opus, or a full model name." });
-            missed = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, AccessibleName = "If the time is missed" };
+            missed = new QCombo { DropDownStyle = ComboBoxStyle.DropDownList, AccessibleName = "If the time is missed" };
             missed.Items.Add("Run it once Claude Status is running again (after a 1-minute chance to skip)"); missed.Items.Add("Skip it");
             missed.SelectedIndex = task.IfMissed == "skip" ? 1 : 0;
             arow("If the time is missed", missed);
@@ -1134,7 +1335,8 @@ namespace ClaudeStatus
             add(review);
 
             // buttons + inline validation
-            var bottom = new Panel { Dock = DockStyle.Bottom, AutoSize = true, Padding = new Padding(S(16), S(4), S(16), S(10)), BackColor = QTheme.Bg };
+            var bottom = new Panel { Dock = DockStyle.Bottom, AutoSize = true, Padding = new Padding(S(16), S(8), S(16), S(6)), BackColor = QTheme.Bg };
+            bottom.Paint += (s, e) => { using (var p = new Pen(QTheme.Line)) e.Graphics.DrawLine(p, 0, 0, bottom.Width, 0); };
             error = new Wrap { ForeColor = QTheme.Red, Dock = DockStyle.Top };
             var buttons = new FlowLayoutPanel { Dock = DockStyle.Top, FlowDirection = FlowDirection.RightToLeft, AutoSize = true, BackColor = QTheme.Bg };
             var cancel = QTheme.Btn(running ? "Close" : "Cancel", (s, e) => Close());
@@ -1156,7 +1358,8 @@ namespace ClaudeStatus
             Controls.Add(body);
             Controls.Add(bottom);
             QTheme.Style(this);
-            if (primary != null) QTheme.Primary(primary);
+            if (primary != null) { QTheme.Primary(primary); primary.Font = new Font(Font, FontStyle.Bold); }
+            QTheme.FocusTint(this);
             foreach (Control c in Controls) c.BackColor = c.BackColor == SystemColors.Control ? QTheme.Bg : c.BackColor;
             if (running) foreach (Control c in new Control[] { title, project, prompt, cNew, cResume, cPred, sessions, sessionId, whenKind, whenAt, whenAfter, whenUsage, adv }) c.Enabled = false;
             LoadSessions();
@@ -1182,7 +1385,7 @@ namespace ClaudeStatus
             if (r == DialogResult.Yes && !SaveAs(true)) e.Cancel = true;
         }
 
-        string Snapshot() { return QueueStore.Ser().Serialize(Collect(true)) + "|" + atDate.Value + atTime.Value + reset.Value; }
+        string Snapshot() { return QueueStore.Ser().Serialize(Collect(true)) + "|" + at.Value + reset.Value; }
 
         Control Stack(params Control[] items)
         {
@@ -1238,8 +1441,7 @@ namespace ClaudeStatus
             t.After = t.Schedule == "after" && after.SelectedIndex >= 0 ? afterChoices[after.SelectedIndex].Id : "";
             if (t.Schedule == "at")
             {
-                DateTime d = atDate.Value.Date, tm = atTime.Value;
-                DateTime wall = new DateTime(d.Year, d.Month, d.Day, tm.Hour, tm.Minute, 0);
+                DateTime wall = at.Value;
                 t.RunAtLocal = wall.ToString("yyyy-MM-dd HH:mm"); t.TimeZone = TimeZoneInfo.Local.Id;
                 t.RunAtUtc = Sched.LocalToUtc(wall, TimeZoneInfo.Local);
             }
@@ -1288,6 +1490,8 @@ namespace ClaudeStatus
         {
             var t = Collect(draft);
             string err = draft ? (t.Project.Trim() == "" && t.Prompt.Trim() == "" ? "Write at least the project or the prompt before saving a draft." : null) : eng.Validate(t, eng.Data.Tasks);
+            if (err == null && ((t.Schedule == "at" && !at.Valid) || (t.Schedule == "usage" && resetKnown.Checked && !reset.Valid)))
+                err = "Enter the date and time like " + DateTime.Today.AddDays(1).ToString("ddd d MMM yyyy") + " and " + DateTime.Today.AddHours(2).ToString("t") + ".";
             if (!draft && err == null && t.Runner != "headless" && t.Prompt.Length > QueueEngine.MaxArgChars - 2000) err = "The prompt is too long to start in a VS Code terminal. Shorten it, or choose Background under Advanced.";
             if (err != null) { error.Text = err; FocusField(err); return false; }
             if (!draft && (t.AllowPush || t.AllowDelete) && !ConfirmRisk(t)) return false;
@@ -1301,7 +1505,7 @@ namespace ClaudeStatus
 
         void FocusField(string err)
         {
-            Control c = err.Contains("project") ? (Control)project : err.Contains("prompt") ? (Control)prompt : err.Contains("conversation") ? (Control)sessions : err.Contains("date") ? (Control)atDate : err.Contains("after") ? (Control)after : null;
+            Control c = err.Contains("project") ? (Control)project : err.Contains("prompt") ? (Control)prompt : err.Contains("conversation") ? (Control)sessions : err.Contains("date") ? (WhenKey == "usage" ? reset.DateBox : at.DateBox) : err.Contains("after") ? (Control)after : null;
             if (c != null && c.Visible && c.Enabled) c.Focus();
         }
 

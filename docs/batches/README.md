@@ -12,9 +12,9 @@ Each step starts only after the step before it, *and its commit*, finished succe
 
 1. Open the Queue window (the ☰◷ icon on the Status board) and click the **Batches** tab.
 2. Click **+ New batch** and give it a name.
-3. The settings at the top apply to every step: where it runs (each project's VS Code window, or the background), what Claude may do, allowed commands and model. Every step runs **unattended**: Claude decides routine questions itself and writes each decision into that step's run log.
+3. The settings at the top apply to every step: where it runs (each project's VS Code window, or the background), what Claude may do and allowed commands (folded under **Permissions**) and model. Every step runs **unattended**: Claude decides routine questions itself and writes each decision into that step's run log.
 4. Choose **Start**: *When I click Run now*, or *At* a date and time.
-5. Add steps with **+ Add step** and order them with **↑ Up** / **↓ Down**. Select a step in the list to edit its title, project, prompt and options.
+5. Add steps with **+ Add** and order them with **↑** / **↓** (or Alt+Up / Alt+Down in the list). Select a step in the list to edit its title, project, prompt and options.
 6. Click **Save**.
 
 ![The batch editor with step 2 selected: it continues the previous step's conversation and commits with the message "Fix audit findings".](desktop-editor-step2.png)

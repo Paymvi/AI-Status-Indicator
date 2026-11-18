@@ -1294,6 +1294,8 @@ namespace ClaudeStatus
         }
     }
 
+    // Batch settings in a compact header (permissions folded below it), then the steps: a list on the left and the
+    // selected step's fields on the right, with the prompt taking the spare height. Save / Cancel stay in a fixed footer.
     public class BatchEditor : Form
     {
         readonly QueueEngine eng;
@@ -1303,14 +1305,18 @@ namespace ClaudeStatus
         readonly ComboBox runner, mode, sProject, sConv, sSession;
         readonly CheckBox allowDelete, sHandoff, sReview, sCommit;
         readonly RadioButton startManual, startAt;
-        readonly DateTimePicker atDate, atTime;
+        readonly QWhen at;
         readonly ListBox stepList;
         readonly Wrap error, convNote, commitInfo;
-        readonly TableLayoutPanel stepPanel;
+        readonly TableLayoutPanel stepPanel, perms;
+        readonly Panel stepHost;
+        readonly Button permsToggle, removeBtn, upBtn, downBtn;
+        readonly Label permsSummary;
+        readonly ToolTip tips = new ToolTip();
         readonly Dictionary<string, string> tops = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         List<SessionMeta> sessions = new List<SessionMeta>();
-        int cur = -1;
-        bool loading;
+        int cur = -1, promptRow;
+        bool loading, fitPending;
         public string SavedId;
         static readonly string[] Modes = { "acceptEdits", "dontAsk", "plan" };
         readonly float scale;
@@ -1325,122 +1331,263 @@ namespace ClaudeStatus
             Batching.Normalize(new QueueData { Batches = new List<BatchDef> { orig } });
             foreach (var s in orig.Steps) work.Add(ser.Deserialize<BatchStep>(ser.Serialize(s)));
             Text = b == null ? "New batch" : "Edit batch";
-            Font = SystemFonts.MessageBoxFont; StartPosition = FormStartPosition.CenterScreen; ShowInTaskbar = true; MinimizeBox = false; KeyPreview = true;
+            Font = QTheme.UiFont(this, this.scale); StartPosition = FormStartPosition.CenterScreen; ShowInTaskbar = true; MinimizeBox = false; KeyPreview = true;
             BackColor = QTheme.Bg; ForeColor = QTheme.Text;
-            Size = new Size(S(920), S(840)); MinimumSize = new Size(S(660), S(520));
             Rectangle wa = Screen.FromPoint(Cursor.Position).WorkingArea;
-            if (Height > wa.Height) Height = wa.Height;
+            MinimumSize = new Size(Math.Min(S(700), wa.Width), Math.Min(S(500), wa.Height));
+            Size = new Size(Math.Min(S(980), wa.Width), Math.Min(S(780), wa.Height));
+            int pad = S(14);
+            Func<string, Label> lab = t => new Label { Text = t, AutoSize = true, ForeColor = QTheme.Muted, Anchor = AnchorStyles.Left, Margin = new Padding(0, S(3), S(10), S(3)) };
+            Func<Control, int, Control> field = (c, right) => { c.Dock = DockStyle.Fill; c.Margin = new Padding(0, S(3), right, S(3)); return c; };
 
-            var body = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, AutoScroll = true, Padding = new Padding(S(14), S(10), S(18), S(10)) };
-            body.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize)); body.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            Action<TableLayoutPanel, string, Control> row = (panel, label, c) =>
-            {
-                // Explicit cells: a hidden row (step 1's conversation picker) must not shift the rows after it.
-                int r = panel.RowCount++;
-                panel.Controls.Add(new Label { Text = label, AutoSize = true, ForeColor = QTheme.Muted, Margin = new Padding(0, S(6), S(10), 0) }, 0, r);
-                if (!(c is CheckBox) && !(c is RadioButton)) c.Dock = DockStyle.Fill;
-                if (panel == stepPanel && !(c is CheckBox)) c.MinimumSize = new Size(S(440), c.MinimumSize.Height);   // the step's fields keep a usable width
-                c.Margin = new Padding(0, S(3), 0, S(3));
-                panel.Controls.Add(c, 1, r);
-            };
+            // ---- the batch ----
+            var top = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 4, Padding = new Padding(pad, S(10), pad, S(6)) };
+            top.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize)); top.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 62));
+            top.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize)); top.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 38));
             name = new TextBox { Text = orig.Name, AccessibleName = "Batch name" };
-            row(body, "Name", name);
-            row(body, "Agent", new Label { AutoSize = true, Text = "Claude Code (one agent per batch; the scheduler runs Claude Code only)" });
-            runner = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, AccessibleName = "Where steps run" };
+            model = new TextBox { Text = orig.Model, AccessibleName = "Model" };
+            QTheme.Cue(model, "Claude Code default");
+            tips.SetToolTip(model, "Blank = your Claude Code default. For example sonnet, opus, or a full model name.");
+            top.Controls.Add(lab("Name"), 0, 0); top.Controls.Add(field(name, S(20)), 1, 0);
+            top.Controls.Add(lab("Model"), 2, 0); top.Controls.Add(field(model, 0), 3, 0);
+            runner = new QCombo { DropDownStyle = ComboBoxStyle.DropDownList, AccessibleName = "Where steps run" };
             runner.Items.Add("VS Code: a terminal in each step's project window"); runner.Items.Add("Background: no window (claude -p)");
             runner.SelectedIndex = orig.Runner == "headless" ? 1 : 0;
-            row(body, "Runs in", runner);
-            mode = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, AccessibleName = "Claude may" };
+            top.Controls.Add(lab("Runs in"), 0, 1); top.Controls.Add(field(runner, S(20)), 1, 1);
+            var agent = new Label { Text = "Claude Code", AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, S(3), 0, S(3)), AccessibleDescription = "One agent per batch: the scheduler runs Claude Code only." };
+            tips.SetToolTip(agent, agent.AccessibleDescription);
+            top.Controls.Add(lab("Agent"), 2, 1); top.Controls.Add(agent, 3, 1);
+            startManual = new QRadio { Text = "When I click Run now", Checked = orig.Start != "at", Margin = new Padding(0, S(3), S(12), S(3)), Anchor = AnchorStyles.Left };
+            startAt = new QRadio { Text = "At", Checked = orig.Start == "at", Margin = new Padding(0, S(3), S(4), S(3)), Anchor = AnchorStyles.Left };
+            at = new QWhen(orig.RunAtUtc != DateTime.MinValue ? orig.RunAtUtc.ToLocalTime() : DateTime.Now.Date.AddDays(1).AddHours(2), S(150), S(100), "Start") { Margin = new Padding(0, S(3), 0, S(3)) };
+            at.ValueChanged += (s, e) => startAt.Checked = true;
+            var when = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(0) };
+            foreach (Control c in new Control[] { startManual, startAt, at }) when.Controls.Add(c);
+            top.Controls.Add(lab("Start"), 0, 2); top.Controls.Add(when, 1, 2); top.SetColumnSpan(when, 3);
+
+            // permissions: folded to a one-line summary
+            permsToggle = QTheme.Btn("▸  Permissions", (s, e) => ShowPerms(!perms.Visible));
+            permsToggle.AccessibleName = "Permissions"; permsToggle.Margin = new Padding(0, S(4), S(10), S(2));
+            permsSummary = new Label { AutoSize = true, ForeColor = QTheme.Muted, Anchor = AnchorStyles.Left, Margin = new Padding(0, S(4), 0, S(2)) };
+            var permsRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(0) };
+            permsRow.Controls.Add(permsToggle); permsRow.Controls.Add(permsSummary);
+            top.Controls.Add(permsRow, 0, 3); top.SetColumnSpan(permsRow, 4);
+            perms = new TableLayoutPanel { AutoSize = true, ColumnCount = 2, Dock = DockStyle.Fill, Visible = false, Margin = new Padding(S(18), S(2), 0, S(2)) };
+            perms.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize)); perms.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            Action<string, Control> prow = (label, c) =>
+            {
+                int r = perms.RowCount++;
+                if (label != null) { var l = lab(label); if (c is TextBox && ((TextBox)c).Multiline) { l.Anchor = AnchorStyles.Left | AnchorStyles.Top; l.Margin = new Padding(0, S(6), S(10), 0); } perms.Controls.Add(l, 0, r); }
+                if (!(c is CheckBox)) c.Dock = DockStyle.Fill;
+                c.Margin = new Padding(0, S(2), 0, S(2));
+                perms.Controls.Add(c, 1, r);
+            };
+            mode = new QCombo { DropDownStyle = ComboBoxStyle.DropDownList, AccessibleName = "Claude may" };
             foreach (var m in Modes) mode.Items.Add(Sched.ModeLabel(m));
             mode.SelectedIndex = Math.Max(0, Array.IndexOf(Modes, orig.PermissionMode));
-            row(body, "Claude may", mode);
-            commands = new TextBox { Multiline = true, AcceptsReturn = true, ScrollBars = ScrollBars.Vertical, Height = S(64), Text = string.Join("\r\n", orig.AllowCommands), Font = new Font("Consolas", Font.Size), AccessibleName = "Allowed commands" };
-            row(body, "Allowed commands", commands);
-            allowDelete = new CheckBox { Text = "Allow deleting files", AutoSize = true, Checked = orig.AllowDelete };
-            row(body, "Also authorize", allowDelete);
-            model = new TextBox { Text = orig.Model, AccessibleName = "Model" };
-            row(body, "Model", model);
-            row(body, "", new Wrap { ForeColor = QTheme.Muted, Text = "Every step runs unattended: Claude decides routine questions itself and logs each decision in its run's Markdown log. Claude is never allowed to commit or push; commits between steps are the batch's own Git step." });
-            startManual = new RadioButton { Text = "When I click Run now", AutoSize = true, Checked = orig.Start != "at" };
-            startAt = new RadioButton { Text = "At", AutoSize = true, Checked = orig.Start == "at" };
-            DateTime at = orig.RunAtUtc != DateTime.MinValue ? orig.RunAtUtc.ToLocalTime() : DateTime.Now.Date.AddDays(1).AddHours(2);
-            atDate = new DateTimePicker { Format = DateTimePickerFormat.Custom, CustomFormat = "ddd d MMM yyyy", Width = S(160), Value = at.Date };
-            atTime = new DateTimePicker { Format = DateTimePickerFormat.Custom, CustomFormat = "h:mm tt", ShowUpDown = true, Width = S(100), Value = at };
-            var when = new FlowLayoutPanel { AutoSize = true, WrapContents = false };
-            foreach (Control c in new Control[] { startManual, startAt, atDate, atTime }) when.Controls.Add(c);
-            row(body, "Start", when);
+            prow("Claude may", mode);
+            commands = new TextBox { Multiline = true, AcceptsReturn = true, ScrollBars = ScrollBars.Vertical, Height = S(78), Text = string.Join("\r\n", orig.AllowCommands), AccessibleName = "Allowed commands" };
+            commands.Font = QTheme.Mono(Font);
+            prow("Allowed commands", commands);
+            prow(null, new Wrap { ForeColor = QTheme.Muted, Text = "One pattern per line (\"npm test *\"), allowed in both Bash and PowerShell; or a full Claude Code rule such as WebFetch(domain:docs.python.org). Read-only commands are always allowed." });
+            allowDelete = new QCheck { Text = "Allow deleting files", Checked = orig.AllowDelete };
+            prow("Also authorize", allowDelete);
+            prow(null, new Wrap { ForeColor = QTheme.Muted, Text = "Every step runs unattended: Claude decides routine questions itself and logs each decision in its run's Markdown log. Claude is never allowed to commit or push; commits between steps are the batch's own Git step." });
+            top.Controls.Add(perms, 0, 4); top.SetColumnSpan(perms, 4);
+            mode.SelectedIndexChanged += (s, e) => Summarize(); commands.TextChanged += (s, e) => Summarize(); allowDelete.CheckedChanged += (s, e) => Summarize();
 
-            // steps: the list on the left, the selected step's fields on the right
-            var stepsBox = new TableLayoutPanel { ColumnCount = 2, AutoSize = true, Dock = DockStyle.Fill };
-            stepsBox.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, S(250))); stepsBox.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            var left = new FlowLayoutPanel { FlowDirection = FlowDirection.TopDown, AutoSize = true, WrapContents = false };
-            stepList = new ListBox { Width = S(240), Height = S(280), IntegralHeight = false, AccessibleName = "Steps" };
-            stepList.SelectedIndexChanged += (s, e) => { if (loading) return; Store(); cur = stepList.SelectedIndex; ShowStep(); };
-            var btns = new FlowLayoutPanel { AutoSize = true, WrapContents = true, MaximumSize = new Size(S(245), 0) };
-            btns.Controls.Add(QTheme.Btn("+ Add step", (s, e) => { Store(); var p = cur >= 0 && cur < work.Count ? work[cur] : null; work.Add(new BatchStep { Id = Guid.NewGuid().ToString("N"), Project = p != null ? p.Project : "", Conversation = p != null ? "continue" : "new" }); cur = work.Count - 1; Fill(); sPrompt.Focus(); }));
-            btns.Controls.Add(QTheme.Btn("Remove", (s, e) => { if (cur < 0 || cur >= work.Count) return; work.RemoveAt(cur); cur = Math.Min(cur, work.Count - 1); Fill(); }));
-            btns.Controls.Add(QTheme.Btn("↑ Up", (s, e) => MoveStep(-1)));
-            btns.Controls.Add(QTheme.Btn("↓ Down", (s, e) => MoveStep(1)));
-            left.Controls.Add(stepList); left.Controls.Add(btns);
-            stepPanel = new TableLayoutPanel { ColumnCount = 2, AutoSize = true, Dock = DockStyle.Fill };
+            // ---- the steps ----
+            var head = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, WrapContents = false, Padding = new Padding(pad, S(9), pad, S(5)) };
+            head.Controls.Add(new Label { Text = "Steps", AutoSize = true, Font = new Font(Font, FontStyle.Bold), Margin = new Padding(0, 0, S(10), 0) });
+            head.Controls.Add(new Label { Text = "Each starts only after the previous one, and its commit, succeeded.", AutoSize = true, ForeColor = QTheme.Muted, Margin = new Padding(0) });
+            head.Paint += (s, e) => { using (var p = new Pen(QTheme.Line)) e.Graphics.DrawLine(p, pad, 0, head.Width - pad, 0); };
+
+            var split = new SplitContainer { Dock = DockStyle.Fill, FixedPanel = FixedPanel.Panel1, TabStop = false, SplitterWidth = S(11) };
+            split.Paint += (s, e) => { var r = split.SplitterRectangle; using (var p = new Pen(QTheme.Line)) e.Graphics.DrawLine(p, r.X + r.Width / 2, r.Y, r.X + r.Width / 2, r.Bottom); };
+            var area = new Panel { Dock = DockStyle.Fill, Padding = new Padding(pad, 0, pad, S(6)) };
+            area.Controls.Add(split);
+            Load += (s, e) => { try { split.Panel1MinSize = S(200); split.Panel2MinSize = S(340); split.SplitterDistance = S(260); } catch (InvalidOperationException) { } };
+
+            var tools = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, WrapContents = false, Padding = new Padding(0, 0, 0, S(2)), TabIndex = 0 };
+            Func<string, string, EventHandler, Button> tool = (t, what, click) => { var x = QTheme.Btn(t, click); x.AccessibleName = what; x.Margin = new Padding(0, 0, S(4), S(4)); tips.SetToolTip(x, what); return x; };
+            tools.Controls.Add(tool("+ Add", "Add a step after the last one", (s, e) => { Store(); var p = cur >= 0 && cur < work.Count ? work[cur] : null; work.Add(new BatchStep { Id = Guid.NewGuid().ToString("N"), Project = p != null ? p.Project : "", Conversation = p != null ? "continue" : "new" }); cur = work.Count - 1; Fill(); sPrompt.Focus(); }));
+            tools.Controls.Add(removeBtn = tool("Remove", "Remove the selected step", (s, e) => { if (cur < 0 || cur >= work.Count) return; work.RemoveAt(cur); cur = Math.Min(cur, work.Count - 1); Fill(); }));
+            tools.Controls.Add(upBtn = tool("↑", "Move the step up (Alt+Up)", (s, e) => MoveStep(-1)));
+            tools.Controls.Add(downBtn = tool("↓", "Move the step down (Alt+Down)", (s, e) => MoveStep(1)));
+            var listFrame = new Panel { Dock = DockStyle.Fill, Padding = new Padding(1), BackColor = QTheme.Line, TabIndex = 1 };
+            stepList = new ListBox { Dock = DockStyle.Fill, BorderStyle = BorderStyle.None, IntegralHeight = false, DrawMode = DrawMode.OwnerDrawFixed, ItemHeight = Math.Min(255, Font.Height * 2 + S(12)), AccessibleName = "Steps" };
+            stepList.SelectedIndexChanged += (s, e) => { if (loading) return; Store(); cur = stepList.SelectedIndex; ShowStep(); UpdateTools(); };
+            stepList.DrawItem += (s, e) => DrawStep(e);
+            stepList.Resize += (s, e) => stepList.Invalidate();
+            stepList.Enter += (s, e) => { listFrame.BackColor = QTheme.Focus; stepList.Invalidate(); };
+            stepList.Leave += (s, e) => { listFrame.BackColor = QTheme.Line; stepList.Invalidate(); };
+            stepList.KeyDown += (s, e) => { if (e.Alt && (e.KeyCode == Keys.Up || e.KeyCode == Keys.Down)) { MoveStep(e.KeyCode == Keys.Up ? -1 : 1); e.Handled = true; } };
+            listFrame.Controls.Add(stepList);
+            split.Panel1.Controls.Add(listFrame); split.Panel1.Controls.Add(tools);
+
+            // the selected step
+            stepHost = new Panel { Dock = DockStyle.Fill, AutoScroll = true, Padding = new Padding(S(4), 0, S(4), 0) };
+            stepPanel = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2 };
             stepPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize)); stepPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            Func<string, Control, int, int> row = (label, c, gap) =>
+            {
+                // Explicit cells: a hidden row (step 1's conversation picker) must not shift the rows after it.
+                int r = stepPanel.RowCount++;
+                stepPanel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+                if (label != null)
+                {
+                    var l = lab(label); l.Margin = new Padding(0, S(3) + gap, S(10), S(3));
+                    if (c is TextBox && ((TextBox)c).Multiline) { l.Anchor = AnchorStyles.Left | AnchorStyles.Top; l.Margin = new Padding(0, S(6) + gap, S(10), 0); }
+                    stepPanel.Controls.Add(l, 0, r);
+                }
+                if (!(c is CheckBox) && !(c is FlowLayoutPanel)) c.Dock = DockStyle.Fill;
+                c.Margin = new Padding(0, S(3) + gap, 0, S(3));
+                stepPanel.Controls.Add(c, 1, r);
+                return r;
+            };
             sTitle = new TextBox { AccessibleName = "Step title" };
-            row(stepPanel, "Title", sTitle);
-            var projRow = new TableLayoutPanel { ColumnCount = 2, AutoSize = true, Height = S(28) };
+            row("Title", sTitle, 0);
+            var projRow = new TableLayoutPanel { ColumnCount = 2, AutoSize = true };
             projRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); projRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-            sProject = new ComboBox { Dock = DockStyle.Fill, DropDownStyle = ComboBoxStyle.DropDown, AccessibleName = "Step project folder" };
+            sProject = new QCombo { Dock = DockStyle.Fill, DropDownStyle = ComboBoxStyle.DropDown, AccessibleName = "Step project folder", Margin = new Padding(0) };
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var x in eng.Data.Tasks) if (x.Project != "" && seen.Add(Sched.NormPath(x.Project))) sProject.Items.Add(x.Project);
             foreach (var x in eng.Data.Batches) foreach (var y in x.Steps) if (y.Project != "" && seen.Add(Sched.NormPath(y.Project))) sProject.Items.Add(y.Project);
             sProject.TextChanged += (s, e) => { if (!loading) { Store(); Explain(); } };
             var browse = QTheme.Btn("Browse…", (s, e) => { using (var fb = new FolderBrowserDialog { Description = "Project folder Claude works in", SelectedPath = Directory.Exists(sProject.Text) ? sProject.Text : "" }) if (fb.ShowDialog(this) == DialogResult.OK) sProject.Text = fb.SelectedPath; });
-            browse.Margin = new Padding(S(6), 0, 0, 0);
+            browse.Margin = new Padding(S(6), 0, 0, 0); browse.AccessibleName = "Browse for the step's project folder";
             projRow.Controls.Add(sProject, 0, 0); projRow.Controls.Add(browse, 1, 0);
-            row(stepPanel, "Project", projRow);
-            sPrompt = new TextBox { Multiline = true, AcceptsReturn = true, ScrollBars = ScrollBars.Vertical, WordWrap = true, Height = S(150), Font = new Font("Consolas", Font.Size + 0.5f), AccessibleName = "Step prompt" };
-            row(stepPanel, "Prompt", sPrompt);
-            sConv = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, AccessibleName = "Conversation" };
+            row("Project", projRow, 0);
+            sPrompt = new TextBox { Multiline = true, AcceptsReturn = true, ScrollBars = ScrollBars.Vertical, WordWrap = true, AccessibleName = "Step prompt" };
+            sPrompt.Font = QTheme.Mono(Font);
+            promptRow = row("Prompt", sPrompt, 0);
+            stepPanel.RowStyles[promptRow].SizeType = SizeType.Percent; stepPanel.RowStyles[promptRow].Height = 100;
+            sConv = new QCombo { DropDownStyle = ComboBoxStyle.DropDownList, AccessibleName = "Conversation" };
             sConv.SelectedIndexChanged += (s, e) => { if (!loading) { Store(); Explain(); } };
-            row(stepPanel, "Conversation", sConv);
-            sSession = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, AccessibleName = "Existing conversation to continue" };
+            row("Conversation", sConv, S(8));
+            sSession = new QCombo { DropDownStyle = ComboBoxStyle.DropDownList, AccessibleName = "Existing conversation to continue" };
             sSession.SelectedIndexChanged += (s, e) => { if (!loading) Store(); };
-            row(stepPanel, "", sSession);
-            sHandoff = new CheckBox { Text = "Include a handoff from the previous step (its final response, project and run log)", AutoSize = true };
+            row(null, sSession, 0);
+            sHandoff = new QCheck { Text = "Include a handoff from the previous step", AccessibleDescription = "Its final response, project and run log." };
             sHandoff.CheckedChanged += (s, e) => { if (!loading) { Store(); Explain(); } };
-            row(stepPanel, "", sHandoff);
+            row(null, sHandoff, 0);
             convNote = new Wrap { ForeColor = QTheme.Muted };
-            row(stepPanel, "", convNote);
-            sReview = new CheckBox { Text = "Review before continuing (pause after this step and its commit)", AutoSize = true };
-            row(stepPanel, "Review", sReview);
-            sCommit = new CheckBox { Text = "Commit after this step", AutoSize = true };
+            row(null, convNote, 0);
+            sCommit = new QCheck { Text = "Commit after this step", Margin = new Padding(0, 0, S(16), 0) };
             sCommit.CheckedChanged += (s, e) => { if (!loading) { Store(); Explain(); } };
-            row(stepPanel, "Commit", sCommit);
-            sMessage = new TextBox { Multiline = true, AcceptsReturn = true, Height = S(48), AccessibleName = "Commit message" };
-            row(stepPanel, "Message", sMessage);
+            sReview = new QCheck { Text = "Review before continuing", Margin = new Padding(0), AccessibleDescription = "Pause after this step and its commit, until you continue the batch." };
+            tips.SetToolTip(sReview, sReview.AccessibleDescription);
+            var afterRow = new FlowLayoutPanel { AutoSize = true, WrapContents = true };   // wraps in a narrow window
+            afterRow.Controls.Add(sCommit); afterRow.Controls.Add(sReview);
+            row("After the step", afterRow, S(8));
+            afterRow.Dock = DockStyle.Fill;
+            sMessage = new TextBox { Multiline = true, AcceptsReturn = true, Height = S(46), AccessibleName = "Commit message" };
+            row("Message", sMessage, 0);
             commitInfo = new Wrap { ForeColor = QTheme.Muted };
-            row(stepPanel, "", commitInfo);
-            stepsBox.Controls.Add(left, 0, 0); stepsBox.Controls.Add(stepPanel, 1, 0);
-            var stepsHead = new Label { Text = "Steps (each starts only after the previous one, and its commit, succeeded)", AutoSize = true, Font = new Font(Font, FontStyle.Bold), Margin = new Padding(0, S(12), 0, S(4)) };
-            body.Controls.Add(stepsHead, 0, body.RowCount++); body.SetColumnSpan(stepsHead, 2);
-            body.Controls.Add(stepsBox, 0, body.RowCount++); body.SetColumnSpan(stepsBox, 2);
+            row(null, commitInfo, 0);
+            // after the layout pass (the Layout event comes before it, with the old row heights)
+            stepPanel.Layout += (s, e) => { if (!fitPending && IsHandleCreated) { fitPending = true; BeginInvoke((Action)(() => { fitPending = false; FitHost(); })); } };
+            stepHost.Controls.Add(stepPanel);
+            split.Panel2.Controls.Add(stepHost);
 
-            var bottom = new Panel { Dock = DockStyle.Bottom, AutoSize = true, Padding = new Padding(S(14), S(4), S(14), S(10)) };
+            // ---- footer ----
+            var bottom = new Panel { Dock = DockStyle.Bottom, AutoSize = true, Padding = new Padding(pad, S(8), pad, S(6)) };
+            bottom.Paint += (s, e) => { using (var p = new Pen(QTheme.Line)) e.Graphics.DrawLine(p, 0, 0, bottom.Width, 0); };
             error = new Wrap { ForeColor = QTheme.Red };
             var buttons = new FlowLayoutPanel { Dock = DockStyle.Top, FlowDirection = FlowDirection.RightToLeft, AutoSize = true };
             var cancel = QTheme.Btn("Cancel", (s, e) => Close());
             var save = QTheme.Btn("Save", (s, e) => Save());
+            cancel.MinimumSize = save.MinimumSize = new Size(S(84), 0);
             buttons.Controls.Add(cancel); buttons.Controls.Add(save);
+            save.TabIndex = 0; cancel.TabIndex = 1;   // left to right, though laid out right to left
+            buttons.Controls.Add(new Label { Text = "Ctrl+Enter saves", AutoSize = true, ForeColor = QTheme.Muted, Margin = new Padding(0, S(6), S(12), 0) });
             CancelButton = cancel;
             bottom.Controls.Add(buttons); bottom.Controls.Add(error);
-            Controls.Add(body); Controls.Add(bottom);
+
+            // Dock order: the last added docks first (outermost); the tab order follows reading order.
+            Controls.Add(area); Controls.Add(head); Controls.Add(top); Controls.Add(bottom);
+            top.TabIndex = 0; head.TabIndex = 1; area.TabIndex = 2; bottom.TabIndex = 3;
             QTheme.Style(this);
-            QTheme.Primary(save);
+            QTheme.FocusTint(this);
+            QTheme.Primary(save); save.Font = new Font(Font, FontStyle.Bold);
+            // the disclosure reads as a heading, not a button: no fill or border until it has the focus
+            permsToggle.BackColor = QTheme.Bg; permsToggle.FlatAppearance.BorderSize = 0; permsToggle.FlatAppearance.MouseOverBackColor = QTheme.Panel;
+            permsToggle.Padding = new Padding(0); permsToggle.Font = new Font(Font, FontStyle.Bold);
+            permsToggle.LostFocus += (s, e) => permsToggle.FlatAppearance.BorderSize = 0;
             if (work.Count == 0) work.Add(new BatchStep { Id = Guid.NewGuid().ToString("N") });
             cur = 0;
+            Summarize();
             Fill();
         }
 
         public List<BatchStep> Steps { get { Store(); return work; } }
+
+        protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+        {
+            if (keyData == (Keys.Control | Keys.Enter)) { Save(); return true; }
+            return base.ProcessCmdKey(ref msg, keyData);
+        }
+
+        void ShowPerms(bool open)
+        {
+            perms.Visible = open;
+            permsToggle.Text = (open ? "▾" : "▸") + permsToggle.Text.Substring(1);
+        }
+
+        void Summarize()
+        {
+            int n = 0;
+            foreach (var l in commands.Text.Split('\n')) if (l.Trim() != "") n++;
+            string m = Modes[Math.Max(0, mode.SelectedIndex)];
+            permsSummary.Text = Sched.ModeLabel(m) + (m == "plan" ? "" : "  ·  " + n + " allowed command" + (n == 1 ? "" : "s")) + (allowDelete.Checked ? "  ·  may delete files" : "");
+            permsToggle.AccessibleDescription = permsSummary.Text;
+        }
+
+        // The prompt takes the spare height; below its minimum the step's fields scroll (not the whole window).
+        void FitHost()
+        {
+            int[] h = stepPanel.GetRowHeights();
+            int need = S(130) + stepPanel.Padding.Vertical;
+            for (int i = 0; i < h.Length; i++) if (i != promptRow) need += h[i];
+            if (stepHost.AutoScrollMinSize.Height != need) stepHost.AutoScrollMinSize = new Size(0, need);
+        }
+
+        void UpdateTools()
+        {
+            bool has = cur >= 0 && cur < work.Count;
+            removeBtn.Enabled = has; upBtn.Enabled = has && cur > 0; downBtn.Enabled = has && cur < work.Count - 1;
+        }
+
+        // Two lines per step: number and title; then its project and what happens after it (commit, review).
+        void DrawStep(DrawItemEventArgs e)
+        {
+            if (e.Index < 0 || e.Index >= work.Count) return;
+            var g = e.Graphics; var r = e.Bounds; var st = work[e.Index];
+            bool sel = (e.State & DrawItemState.Selected) != 0;
+            using (var bg = new SolidBrush(sel ? QTheme.Select : stepList.BackColor)) g.FillRectangle(bg, r);
+            if (sel) using (var bar = new SolidBrush(stepList.Focused ? QTheme.Focus : QTheme.Accent)) g.FillRectangle(bar, r.X, r.Y, S(3), r.Height);
+            const TextFormatFlags f = TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding;
+            int lh = Font.Height, y = r.Y + (r.Height - 2 * lh - S(2)) / 2, x = r.X + S(10);
+            const TextFormatFlags m = TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.NoPadding;   // measuring with EndEllipsis comes out too narrow
+            int nw = TextRenderer.MeasureText(Math.Max(10, work.Count) + ".", Font, Size.Empty, m).Width + S(5);
+            TextRenderer.DrawText(g, (e.Index + 1) + ".", Font, new Rectangle(x, y, nw, lh), QTheme.Muted, f);
+            x += nw;
+            string title = st.Title != "" ? st.Title : st.Prompt != "" ? Sched.FirstLine(st.Prompt, 60) : "(new step)";
+            TextRenderer.DrawText(g, title, Font, new Rectangle(x, y, r.Right - x - S(6), lh), sel ? QTheme.SelectText : QTheme.Text, f);
+            int y2 = y + lh + S(2), right = r.Right - S(6);
+            foreach (var tag in new[] { st.Review ? "review" : null, st.Commit ? "commit" : null })
+            {
+                if (tag == null) continue;
+                int w = TextRenderer.MeasureText(tag, Font, Size.Empty, m).Width + S(10);
+                right -= w;
+                var pill = new Rectangle(right, y2, w, lh);
+                using (var pb = new SolidBrush(QTheme.Button)) g.FillRectangle(pb, pill);
+                TextRenderer.DrawText(g, tag, Font, pill, QTheme.Text, f | TextFormatFlags.HorizontalCenter);
+                right -= S(4);
+            }
+            string proj = st.Project != "" ? Batching.Name(st.Project) : "no project yet";
+            TextRenderer.DrawText(g, proj, Font, new Rectangle(x, y2, Math.Max(0, right - x - S(2)), lh), QTheme.Muted, f);
+        }
 
         string RepoOf(string folder)
         {
@@ -1469,6 +1616,7 @@ namespace ClaudeStatus
             if (cur >= 0 && cur < work.Count) stepList.SelectedIndex = cur;
             loading = false;
             ShowStep();
+            UpdateTools();
         }
 
         void ShowStep()
@@ -1500,6 +1648,7 @@ namespace ClaudeStatus
             s.Handoff = s.Conversation == "new" && cur > 0 && sHandoff.Checked;
             s.Review = sReview.Checked; s.Commit = sCommit.Checked; s.CommitMessage = sMessage.Text;
             if (cur < stepList.Items.Count && stepList.Items[cur].ToString() != ListText(cur, s)) { loading = true; stepList.Items[cur] = ListText(cur, s); loading = false; }
+            stepList.Invalidate();   // the drawn row also shows the project
         }
 
         // What the conversation and commit choices mean for this step, kept current as you edit.
@@ -1518,6 +1667,7 @@ namespace ClaudeStatus
                 foreach (var m in sessions) sSession.Items.Add(m.Display);
                 for (int i = 0; i < sessions.Count; i++) if (sessions[i].Id == s.ResumeSession) sSession.SelectedIndex = i;
             }
+            sHandoff.Visible = cur > 0;   // step 1 has nothing to hand off from
             sHandoff.Enabled = !cont && cur > 0;
             if (!sHandoff.Enabled) sHandoff.Checked = false;
             loading = false;
@@ -1526,19 +1676,24 @@ namespace ClaudeStatus
                 ? (cont ? "Step 1 continues the conversation you pick. When the batch starts it must belong to this project and not be open in another Claude Code session." : "Step 1 starts a new conversation.")
                 : cont ? (p != null && !Sched.SamePath(p.Project, s.Project)
                     ? "⚠ Step " + n + " runs in " + Batching.Name(p.Project) + ". A Claude Code conversation belongs to one folder, so a step that switches projects must start a fresh conversation. Choose Fresh conversation and tick the handoff to pass step " + n + "'s result along."
-                    : "Continues step " + n + "'s real Claude Code conversation (resumed by its session ID), in the same project folder.")
-                : "Fresh conversation" + (s.Handoff ? ". Its prompt starts with a handoff: step " + n + "'s final response (complete, or its last " + Batching.HandoffExcerpt.ToString("N0") + " characters, marked as shortened) and the path of a file holding the complete response, that step's prompt and its run log. Your prompt follows unchanged." : ". Tick the handoff to pass step " + n + "'s result along.");
-            sMessage.Enabled = s.Commit;
-            if (!s.Commit) { commitInfo.Text = "Off. While a batch is paused you can still review and commit by hand in the phone's Commit view."; return; }
+                    : "Continues step " + n + "'s real Claude Code conversation (resumed by its session ID), in the same project folder. The handoff is only for fresh conversations.")
+                : "Fresh conversation" + (s.Handoff ? ". Your prompt follows a handoff: step " + n + "'s final response (its last " + Batching.HandoffExcerpt.ToString("N0") + " characters if longer, marked as shortened) and the path of a file with the complete response, that step's prompt and its run log." : ". Tick the handoff to pass step " + n + "'s result along.");
+            QTheme.Dim(sMessage, !s.Commit);   // kept, not cleared, while Commit is off
+            commitInfo.AccessibleDescription = null; tips.SetToolTip(commitInfo, null);
+            if (!s.Commit) { commitInfo.Text = "No commit. While a batch is paused you can still review and commit by hand in the phone's Commit view."; return; }
             string top = RepoOf(s.Project);
             if (top == null) { commitInfo.Text = "⚠ " + (s.Project == "" ? "Choose the project first." : Batching.Name(s.Project) + " isn't in a Git repository, so it can't commit."); return; }
             var v = Git.Inspect(top);
             int staged = v.Files.FindAll(f => f.Staged).Count;
             string rel = Batching.RelTo(top, s.Project);
-            commitInfo.Text = "Commits in " + top + (v.Branch != "" && v.Branch != "(detached)" ? " on branch " + v.Branch : "") + " with your own Git and exactly this message (no AI attribution; hooks and signing as usual; never a push). " +
+            string full = "Commits in " + top + (v.Branch != "" && v.Branch != "(detached)" ? " on branch " + v.Branch : "") + " with your own Git and exactly this message (no AI attribution; hooks and signing as usual; never a push). " +
                 "It includes only files that change during this step" + (rel != "" ? " inside " + rel : "") + ". " +
                 (v.Files.Count > 0 ? "Right now " + v.Files.Count + " file" + (v.Files.Count == 1 ? " is" : "s are") + " already changed" + (staged > 0 ? " (" + staged + " staged)" : "") + ": they're left out, and if the step changes one of them again (or anything is staged) the commit pauses for you to pick the files. " : "The working tree is clean right now. ") +
                 "If nothing changed, it records \"No changes to commit\" and continues. Saving with this ticked authorizes this commit during the run.";
+            commitInfo.Text = "Commits in " + Batching.Name(top) + (v.Branch != "" && v.Branch != "(detached)" ? " on " + v.Branch : "") + " with this message, only files this step changes" + (rel != "" ? " inside " + rel : "") + "; never a push. " +
+                (v.Files.Count > 0 ? v.Files.Count + " file" + (v.Files.Count == 1 ? " is" : "s are") + " already changed" + (staged > 0 ? " (" + staged + " staged)" : "") + " and left out; if the step changes one again, the commit pauses for you to pick. " : "") +
+                "Saving with this ticked authorizes the commit.";
+            commitInfo.AccessibleDescription = full; tips.SetToolTip(commitInfo, full);
         }
 
         BatchDef Collect()
@@ -1555,8 +1710,7 @@ namespace ClaudeStatus
             foreach (var l in commands.Text.Split('\n')) if (l.Trim() != "") b.AllowCommands.Add(l.Trim());
             b.AllowDelete = allowDelete.Checked;
             b.Start = startAt.Checked ? "at" : "manual";
-            DateTime d = atDate.Value.Date, tm = atTime.Value;
-            b.RunAtUtc = startAt.Checked ? Sched.LocalToUtc(new DateTime(d.Year, d.Month, d.Day, tm.Hour, tm.Minute, 0), TimeZoneInfo.Local) : DateTime.MinValue;
+            b.RunAtUtc = startAt.Checked ? Sched.LocalToUtc(at.Value, TimeZoneInfo.Local) : DateTime.MinValue;
             b.Steps = new List<BatchStep>();
             foreach (var s in work) { var c = ser.Deserialize<BatchStep>(ser.Serialize(s)); if (c.Title == "") c.Title = Sched.FirstLine(c.Prompt, 60); b.Steps.Add(c); }
             return b;
@@ -1565,14 +1719,24 @@ namespace ClaudeStatus
         public bool Save()
         {
             var b = Collect();
+            if (b.Start == "at" && !at.Valid) { error.Text = "Enter the start date and time like " + DateTime.Now.Date.AddDays(1).AddHours(2).ToString("ddd d MMM yyyy") + " and " + DateTime.Today.AddHours(2).ToString("t") + ", or choose \"When I click Run now\"."; at.DateBox.Focus(); return false; }
             if (b.Start == "at" && b.RunAtUtc < DateTime.UtcNow.AddMinutes(-1)) { error.Text = "That start time has passed. Choose a later time, or \"When I click Run now\"."; return false; }
             string err = eng.SaveBatch(b, orig.Revision);
-            if (err != null) { error.Text = err; return false; }
+            if (err != null) { error.Text = err; Reveal(err); return false; }
             SavedId = b.Id;
             string warn = b.Start == "manual" ? eng.ValidateBatch(b) : null;
             if (warn != null && Visible) MessageBox.Show(this, "Saved. Before it can run: " + warn, "Batches", MessageBoxButtons.OK, MessageBoxIcon.Information);
             Close();
             return true;
+        }
+
+        // Shows where a save error points: that step, or the folded permissions.
+        void Reveal(string err)
+        {
+            var m = Regex.Match(err, @"^Step (\d+)");
+            int k = m.Success ? int.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture) - 1 : -1;
+            if (k >= 0 && k < work.Count && k != cur) { Store(); cur = k; Fill(); }
+            if (!m.Success && (err.Contains("rule") || err.Contains("command") || err.Contains("permission"))) ShowPerms(true);
         }
     }
 }
