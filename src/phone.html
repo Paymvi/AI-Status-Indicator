@@ -30,6 +30,7 @@
         <button type="button" id="view-git" class="seg" data-view="git" aria-pressed="false">Commit</button>
         <button type="button" id="view-cal" class="seg" data-view="cal" aria-pressed="false">Calendar</button>
         <button type="button" id="view-qn" class="seg" data-view="qn" aria-pressed="false">Questions</button>
+        <button type="button" id="view-pr" class="seg" data-view="pr" aria-pressed="false">Prompts</button>
       </div>
       <button type="button" id="gear" class="gear" aria-label="Display settings" aria-expanded="false" aria-controls="settings">
         <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" fill-rule="evenodd" d="M19 9.5L21.8 10L21.8 14L19 14.5L18.7 15.2L20.3 17.5L17.5 20.3L15.2 18.7L14.5 19L14 21.8L10 21.8L9.5 19L8.8 18.7L6.5 20.3L3.7 17.5L5.3 15.2L5 14.5L2.2 14L2.2 10L5 9.5L5.3 8.8L3.7 6.5L6.5 3.7L8.8 5.3L9.5 5L10 2.2L14 2.2L14.5 5L15.2 5.3L17.5 3.7L20.3 6.5L18.7 8.8ZM12 15.3a3.3 3.3 0 1 1 0-6.6a3.3 3.3 0 1 1 0 6.6Z"/></svg>
@@ -204,6 +205,14 @@
     </div>
     <div id="qn-banner" class="sched-warn qn-banner" role="alert" hidden></div>
     <div id="qn-body" class="qn-body"></div>
+  </section>
+  <section id="pr" class="sched" aria-label="Saved prompts" hidden>
+    <div class="sched-bar">
+      <input type="search" id="pr-search" class="sf-field pr-search" placeholder="Search prompts" aria-label="Search prompt titles and text" autocapitalize="off" autocomplete="off" spellcheck="false">
+      <button type="button" id="pr-refresh" class="usage-btn">Refresh</button>
+    </div>
+    <p id="pr-info" class="sched-info pr-info" role="status" aria-live="polite"></p>
+    <ul id="pr-list" class="pr-list"></ul>
   </section>
   <section id="git" class="sched" aria-label="Review changes and commit" hidden>
     <div class="sched-bar">

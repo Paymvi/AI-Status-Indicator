@@ -766,6 +766,7 @@ namespace ClaudeStatus
         // are verifiably on a prompt right now (rebuilt by every Reload; read from the phone server's thread too).
         readonly CalendarSource calendar;
         readonly QuestionnaireDesk questionnaires;
+        readonly PromptStore prompts;
         readonly CodexWatch codex;
         readonly System.Windows.Forms.Timer codexTimer;
         volatile HashSet<string> liveClaude = new HashSet<string>();
@@ -927,6 +928,7 @@ namespace ClaudeStatus
                 testMode ? Path.Combine(root, "answered") : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "Claude Status\\Questionnaires"));
             questionnaires.SetOutputDir(CfgStr("questionnaireOutputDir", ""));
             questionnaires.Changed += () => { var p = phone; if (p != null) p.Bump(); };
+            prompts = new PromptStore(Path.Combine(root, "state\\prompts.json"));   // the Prompts tab (prompts.cs)
 
             Reload();
             // Settings from the removed Compact view open in Status (the regular board).
@@ -1198,6 +1200,7 @@ namespace ClaudeStatus
                 p.Aliases = CfgDict("projectAliases");
                 p.Calendar = calendar;
                 p.Questionnaires = questionnaires;
+                p.Prompts = prompts;
                 if (p.Start()) { phone = p; phoneError = ""; phoneFailedPort = 0; return; }
                 phoneError = p.Error;
             }
@@ -1421,7 +1424,7 @@ namespace ClaudeStatus
             {
                 if (queueView == null)
                 {
-                    queueView = new QueueView(queue, scale, calendar, questionnaires) { Dock = DockStyle.Fill };
+                    queueView = new QueueView(queue, scale, calendar, questionnaires, prompts) { Dock = DockStyle.Fill };
                     queueView.Calendar.SetCategory = SetCategory;
                     queueView.Questionnaires.SetOutputDir = dir => SetCfg("questionnaireOutputDir", dir);
                     queueView.Questionnaires.GuidePath = Path.Combine(root, "QUESTIONNAIRE_GUIDE.md");

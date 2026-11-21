@@ -419,6 +419,8 @@ namespace ClaudeStatus
         readonly Control tasksArea, bannerArea;
         // The Questionnaires tab (questionnaire.cs): null without a desk.
         readonly QuestionnaireView questionnaires;
+        readonly Button promptsTab;
+        readonly PromptsView prompts;   // the Prompts tab (prompts.cs): null without a store
         int shownTab;
 
         int S(float v) { return (int)Math.Round(v * scale); }
@@ -426,7 +428,9 @@ namespace ClaudeStatus
         public QueueView(QueueEngine engine, float scale) : this(engine, scale, null, null) { }
         public QueueView(QueueEngine engine, float scale, CalendarSource calendarSource) : this(engine, scale, calendarSource, null) { }
 
-        public QueueView(QueueEngine engine, float scale, CalendarSource calendarSource, QuestionnaireDesk qnDesk)
+        public QueueView(QueueEngine engine, float scale, CalendarSource calendarSource, QuestionnaireDesk qnDesk) : this(engine, scale, calendarSource, qnDesk, null) { }
+
+        public QueueView(QueueEngine engine, float scale, CalendarSource calendarSource, QuestionnaireDesk qnDesk, PromptStore promptStore)
         {
             eng = engine;
             this.scale = scale;
@@ -441,7 +445,12 @@ namespace ClaudeStatus
             // ---- toolbar: New task (primary), pause/resume, at-a-glance summary and what runs next ----
             var top = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 2, Padding = new Padding(S(10), S(8), S(10), S(4)) };
             top.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize)); top.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            // Two groups that each stay on one line: the tabs, then New task / Pause. In a narrow window the second group
+            // wraps under the first and the summary moves below both (FitToolbar), so nothing is cut off.
             var buttons = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(0) };
+            var tabRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(0) };
+            var actRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(0) };
+            buttons.Controls.Add(tabRow); buttons.Controls.Add(actRow);
             newTask = QTheme.Primary(QTheme.Btn("+  New task", (s, e) => Edit(null)));
             pause = QTheme.Btn("⏸  Pause queue", (s, e) => eng.SetPaused(!eng.Data.Paused));
             if (calendarSource != null)
@@ -450,15 +459,21 @@ namespace ClaudeStatus
                 batchTab = QTheme.Btn("Batches", (s, e) => ShowTab(3));
                 calendarTab = QTheme.Btn("Calendar", (s, e) => ShowCalendar(true));
                 tasksTab.Margin = new Padding(0, 0, 0, S(6)); batchTab.Margin = new Padding(0, 0, 0, S(6)); calendarTab.Margin = new Padding(0, 0, S(14), S(6));
-                buttons.Controls.Add(tasksTab); buttons.Controls.Add(batchTab); buttons.Controls.Add(calendarTab);
+                tabRow.Controls.Add(tasksTab); tabRow.Controls.Add(batchTab); tabRow.Controls.Add(calendarTab);
                 if (qnDesk != null)
                 {
                     qnTab = QTheme.Btn("Questionnaires", (s, e) => ShowTab(2));
                     calendarTab.Margin = new Padding(0, 0, 0, S(6)); qnTab.Margin = new Padding(0, 0, S(14), S(6));
-                    buttons.Controls.Add(qnTab);
+                    tabRow.Controls.Add(qnTab);
+                }
+                if (promptStore != null)
+                {
+                    promptsTab = QTheme.Btn("Prompts", (s, e) => ShowTab(4));
+                    (qnTab ?? calendarTab).Margin = new Padding(0, 0, 0, S(6)); promptsTab.Margin = new Padding(0, 0, S(14), S(6));
+                    tabRow.Controls.Add(promptsTab);
                 }
             }
-            buttons.Controls.Add(newTask); buttons.Controls.Add(pause);
+            actRow.Controls.Add(newTask); actRow.Controls.Add(pause);
             var info = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.TopDown, WrapContents = false, Margin = new Padding(S(8), 0, 0, 0) };
             var line1 = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(0) };
             needsLabel = new Label { AutoSize = true, ForeColor = QTheme.Red, Font = bold, Margin = new Padding(0, S(1), 0, 0) };
@@ -467,6 +482,22 @@ namespace ClaudeStatus
             next = new Label { AutoSize = true, ForeColor = QTheme.Muted, Margin = new Padding(0, S(2), 0, 0) };
             info.Controls.Add(line1); info.Controls.Add(next);
             top.Controls.Add(buttons, 0, 0); top.Controls.Add(info, 1, 0);
+            // One line when the tabs, the actions and room for the summary fit; otherwise the actions wrap and the summary
+            // goes below. Re-checked as the window is resized.
+            bool narrowBar = false;
+            top.Resize += (s, e) =>
+            {
+                int avail = top.ClientSize.Width - top.Padding.Horizontal;
+                int full = tabRow.PreferredSize.Width + actRow.PreferredSize.Width + S(140);
+                bool narrow = full > avail;
+                buttons.WrapContents = narrow;
+                buttons.MaximumSize = narrow ? new Size(Math.Max(1, avail), 0) : Size.Empty;
+                if (narrow == narrowBar) return;
+                narrowBar = narrow;
+                top.SetCellPosition(info, narrow ? new TableLayoutPanelCellPosition(0, 1) : new TableLayoutPanelCellPosition(1, 0));
+                top.SetColumnSpan(info, narrow ? 2 : 1);
+                info.Margin = narrow ? new Padding(0, 0, 0, S(2)) : new Padding(S(8), 0, 0, 0);
+            };
 
             // ---- banner: paused / VS Code bridge missing / unreadable tasks file ----
             var bannerPanel = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 2, Padding = new Padding(S(10), S(6), S(10), S(6)), Visible = false, BackColor = QTheme.AttentionBg };
@@ -551,6 +582,11 @@ namespace ClaudeStatus
                     questionnaires = new QuestionnaireView(qnDesk, scale) { Dock = DockStyle.Fill, Visible = false };
                     Controls.Add(questionnaires);
                 }
+                if (promptsTab != null)
+                {
+                    prompts = new PromptsView(promptStore, scale) { Dock = DockStyle.Fill, Visible = false };
+                    Controls.Add(prompts);
+                }
             }
             Controls.Add(split);
             Controls.Add(bannerPanel);
@@ -561,7 +597,7 @@ namespace ClaudeStatus
             {
                 // the shown tab is drawn bold: both get room for that, so nothing shifts when you switch
                 var tabFont = new Font(SystemFonts.MessageBoxFont, FontStyle.Bold);
-                foreach (var b in qnTab != null ? new[] { tasksTab, calendarTab, qnTab, batchTab } : new[] { tasksTab, calendarTab, batchTab }) b.MinimumSize = new Size(TextRenderer.MeasureText(b.Text, tabFont).Width + S(18), pause.PreferredSize.Height);
+                foreach (var b in TabButtons()) if (b != null) b.MinimumSize = new Size(TextRenderer.MeasureText(b.Text, tabFont).Width + S(18), pause.PreferredSize.Height);
                 ShowCalendar(false);
             }
             newTask.MinimumSize = new Size(0, pause.PreferredSize.Height);
@@ -611,22 +647,27 @@ namespace ClaudeStatus
         public void ShowCalendar(bool on) { ShowTab(on ? 1 : 0); }
 
         public BatchView Batches { get { return batches; } }
+        public PromptsView Prompts { get { return prompts; } }
+
+        // Indexed by tab number; null where that tab isn't there.
+        Button[] TabButtons() { return new[] { tasksTab, calendarTab, qnTab, batchTab, promptsTab }; }
         public void SelectBatchRun(string id) { ShowTab(3); if (batches != null) batches.SelectRun(id); }
 
-        // 0 Tasks, 1 Calendar, 2 Questionnaires, 3 Batches.
+        // 0 Tasks, 1 Calendar, 2 Questionnaires, 3 Batches, 4 Prompts.
         public void ShowTab(int tab)
         {
-            if (calendar == null || (tab == 2 && questionnaires == null)) return;
+            if (calendar == null || (tab == 2 && questionnaires == null) || (tab == 4 && prompts == null)) return;
             shownTab = tab;
             calendar.Visible = tab == 1;
             if (questionnaires != null) questionnaires.Visible = tab == 2;
             batches.Visible = tab == 3;
+            if (prompts != null) prompts.Visible = tab == 4;
             tasksArea.Visible = tab == 0;
             if (tab != 0) bannerArea.Visible = false; else RefreshView();
             // the shown tab looks pressed (aria-pressed for screen readers comes from the name)
             // (selected, not the accent: + New task stays the one primary button)
-            var tabs = qnTab != null ? new[] { tasksTab, calendarTab, qnTab, batchTab } : new[] { tasksTab, calendarTab, null, batchTab };
-            var names = new[] { "Tasks", "Calendar", "Questionnaires", "Batches" };
+            var tabs = TabButtons();
+            var names = new[] { "Tasks", "Calendar", "Questionnaires", "Batches", "Prompts" };
             for (int i = 0; i < tabs.Length; i++)
             {
                 if (tabs[i] == null) continue;
@@ -638,6 +679,7 @@ namespace ClaudeStatus
             if (tab == 1) calendar.RefreshData();
             if (tab == 2) questionnaires.RefreshView();
             if (tab == 3) batches.RefreshView();
+            if (tab == 4) prompts.RefreshView();
         }
 
         public void SelectTask(string id)

@@ -361,6 +361,18 @@ Answer your AI assistant's clarification questions on your phone instead of edit
 - **One at a time.** Importing another replaces the active one after you confirm. The old one moves to the history folder (**Open history folder**) with its source and, if it had answers, a `.draft-answers.md`. A phone holding unsent answers to the old one keeps them (with *Copy those answers as text*) and never attaches them to the new one. **Remove…** retires the active one the same way.
 - Step-by-step instructions: [`questionnaires/README.md`](questionnaires/README.md). Format details, a full example and the rules the assistant follows for answers: [`QUESTIONNAIRE_GUIDE.md`](questionnaires/QUESTIONNAIRE_GUIDE.md), [`example.questionnaire.md`](questionnaires/example.questionnaire.md) (every input type), [`example-prompt.md`](questionnaires/example-prompt.md).
 
+## Prompts
+
+Save prompts you use often and copy them in one click. Queue window (☰◷) → **Prompts**.
+
+- **+ New prompt** (Ctrl+N) opens an editor with a title and a large multiline text box. Both are required. Ctrl+Enter or **Save** saves; Esc asks before throwing away changes. **Edit** and **Delete** are on each card. Delete asks first and can't be undone.
+- Each prompt is a card that starts collapsed, showing its title. Click the title (or Tab to it and press Enter/Space) to show the full text, and again to hide it. Several can be open at once. Line breaks and indentation are kept, and long lines wrap.
+- **Copy** is on every card, open or not. It copies the exact text and shows *Copied!* for a moment, without opening or closing the card. If another app is holding the clipboard, it says so and you can try again.
+- **Status dot**: the circle left of each title is your own marker. Click it (or Enter/Space) to go none → green → yellow → red → none. It's saved at once, never set by the app, and changing it doesn't move the prompt in the list. The phone shows it read-only.
+- **Search** (Ctrl+F) matches titles and prompt text. Esc clears it. Recently updated prompts are listed first.
+- **On the phone**: the **Prompts** view lists the same prompts, with their status dots, search, expand and **Copy**. It is read-only: add and edit prompts on the laptop.
+- Stored in the app's `state\prompts.json`. Saved prompts never run, get scheduled or get sent anywhere.
+
 ## Claude Usage
 
 See your Claude plan's usage limits without opening Claude Code and running `/usage`. A one-line strip under the Worker Board heading shows the account's limits; click it for the full breakdown.
@@ -1055,9 +1067,10 @@ src/
   vscode.cs              the app side of the VS Code bridge: window registry, window choice, requests (files only)
   vscode-bridge/         the Claude Status Bridge VS Code extension (extension.js) and install-bridge.ps1 (.vsix + install)
   phone.cs               optional phone dashboard server (127.0.0.1 only) + race-safe DONE dismissal
-  phone.html/.css/.js    the phone page (List, Creatures, Scheduled, Commit, Calendar and Questions views; the creature pixel art is drawn by phone.js)
+  phone.html/.css/.js    the phone page (List, Creatures, Scheduled, Commit, Calendar, Questions and Prompts views; the creature pixel art is drawn by phone.js)
   questionnaire.cs       Questionnaires: the v1 format parser and answered-file writer, the active questionnaire's drafts and
                          submissions (phone.cs /api/qn), and the desktop Questionnaires tab
+  prompts.cs             Prompts: the saved prompts store (state\prompts.json), the desktop Prompts tab and its editor
   calendar.cs            the Calendar: activity log, prompt runs from lifecycle events, Codex log reader, week layout,
                          and the desktop Calendar tab (the phone gets the same week from phone.cs /api/calendar)
   git.cs                 the phone's Commit view on the laptop: repository review, diffs, and the explicit commit & push

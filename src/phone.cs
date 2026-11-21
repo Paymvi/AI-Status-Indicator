@@ -27,6 +27,7 @@
 //   POST /api/queue {"op":"save"|"cancel"|"stop"}  schedule / edit a task, cancel one that hasn't started, or
 //                                         stop a running one: the desktop's own QueueEngine actions, run on its
 //                                         UI thread. Projects and tasks are named by tokens; never a path.
+//   GET  /api/prompts                     your saved prompts (prompts.cs): titles and text, to copy; read-only
 //   GET  /api/qn                          the active questionnaire (questionnaire.cs): its questions and the saved draft
 //   POST /api/qn {"op":"save"|"submit"}   save the phone's draft answers (revision-checked) / submit them: the laptop writes
 //                                         a NEW answered file in its own folder, and only then answers "delivered"
@@ -287,6 +288,7 @@ namespace ClaudeStatus
         public IDictionary<string, object> Aliases;           // "projectAliases", for friendly project names
         public CalendarSource Calendar;                       // the Calendar view's week (calendar.cs); null = not available
         public QuestionnaireDesk Questionnaires;              // the Questions view (questionnaire.cs); null = not available
+        public PromptStore Prompts;                           // the Prompts view (prompts.cs, read-only there); null = not available
         public string ClaudeProjectsDir = Sessions.ProjectsDir();
         readonly object opsGate = new object();
         readonly Dictionary<string, Dictionary<string, object>> queueOps = new Dictionary<string, Dictionary<string, object>>();   // request -> its answer (null = in progress)
@@ -625,6 +627,7 @@ namespace ClaudeStatus
                 if (req.Path == "/api/queue") { QueueGet(ns, req); return; }
                 if (req.Path == "/api/calendar") { CalendarGet(ns, req); return; }
                 if (req.Path == "/api/qn") { QnGet(ns, req); return; }
+                if (req.Path == "/api/prompts") { PromptsGet(ns, req); return; }
                 Text(ns, 404, "Not found");
                 return;
             }
@@ -635,7 +638,7 @@ namespace ClaudeStatus
             if (req.Method == "POST" && req.Path == "/api/focus") { FocusRequest(ns, req); return; }
             if (req.Method == "POST" && req.Path == "/api/usage-refresh") { UsageRefreshRequest(ns, req); return; }
             if (req.Method == "POST" && req.Path == "/api/push") { PushRequest(ns, req); return; }
-            if (req.Path == "/api/dismiss" || req.Path == "/api/focus" || req.Path == "/api/usage-refresh" || req.Path == "/api/push" || req.Path == "/api/git" || req.Path == "/api/queue" || req.Path == "/api/calendar" || req.Path == "/api/qn" || Pages.ContainsKey(req.Path) || req.Path == "/api/board") { Text(ns, 405, "Method not allowed"); return; }
+            if (req.Path == "/api/dismiss" || req.Path == "/api/focus" || req.Path == "/api/usage-refresh" || req.Path == "/api/push" || req.Path == "/api/git" || req.Path == "/api/queue" || req.Path == "/api/calendar" || req.Path == "/api/qn" || req.Path == "/api/prompts" || Pages.ContainsKey(req.Path) || req.Path == "/api/board") { Text(ns, 405, "Method not allowed"); return; }
             Text(ns, 404, "Not found");
         }
 
@@ -995,6 +998,18 @@ namespace ClaudeStatus
             var desk = Questionnaires;
             if (desk == null) { Json(ns, 503, "{\"result\":\"unavailable\"}"); return; }
             Json(ns, 200, new JavaScriptSerializer { MaxJsonLength = int.MaxValue }.Serialize(desk.PhoneData()));
+        }
+
+        // Your saved prompts, to read and copy on the phone: titles and text only, newest change first. Read-only.
+        void PromptsGet(NetworkStream ns, Request req)
+        {
+            string marker, site;
+            if (!req.Headers.TryGetValue("X-Claude-Status", out marker) || marker != "prompts" || (req.Headers.TryGetValue("Sec-Fetch-Site", out site) && site != "same-origin")) { Json(ns, 403, "{\"error\":\"forbidden\"}"); return; }
+            var store = Prompts;
+            if (store == null) { Json(ns, 503, "{\"result\":\"unavailable\"}"); return; }
+            var list = new List<object>();
+            foreach (var p in store.All()) list.Add(new Dictionary<string, object> { { "k", Token("r|" + p.Id) }, { "t", p.Title }, { "x", p.Text }, { "s", p.Status }, { "u", MsOr0(p.UpdatedUtc) } });
+            Json(ns, 200, new JavaScriptSerializer { MaxJsonLength = int.MaxValue }.Serialize(new Dictionary<string, object> { { "prompts", list } }));
         }
 
         void QnPost(NetworkStream ns, Request req)

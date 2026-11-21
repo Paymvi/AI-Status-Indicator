@@ -419,7 +419,7 @@
   var $ = function (id) { return document.getElementById(id); };
   var boardEl = $('board'), connEl = $('conn'), summaryEl = $('summary'), rowsEl = $('rows'), noteEl = $('note');
   var bannerEl = $('banner'), bannerTitle = $('banner-title'), bannerWhen = $('banner-when'), bannerWhy = $('banner-why');
-  var creaturesEl = $('creatures'), petsEl = $('pets'), hintEl = $('pet-hint'), viewBtns = [$('view-list'), $('view-creatures'), $('view-sched'), $('view-git'), $('view-cal'), $('view-qn')];
+  var creaturesEl = $('creatures'), petsEl = $('pets'), hintEl = $('pet-hint'), viewBtns = [$('view-list'), $('view-creatures'), $('view-sched'), $('view-git'), $('view-cal'), $('view-qn'), $('view-pr')];
   var schedEl = $('sched'), schedInfo = $('sched-info'), schedList = $('sched-list'), schedDetail = $('sched-detail'), schedBody = $('sched-body');
   var schedRefresh = $('sched-refresh'), schedBack = $('sched-back');
 
@@ -440,7 +440,7 @@
   // List (default) or Creatures; remembered in this browser only.
   var VIEW_KEY = 'claudeStatus.view';
   var view = 'list';
-  try { var v0 = localStorage.getItem(VIEW_KEY); if (v0 === 'creatures' || v0 === 'sched' || v0 === 'git' || v0 === 'cal' || v0 === 'qn') view = v0; } catch (e) { }
+  try { var v0 = localStorage.getItem(VIEW_KEY); if (v0 === 'creatures' || v0 === 'sched' || v0 === 'git' || v0 === 'cal' || v0 === 'qn' || v0 === 'pr') view = v0; } catch (e) { }
 
   // Creatures view options, each remembered in this browser only and off unless turned on: Compact (three
   // columns instead of two; unrelated to the desktop's Compact view) and Show context (a context-window
@@ -584,6 +584,10 @@
       rowEls = [];
       clearPets();
       qnRender(false);   // never rebuilt by a board update while you're on a question: your typing stays
+    } else if (full && view === 'pr') {
+      rowsEl.textContent = '';
+      rowEls = [];
+      clearPets();   // the prompts come from api/prompts (prLoad); a board update never rebuilds them
     } else if (full && view === 'cal') {
       rowsEl.textContent = '';
       rowEls = [];
@@ -1455,7 +1459,7 @@
       var done = r.workers.filter(function (w) { return w.s === 'DONE'; });
       if (r.n > 0 && !r.busy && done.length && gitSeen[r.path] !== r.sig && !(job && job.r === r.r)) items.push({ r: r, w: done[0] });
     });
-    offersEl.hidden = !items.length || view === 'git' || view === 'sched' || view === 'qn';
+    offersEl.hidden = !items.length || view === 'git' || view === 'sched' || view === 'qn' || view === 'pr';
     items.forEach(function (it) {
       var li = el('li', 'git-offer'), b = el('button', 'git-offer-open');
       b.type = 'button';
@@ -1788,7 +1792,7 @@
 
   // ---------- view switch ----------
   function setView(v, remember) {
-    view = v === 'creatures' || v === 'sched' || v === 'git' || v === 'cal' || v === 'qn' ? v : 'list';
+    view = v === 'creatures' || v === 'sched' || v === 'git' || v === 'cal' || v === 'qn' || v === 'pr' ? v : 'list';
     calEl.hidden = view !== 'cal';
     if (view !== 'cal') calSheet.hidden = true;
     if (view === 'cal' && Date.now() - calAt > 3000) loadCal();
@@ -1798,6 +1802,8 @@
     gitEl.hidden = view !== 'git';
     qnEl.hidden = view !== 'qn';
     if (view === 'qn') { qnRender(true); if (conn === 'live') qnLoad(); }
+    prEl.hidden = view !== 'pr';
+    if (view === 'pr') { prRender(); if (Date.now() - prAt > 3000) prLoad(); }
     gitShown = false;
     if (view === 'git' && !gitOpen && Date.now() - reposAt > 3000) loadRepos(false);
     creaturesEl.hidden = view !== 'creatures';
@@ -2971,6 +2977,83 @@
 
   $('qn-refresh').addEventListener('click', function () { qnErr = ''; qnLoad(); });
   window.addEventListener('pagehide', qnKeep);
+
+  // ---------- Prompts: your saved prompts, to copy (prompts.cs via api/prompts; added and edited on the laptop) ----------
+  var prEl = $('pr'), prList = $('pr-list'), prInfo = $('pr-info'), prSearch = $('pr-search');
+  var prs = null, prSig = '', prErr = '', prAt = 0, prBusy = false, prOpen = {};
+
+  function prLoad() {
+    if (prBusy) return;
+    prBusy = true; prAt = Date.now();
+    var c = new AbortController(), timer = setTimeout(function () { c.abort(); }, 15000);
+    fetch('api/prompts', { cache: 'no-store', credentials: 'same-origin', signal: c.signal, headers: { Accept: 'application/json', 'X-Claude-Status': 'prompts' } })
+      .then(function (r) { if (!r.ok) throw { status: r.status }; return r.json(); })
+      .then(function (d) {
+        if (!d || !Array.isArray(d.prompts)) throw { status: 0 };
+        var hadErr = prErr !== '';
+        prErr = '';
+        var sig = JSON.stringify(d.prompts);
+        if (sig === prSig && !hadErr) return false;   // unchanged: keep the page (and your focus) as it is
+        prSig = sig; prs = d.prompts; return true;
+      })
+      .catch(function (e) {
+        prErr = e && (e.status === 404 || e.status === 503) ? "The laptop's Claude Status is too old for Prompts: update it and restart it."
+          : e && e.status ? 'The laptop answered with an error (' + e.status + ').' : "Couldn't load your prompts: no answer from the laptop.";
+        return true;
+      })
+      .then(function (changed) { clearTimeout(timer); prBusy = false; if (changed && view === 'pr') prRender(); });
+  }
+  setInterval(function () { if (view === 'pr' && !document.hidden && conn === 'live' && Date.now() - prAt > 30000) prLoad(); }, 5000);
+
+  function prMatch(p, q) { return !q || p.t.toLowerCase().indexOf(q) >= 0 || p.x.toLowerCase().indexOf(q) >= 0; }
+
+  function prRender() {
+    var raw = prSearch.value.trim(), q = raw.toLowerCase();
+    prList.textContent = '';
+    if (!prs) { prInfo.textContent = prErr || 'Loading your prompts…'; return; }
+    var shown = prs.filter(function (p) { return prMatch(p, q); });
+    prInfo.textContent = (prErr ? prErr + ' Showing the last copy. ' : '') +
+      (!prs.length ? 'No saved prompts yet. Add them on the laptop: Queue window → Prompts → + New prompt.' : !shown.length ? 'No prompts match “' + raw + '”.' : '');
+    shown.forEach(function (p) {
+      var li = el('li', 'pr-card'), head = el('div', 'pr-head'), bodyId = 'pr-b-' + p.k;
+      var tog = el('button', 'pr-toggle'); tog.type = 'button';
+      tog.setAttribute('aria-controls', bodyId);
+      tog.appendChild(el('span', 'chev'));
+      var st = p.s === 'green' || p.s === 'yellow' || p.s === 'red' ? p.s : '';
+      var dot = el('span', 'pr-dot' + (st ? ' ' + st : '')); dot.setAttribute('role', 'img');   // your status (set on the laptop)
+      dot.setAttribute('aria-label', 'Status: ' + (st || 'none')); dot.title = 'Status: ' + (st || 'none') + ' (change it on the laptop)';
+      tog.appendChild(dot); tog.appendChild(el('span', 'pr-title', p.t));
+      var body = el('div', 'pr-body', p.x); body.id = bodyId;
+      function show() { var on = !!prOpen[p.k]; tog.setAttribute('aria-expanded', String(on)); body.hidden = !on; }
+      tog.addEventListener('click', function () { prOpen[p.k] = !prOpen[p.k]; show(); });
+      var cp = el('button', 'usage-btn pr-copy', 'Copy'); cp.type = 'button'; cp.setAttribute('aria-label', 'Copy ' + p.t);
+      cp.addEventListener('click', function () { prCopy(p.x, cp, li); });
+      head.appendChild(tog); head.appendChild(cp); li.appendChild(head); li.appendChild(body); prList.appendChild(li);
+      show();
+    });
+  }
+
+  // The Clipboard API needs a secure page (https); over plain http on the home network the older copy command
+  // still works on most phones. If neither does, the text is shown selected, to copy with the phone's own Copy.
+  function prCopy(text, btn, li) {
+    function done() { btn.textContent = 'Copied!'; clearTimeout(btn.prT); btn.prT = setTimeout(function () { btn.textContent = 'Copy'; }, 1500); }
+    function legacy() {
+      var ta = el('textarea'); ta.value = text; ta.readOnly = true; ta.style.position = 'fixed'; ta.style.top = '0'; ta.style.opacity = '0';
+      document.body.appendChild(ta); ta.select(); ta.setSelectionRange(0, text.length);
+      var ok = false; try { ok = document.execCommand('copy'); } catch (e) { }
+      document.body.removeChild(ta);
+      if (ok) { done(); return; }
+      var shown = li.querySelector('textarea') || li.appendChild(el('textarea', 'sf-prompt'));
+      shown.value = text; shown.readOnly = true; shown.setAttribute('aria-label', 'Prompt text to copy'); shown.focus(); shown.select();
+      note("This browser didn't allow copying. The text is selected below: copy it with your phone's Copy.");
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText && window.isSecureContext) navigator.clipboard.writeText(text).then(done, legacy);
+    else legacy();
+  }
+
+  prSearch.addEventListener('input', prRender);
+  prSearch.addEventListener('keydown', function (e) { if (e.key === 'Escape' && prSearch.value) { prSearch.value = ''; prRender(); } });
+  $('pr-refresh').addEventListener('click', function () { prErr = ''; prSig = ''; prLoad(); });
 
   applyPetOptions();
   setView(view, false);
